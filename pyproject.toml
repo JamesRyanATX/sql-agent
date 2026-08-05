@@ -1,0 +1,34 @@
+[project]
+name = "flyline"
+version = "0.1.0"
+description = "A self-optimizing SQL agent that gets cheaper every question"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "anthropic>=0.40",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.28.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# `live` tests call the Anthropic API and cost real tokens, so `make test`
+# stays fast and free. `make test-live` runs them.
+markers = ["live: hits the Anthropic API (costs tokens)"]
+addopts = "-m 'not live'"
+
+[tool.uv]
+package = false
