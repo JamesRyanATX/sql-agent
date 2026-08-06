@@ -51,12 +51,11 @@ for anything OpenAI-shaped (Ollama, vLLM, LM Studio).
 To re-record the demo above:
 
 ```bash
-make demo          # live take, 17-25 min of real model time
+make demo          # live take
 make demo-verify   # check the take from the turn table
 ```
 
-`make demo` needs [VHS](https://github.com/charmbracelet/vhs); if it isn't
-installed, the Makefile pulls it and its dependencies through `nix`.
+`make demo` needs [VHS](https://github.com/charmbracelet/vhs).
 
 ## Design
 
