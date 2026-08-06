@@ -18,20 +18,22 @@ hand-maintained.
 
 ## Measured
 
-End to end on `qwen3.6:27b-mlx`, from a cold cache:
+End to end on `claude-opus-5`, from a cold cache:
 
 | Turn | Explored | Tokens | Time | Answer |
 |---|---|---:|---:|---|
-| T1 — how many customers do we have? | 3 tool calls | **10,504** | 293s | 1,840 ✓ |
-| T2 — the same question again | **none** | **2,778** | 119s | 1,840 ✓ |
-| T3 — how many in the west region? | 2 tool calls | 8,423 | — | 460 ✓ |
+| T1 — how many customers do we have? | 5 tool calls | **11,505** | 34s | 1,840 ✓ |
+| T2 — the same question again | **none** | **371** | 8s | 1,840 ✓ |
+| T3 — how many in the west region? | **none** | 475 | 6s | 460 ✓ |
 
-T2 is the same question and the same answer, 3.8× cheaper. T3 had never been
-asked, and still costs less than T1, because the recipes T1 filed are enough to
-write the SQL without exploring again.
+T2 is the same question and the same answer, 31× cheaper. T3 had never been
+asked, and costs about the same as T2 — the recipes T1 filed are enough to
+write the SQL without exploring at all.
 
-These are local-model numbers, and the shape is unusual: nearly all the remaining
-cost is *output*, because a reasoning model bills its thinking as output.
+T1's cost is almost entirely input: 9,762 of its 11,505 tokens are tool
+results and schema from exploration. That's exactly what the cache erases —
+T2 and T3 skip exploration and pay only for the question and the cached
+findings.
 
 ## Quickstart
 
