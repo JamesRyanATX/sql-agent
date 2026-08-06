@@ -13,12 +13,28 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 
 _COLUMNS = """
     id, kind, name, claim, sql_fragment, tables, origin, pinned, disabled,
     tombstone, verified, hits, schema_fp, created_turn, last_used_turn
 """
+
+# Everything the agent has learned, as opposed to the business it answers
+# questions about. Two consumers with opposite needs, and one list because they
+# have to agree: `tools` hides these from introspection so the agent can't
+# explore its own memory, and `reset_learned` wipes exactly this set.
+#
+# Ordered rather than a set: `reset_learned` reports per-table counts, and a
+# stable order keeps that output the same every run.
+AGENT_TABLES: tuple[str, ...] = (
+    "cache_entry",
+    "turn",
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+)
 
 
 @dataclass(slots=True)
@@ -92,6 +108,38 @@ async def load_cache(conn: AsyncConnection) -> list[CacheEntry]:
         "WHERE NOT disabled ORDER BY hits DESC, id ASC"
     )
     return [CacheEntry.from_row(r) for r in await cur.fetchall()]
+
+
+async def count_disabled(conn: AsyncConnection) -> int:
+    """How many entries `load_cache` filtered out.
+
+    The one number a caller cannot derive from the entries themselves, and the
+    cache listing shows it so a disabled entry never goes quietly missing.
+    """
+    cur = await conn.execute("SELECT count(*) AS n FROM cache_entry WHERE disabled")
+    row = await cur.fetchone()
+    return row["n"] if row else 0
+
+
+async def stale_ids(
+    conn: AsyncConnection, entries: Sequence[CacheEntry]
+) -> set[int]:
+    """Which of these entries were learned against a schema that has since moved?
+
+    Recomputes `schema_fp` per entry and compares. An entry with no fingerprint
+    or no tables can't be checked, so it is never reported stale — silence here
+    means "unknown", not "fine", which is why `infer_tables` in the graph works
+    so hard to keep `tables` populated.
+
+    Reporting only, for now. §5's invalidation is phase 6 and will use this.
+    """
+    stale: set[int] = set()
+    for e in entries:
+        if e.id is None or not e.schema_fp or not e.tables:
+            continue
+        if await schema_fingerprint(conn, e.tables) != e.schema_fp:
+            stale.add(e.id)
+    return stale
 
 
 async def write_entries(
@@ -182,6 +230,38 @@ async def bump_hits(
 
 
 # --------------------------------------------------------------------- turns
+
+
+async def reset_learned(conn: AsyncConnection) -> dict[str, int]:
+    """Wipe every trace of what the agent has learned. Returns rows-per-table.
+
+    The stage recovery button (PLAN.md §9), and the only destructive operation
+    the API exposes. It takes the cache, the turn log *and* LangGraph's
+    checkpoints together: an empty cache beside a turn log that says the
+    questions were already asked is a state nothing knows how to read.
+
+    The business schema is not touched — that is `scripts/seed.py`'s to own.
+
+    Tolerant of tables that don't exist, so it stays usable on a database the
+    migrations haven't reached yet.
+    """
+    wiped: dict[str, int] = {}
+    for table in AGENT_TABLES:
+        cur = await conn.execute("SELECT to_regclass(%s) AS oid", (f"public.{table}",))
+        row = await cur.fetchone()
+        if row is None or row["oid"] is None:
+            continue
+        cur = await conn.execute(
+            sql.SQL("SELECT count(*) AS n FROM {}").format(sql.Identifier(table))
+        )
+        row = await cur.fetchone()
+        wiped[table] = row["n"] if row else 0
+        await conn.execute(
+            sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+                sql.Identifier(table)
+            )
+        )
+    return wiped
 
 
 async def start_turn(

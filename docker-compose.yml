@@ -18,5 +18,38 @@ services:
       timeout: 3s
       retries: 30
 
+  api:
+    build: .
+    container_name: sql-agent-api
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      # Optional, so `make up` works on a fresh clone before .env is copied.
+      - path: .env
+        required: false
+    environment:
+      # Overrides .env, which points at localhost for the host-side scripts.
+      # In here, localhost is this container.
+      DATABASE_URL: postgresql://sql_agent:sql_agent@db:5432/sql_agent
+      # ANTHROPIC_API_KEY is deliberately NOT forwarded from the host shell.
+      # `environment` beats `env_file`, so a passthrough would let a stale key
+      # exported in some terminal silently override the one in .env — measured:
+      # a valid key in .env, a dead key in the shell, and every turn returning
+      # 401 with .env looking correct. The container's key comes from .env.
+    ports:
+      - "8000:8000"
+    volumes:
+      # The dev loop: edit app/ on the host, uvicorn --reload restarts in place.
+      # Only a dependency change needs `docker compose build`.
+      - ./app:/srv/app
+    healthcheck:
+      # So `make up`'s --wait covers the API too, not just Postgres.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   sql-agent-pgdata:

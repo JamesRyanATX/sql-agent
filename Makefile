@@ -1,8 +1,10 @@
-.PHONY: up down dev migrate seed reset test psql logs demo demo-verify
+.PHONY: up down build migrate seed reset test psql logs logs-db logs-api \
+        health demo demo-verify
 
 SHELL := /bin/bash
 DC ?= docker compose
 PSQL = $(DC) exec -T db psql -U sql_agent -d sql_agent -v ON_ERROR_STOP=1
+API ?= http://localhost:8000
 
 # VHS needs ttyd and ffmpeg on PATH. Prefer a system install; otherwise pull all
 # three through nix so recording needs nothing installed permanently.
@@ -11,20 +13,31 @@ VHS ?= $(shell command -v vhs 2>/dev/null || \
 
 # --- core: environment, migrations, tests ----------------------------------
 
-up:  ## start postgres and wait for it to accept connections
+up:  ## start postgres and the API, and wait until both are healthy
 	$(DC) up -d --wait
 
 down:
 	$(DC) down
 
+build:  ## rebuild the API image — only needed when dependencies change
+	$(DC) build api
+
 logs:
+	$(DC) logs -f
+
+logs-db:
 	$(DC) logs -f db
+
+logs-api:  ## the reload log lives here — an edit to app/ restarts in place
+	$(DC) logs -f api
+
+health:  ## is the API up? every script needs it to be
+	@curl -fsS $(API)/health || { \
+	  echo "no API at $(API) — start it with 'make up'"; exit 1; }
+	@echo
 
 psql:
 	$(DC) exec db psql -U sql_agent -d sql_agent
-
-dev:  ## run the API with reload
-	uv run uvicorn app.main:app --reload --port 8000
 
 migrate:  ## apply migrations/*.sql in filename order
 	@shopt -s nullglob; \
@@ -63,7 +76,7 @@ turns:  ## tokens per turn — the demo chart, as a table
 	  tokens_in + tokens_out AS tokens, latency_ms / 1000 AS secs \
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
 
-demo:  ## record the terminal demo — live, 17-25 min of real model time
+demo: health  ## record the terminal demo — live, 17-25 min of real model time
 	$(VHS) demo/demo.tape
 
 demo-verify:  ## did the last take earn its place? read it from the turn table

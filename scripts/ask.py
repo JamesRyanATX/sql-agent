@@ -2,19 +2,17 @@
 
     uv run python -m scripts.ask "how many customers do we have?"
 
+Needs the API up (`make up`). The turn runs in the server — this is a renderer
+for the event stream, so what you see here is what any client sees.
+
 This is how the phase-3 gate gets checked: if T1 lands under ~3,000 tokens the
 delta won't sell and the schema needs more decoys.
 """
 
-import asyncio
 import json
 import sys
-from uuid import uuid4
 
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-from app import db
-from app.graph import build_graph, stream_turn
+from scripts import _client
 
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 
@@ -67,20 +65,13 @@ def show(ev: dict) -> None:
 
 async def main() -> None:
     question = " ".join(sys.argv[1:]) or "how many customers do we have?"
-    session = str(uuid4())
-
-    pool = await db.open_pool()
-    checkpointer = AsyncPostgresSaver(pool)
-    await checkpointer.setup()
-    graph = build_graph(checkpointer)
 
     out(f"{BOLD}? {question}{RESET}\n")
-    try:
-        async for ev in stream_turn(graph, session, question):
-            show(ev)
-    finally:
-        await db.close_pool()
+    # No session_id: the server mints one per turn, which is what a one-shot
+    # CLI question wants. Turns share the cache regardless — that is the point.
+    async for ev in _client.stream_events("/v1/ask", {"question": question}):
+        show(ev)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _client.run(main())

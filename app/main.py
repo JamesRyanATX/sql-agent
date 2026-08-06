@@ -1,14 +1,16 @@
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from pydantic import BaseModel, Field
 
 from app import db
-from app.events import sse
-from app.graph import build_graph, stream_turn
+from app.api import router as v1
+from app.graph import build_graph
+from app.settings import settings
+
+log = logging.getLogger(__name__)
 
 
 @contextlib.asynccontextmanager
@@ -16,7 +18,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await db.open_pool()
     checkpointer = AsyncPostgresSaver(pool)
     await checkpointer.setup()  # idempotent; creates the checkpoint tables
+
+    # Built once and shared: the graph, the pool and the checkpointer exist in
+    # this process only, which is the whole reason the scripts go through HTTP.
     app.state.graph = build_graph(checkpointer)
+
+    if not settings().api_token:
+        # An unauthenticated DELETE /v1/cache wipes everything the agent has
+        # learned, so this should never be a surprise.
+        log.warning("API_TOKEN is unset — /v1 is open and unauthenticated")
+
     try:
         yield
     finally:
@@ -24,40 +35,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="sql-agent", lifespan=lifespan)
-
-
-class AskBody(BaseModel):
-    session_id: str = Field(..., description="stable per conversation")
-    question: str
+app.include_router(v1)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Unversioned and unauthenticated, so a load balancer can reach it."""
     async with db.connection() as conn:
         cur = await conn.execute("SELECT 1 AS ok")
         await cur.fetchone()
     return {"status": "ok"}
-
-
-@app.post("/ask")
-async def ask(req: Request, body: AskBody) -> StreamingResponse:
-    graph = req.app.state.graph
-
-    async def gen():
-        async for ev in stream_turn(graph, body.session_id, body.question):
-            # Without this a closed tab leaves the graph running and burning
-            # tokens with nobody watching.
-            if await req.is_disconnected():
-                break
-            yield sse(ev)
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            # Without this nginx buffers the whole stream and the live demo
-            # looks frozen until the turn finishes.
-            "X-Accel-Buffering": "no",
-        },
-    )

@@ -55,7 +55,7 @@ flowchart TD
 ## Quickstart
 
 ```bash
-make up && make migrate && make seed   # postgres, schema, 2,000 customers
+make up && make migrate && make seed   # postgres + API, schema, 2,000 customers
 make t1                                # ask the first question
 make cache                             # what it learned, as the model sees it
 make turns                             # tokens per turn
@@ -64,6 +64,25 @@ make turns                             # tokens per turn
 Copy `.env.example` to `.env` and pick a provider: `PROVIDER=anthropic` for the
 demo model, or `PROVIDER=openai_compat` with `OPENAI_BASE_URL` / `OPENAI_MODEL`
 for anything OpenAI-shaped (Ollama, vLLM, LM Studio).
+
+## API
+
+The agent runs behind one server, and `make t1` / `make cache` / `make reset`
+are terminal renderers for these endpoints — there is no second code path.
+
+```
+POST   /v1/ask      one turn, streamed as SSE
+GET    /v1/cache    what the agent has learned, exactly as the model reads it
+DELETE /v1/cache    forget all of it — cache, turn log, checkpoints
+GET    /health      unversioned and open, for a load balancer
+```
+
+Everything under `/v1` takes `Authorization: Bearer $API_TOKEN`. Leaving
+`API_TOKEN` unset leaves it open, which the server warns about at startup.
+
+`make up` starts Postgres and the API together, with `app/` mounted and
+`--reload` — an edit restarts the server in place, and only a dependency change
+needs `make build`.
 
 To re-record the demo above:
 

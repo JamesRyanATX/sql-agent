@@ -10,6 +10,14 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://sql_agent:sql_agent@localhost:5432/sql_agent"
 
+    # --- the API, and the scripts that talk to it --------------------------
+    # Everything under /v1 requires this token. Empty disables enforcement,
+    # which is what tests and a first `make up` run on; the server says so
+    # at startup rather than leaving it silent.
+    api_token: str = ""
+    # Where scripts/* look for the server. Not read by the server itself.
+    api_url: str = "http://localhost:8000"
+
     # "anthropic" is the demo model. "openai_compat" points at any OpenAI-shaped
     # endpoint (Ollama, vLLM, LM Studio) for local development.
     provider: str = "anthropic"

@@ -22,17 +22,12 @@ from typing import Any
 
 from psycopg import AsyncConnection, sql
 
+from app.store import AGENT_TABLES as _AGENT_TABLES
+
 # The agent's memory is not part of the business it's answering questions about.
-AGENT_TABLES = frozenset(
-    {
-        "cache_entry",
-        "turn",
-        "checkpoints",
-        "checkpoint_blobs",
-        "checkpoint_writes",
-        "checkpoint_migrations",
-    }
-)
+# Defined in `store`, which also wipes exactly this set — the list has to be one
+# list, or a table added to the reset would stay visible to introspection.
+AGENT_TABLES = frozenset(_AGENT_TABLES)
 
 SAMPLE_LIMIT = 12
 

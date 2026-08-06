@@ -301,6 +301,12 @@ Two things that bite: `X-Accel-Buffering: no`, or nginx holds the stream until
 completion and the live demo looks frozen; and the disconnect check, or a closed
 tab leaves the graph running.
 
+**As shipped**, this is `POST /v1/ask` behind a bearer token, and it is the only
+way to run a turn — `scripts/*` are HTTP clients of it rather than a second
+implementation, so the code path the demo exercises is the one a user gets. The
+cache surface below landed alongside it as `GET`/`DELETE /v1/cache`; the rest of
+§6.2 is still outstanding.
+
 ### 6.2 Admin
 
 The cache is the product, so it gets a real surface.
@@ -462,8 +468,10 @@ Repo skeleton and a running loop, nothing intelligent.
 - Spike a two-node LangGraph with `AsyncPostgresSaver` (`await saver.setup()`)
   and stream one `custom` event out over SSE
 
-**Exit:** `make up && make dev`, then `curl -N localhost:8000/ask` streams events
+**Exit:** `make up`, then `curl -N localhost:8000/v1/ask` streams events
 from a trivial graph and terminates cleanly on client disconnect. ✅ Done.
+(The endpoint was `/ask` and `make dev` ran a host-side uvicorn until the API
+was containerized; `make up` now starts it with reload.)
 
 ### Phase 1 — Business schema, seed, and the five traps
 

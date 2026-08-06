@@ -19,10 +19,13 @@ migrations and seed.
 import asyncio
 import os
 import pathlib
+from collections.abc import AsyncIterator
 
 import psycopg
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from app.main import app
 from app.settings import Settings, settings
 
 TEST_DB = "sql_agent_test"
@@ -53,8 +56,14 @@ def test_database() -> str:
 
     # Point everything at it *before* any app module resolves settings.
     os.environ["DATABASE_URL"] = test_url
+    # Same reasoning as the database: whatever is in the developer's .env must
+    # not change what the suite tests. An API_TOKEN there would otherwise make
+    # every /v1 call 401 on one machine and pass on another. The auth tests set
+    # it explicitly.
+    os.environ["API_TOKEN"] = ""
     settings.cache_clear()
     assert settings().database_url == test_url
+    assert settings().api_token == ""
 
     from scripts.seed import main as seed
 
@@ -63,3 +72,16 @@ def test_database() -> str:
     yield test_url
 
     settings.cache_clear()
+
+
+@pytest.fixture
+async def client() -> AsyncIterator[AsyncClient]:
+    """The app, over ASGI. No server and no container — the routes run in-process.
+
+    Runs the lifespan, so `app.state.graph`, the pool and the checkpointer exist
+    exactly as they do in production.
+    """
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c

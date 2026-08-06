@@ -3,20 +3,10 @@
 Requires Postgres up (`make up`).
 """
 
-import httpx
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 from app.events import to_events
-from app.main import app
-
-
-@pytest.fixture
-async def client():
-    async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            yield c
 
 
 async def test_health(client: AsyncClient):
@@ -31,9 +21,10 @@ async def test_ask_streams_answer_then_done(client: AsyncClient):
         "session_id": "33333333-3333-3333-3333-333333333333",
         "question": "how many customers do we have?",
     }
-    async with client.stream("POST", "/ask", json=body) as resp:
+    async with client.stream("POST", "/v1/ask", json=body) as resp:
         assert resp.status_code == 200
         assert resp.headers["x-accel-buffering"] == "no"
+        assert resp.headers["x-session-id"] == body["session_id"]
         text = "".join([chunk async for chunk in resp.aiter_text()])
 
     types = [
