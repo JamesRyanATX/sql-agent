@@ -39,6 +39,8 @@ def show(ev: dict) -> None:
     elif kind == "learned":
         out(f"\n{BOLD}learned{RESET} {ev['count']} entries"
             + (f" ({ev['skipped']} skipped)" if ev["skipped"] else ""))
+        if ev.get("failed"):
+            out(f"\033[31m  extraction failed: {ev['failed']}{RESET}")
         for e in ev["entries"]:
             tick = "\033[32m✓\033[0m" if e["verified"] else " "
             label = f"{e['name']}: " if e["name"] else ""

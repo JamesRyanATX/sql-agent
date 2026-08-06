@@ -171,6 +171,7 @@ PLAN_SCHEMA = {
         },
     },
     "required": ["sufficient", "used", "missing"],
+    "additionalProperties": False,
 }
 
 SQL_SCHEMA = {
@@ -208,10 +209,12 @@ EXTRACT_SCHEMA = {
                     "tables": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["kind", "name", "claim", "tables"],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["entries"],
+    "additionalProperties": False,
 }
 
 FIX_SCHEMA = {
