@@ -9,6 +9,8 @@ PSQL = $(DC) exec -T db psql -U sql_agent -d sql_agent -v ON_ERROR_STOP=1
 VHS ?= $(shell command -v vhs 2>/dev/null || \
          echo 'nix shell nixpkgs#vhs nixpkgs#ttyd nixpkgs#ffmpeg -c vhs')
 
+# --- core: environment, migrations, tests ----------------------------------
+
 up:  ## start postgres and wait for it to accept connections
 	$(DC) up -d --wait
 
@@ -17,6 +19,9 @@ down:
 
 logs:
 	$(DC) logs -f db
+
+psql:
+	$(DC) exec db psql -U sql_agent -d sql_agent
 
 dev:  ## run the API with reload
 	uv run uvicorn app.main:app --reload --port 8000
@@ -44,6 +49,8 @@ test:
 test-live:  ## includes tests that call the Anthropic API and cost tokens
 	uv run pytest -q -m live
 
+# --- demo: presentation & recording -----------------------------------------
+
 t1:  ## ask the cold-path question and print the token cost
 	uv run python -m scripts.ask "how many customers do we have?"
 
@@ -55,9 +62,6 @@ turns:  ## tokens per turn — the demo chart, as a table
 	  explored, tool_calls AS tools, cache_entries AS cached, \
 	  tokens_in + tokens_out AS tokens, latency_ms / 1000 AS secs \
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
-
-psql:
-	$(DC) exec db psql -U sql_agent -d sql_agent
 
 demo:  ## record the terminal demo — live, 17-25 min of real model time
 	$(VHS) demo/demo.tape

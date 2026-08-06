@@ -34,6 +34,24 @@ has never been asked, which get answered by composing what earlier turns found.
 What accumulates is a semantic layer, derived from exploration rather than
 hand-maintained.
 
+#### The turn graph
+
+```mermaid
+flowchart TD
+    START([start]) --> load_cache
+    load_cache --> plan
+    plan -- cache sufficient --> execute
+    plan -- cache insufficient --> explore
+    explore --> generate_sql
+    generate_sql --> execute
+    execute -- error, attempts left --> fix
+    fix --> execute
+    execute -- error, attempts exhausted --> answer
+    execute -- ok --> extract
+    extract --> answer
+    answer --> END([end])
+```
+
 ## Quickstart
 
 ```bash
@@ -56,6 +74,20 @@ make demo-verify   # check the take from the turn table
 
 `make demo` needs [VHS](https://github.com/charmbracelet/vhs).
 
+## Project Layout
+
+- `app/`, `scripts/ask.py` / `cache.py` / `reset.py`, `migrations/002_cache.sql`,
+  `tests/` — the agent itself: the LangGraph turn pipeline, CLI entry points,
+  the cache/turn schema, and the Postgres-backed test suite.
+- `migrations/001_business.sql` + `scripts/seed.py` — the reference business
+  schema and its deterministic seed data (~40 tables, 5 intentional "traps").
+  This is the sandbox the agent explores; the same dataset backs both the
+  demo and `tests/test_traps.py`.
+- `demo/` — the conference recording: `demo.tape` (VHS script), `ask.sh` (the
+  wrapper it drives), and the rendered `demo.gif` embedded above.
+- `PLAN.md` — the original design document and phase-by-phase build plan.
+  Kept for provenance; not required reading to run or extend the agent.
+
 ## Design
 
-See [PLAN.md](PLAN.md) for architecture details and the implementation plan from Claude.
+See [PLAN.md](PLAN.md) for architecture details and the build plan.
