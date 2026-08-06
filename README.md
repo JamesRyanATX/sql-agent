@@ -58,5 +58,4 @@ make demo-verify   # check the take from the turn table
 
 ## Design
 
-[PLAN.md](PLAN.md) has the architecture, the graph, the traps in the seed
-schema, the phase status, and the measurements behind the table above.
+See [PLAN.md](PLAN.md) for architecture details and the implementation plan from Claude.
