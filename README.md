@@ -26,14 +26,11 @@ End to end on `claude-opus-5`, from a cold cache:
 | T2 — the same question again | **none** | **371** | 8s | 1,840 ✓ |
 | T3 — how many in the west region? | **none** | 475 | 6s | 460 ✓ |
 
-T2 is the same question and the same answer, 31× cheaper. T3 had never been
-asked, and costs about the same as T2 — the recipes T1 filed are enough to
-write the SQL without exploring at all.
+T1 primes the agent's memory.
 
-T1's cost is almost entirely input: 9,762 of its 11,505 tokens are tool
-results and schema from exploration. That's exactly what the cache erases —
-T2 and T3 skip exploration and pay only for the question and the cached
-findings.
+T2 is the same question and the same answer, but cheaper now. 
+
+T3 had never been asked, but costs about the same as T2.
 
 ## Quickstart
 
