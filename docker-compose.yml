@@ -1,20 +1,22 @@
+name: sql-agent
+
 services:
   db:
     image: postgres:15-alpine
-    container_name: flyline-db
+    container_name: sql-agent-db
     environment:
-      POSTGRES_USER: flyline
-      POSTGRES_PASSWORD: flyline
-      POSTGRES_DB: flyline
+      POSTGRES_USER: sql_agent
+      POSTGRES_PASSWORD: sql_agent
+      POSTGRES_DB: sql_agent
     ports:
       - "5432:5432"
     volumes:
-      - flyline-pgdata:/var/lib/postgresql/data
+      - sql-agent-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flyline -d flyline"]
+      test: ["CMD-SHELL", "pg_isready -U sql_agent -d sql_agent"]
       interval: 2s
       timeout: 3s
       retries: 30
 
 volumes:
-  flyline-pgdata:
+  sql-agent-pgdata:

@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await db.close_pool()
 
 
-app = FastAPI(title="flyline", lifespan=lifespan)
+app = FastAPI(title="sql-agent", lifespan=lifespan)
 
 
 class AskBody(BaseModel):

@@ -1,5 +1,5 @@
 [project]
-name = "flyline"
+name = "sql-agent"
 version = "0.1.0"
 description = "A self-optimizing SQL agent that gets cheaper every question"
 requires-python = ">=3.12"

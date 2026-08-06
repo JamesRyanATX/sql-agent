@@ -15,9 +15,9 @@ The demo is a token counter going down.
 > **T2:** how many customers do we have? → cheap
 > **T3:** how many customers in the west region? → also cheap
 
-T2 is the headline: same question, same answer, several times cheaper. T3 is the
-proof it isn't a lookup table — a question never asked before, answered from
-what earlier turns learned.
+T2 is the same question and the same answer, several times cheaper. T3 is a
+question never asked before, answered from what earlier turns learned rather
+than from a stored result.
 
 **Measured** end to end on `qwen3.6:27b-mlx`, cold cache, phase 5 complete:
 
@@ -29,7 +29,7 @@ what earlier turns learned.
 
 **3.8× on T2**, and T3 — a question never asked — costs less than T1 because
 `plan` names the gap and `explore` goes straight to it. The curve bumps rather
-than resetting, which is the §9 beat-5 property.
+than resetting, which is what §9 step 5 shows.
 
 These are local-model numbers and the shape is unusual: nearly all the remaining
 cost is *output*, because a reasoning model's thinking bills as output. Opus 5's
@@ -40,8 +40,8 @@ Nothing here needs ground truth, a judge model, or a human labeling anything.
 The metric is tokens, and the database is the only oracle required.
 
 **On the exact numbers.** Earlier drafts asserted 8,400 → 400 tokens. The
-measured ratio is 3.8×, not 20×, and the reason is worth knowing: the cached
-turn's cost is almost entirely *output*, not the cached input. Three things got
+measured ratio is 3.8×, not 20×. The cached turn's cost is almost entirely
+*output*, not the cached input. Three things got
 it from 1.5× **worse** than T1 to 3.8× better, none of which was adding decoys:
 
 1. **Per-node `effort` actually applied** (it was Anthropic-only, so the local
@@ -77,10 +77,9 @@ rows.
 assembled — no exploration needed, even though the question is new. That's the
 mechanism behind T3, and it's why this isn't memoization.
 
-It's also the strongest framing for the talk: **the agent is deriving a semantic
-layer from exploration.** Every data team in the room hand-maintains one of
-these in dbt or their BI tool. Watching it accumulate from questions instead of
-from a quarter of modeling work is the argument.
+What accumulates is a semantic layer, derived from exploration rather than
+hand-maintained. The same definitions usually live in dbt or a BI tool and are
+written by people.
 
 ---
 
@@ -141,16 +140,16 @@ Two invariants the store layer enforces rather than the schema:
   can duplicate; that's what compaction is for.
 - **A human's `pinned` entry is never overwritten by an extraction.** §6.2's
   whole argument is that correcting a recipe fixes every future question that
-  composes it — an extraction quietly reverting that on the next turn would be
-  the worst bug this system can have.
+  composes it, so an extraction reverting that on the next turn would undo the
+  correction silently.
 
 ### 3.2 The business schema
 
 Two properties matter.
 
 **Wide, not deep.** ~40 tables, of which 4 are relevant. Exploration has to
-genuinely *search*, or T1 isn't expensive enough for the delta to sell. This is
-also true to life — nobody's warehouse has four tables.
+genuinely *search*, or T1 is too cheap for the difference to be visible. It is
+also closer to a real warehouse than four tables would be.
 
 **Booby-trapped**, so exploration produces recipes worth reading:
 
@@ -165,11 +164,11 @@ order_item(order_id, product_id, qty, price)        -- historical unit price
 Five traps: soft deletes, `region` casing, `status = 'cancelled'`, historical
 `order_item.price` vs `product.unit_price`, and `created` vs `created_at`.
 
-Trap 1 fires on the most obvious question anyone can ask, which is what makes
-T1 a real investigation rather than a formality.
+Trap 1 fires on the most obvious question anyone can ask, so T1 has to actually
+investigate.
 
 Seed targets: 2,000 customers, 160 soft-deleted → **1,840 active**. That number
-is the answer to beat 1 of the demo, so it's fixed and deterministic.
+is the answer to step 1 of the demo, so it's fixed and deterministic.
 
 ---
 
@@ -196,7 +195,7 @@ turn. It fits in context; retrieval would only add a way to miss the entry you
 needed.
 
 **`plan`** — one cheap call. Can this question be answered from what's cached?
-**This node is the whole product** — it's the branch that makes T2 cheap.
+This is the branch that makes T2 cheap.
 
 > **Amendment (was two nodes).** Earlier drafts routed
 > `plan → generate_sql` as two separate calls on the cached path, each
@@ -204,8 +203,8 @@ needed.
 > sufficient to *answer*, it is sufficient to write the SQL. So `plan` emits a
 > single structured response: `{sufficient: true, sql: "..."}` and the graph
 > edges straight to `execute`; or `{sufficient: false, missing: [...]}` and
-> exploration runs, narrowed by `missing`. This roughly halves T2 — the beat the
-> whole talk rests on.
+> exploration runs, narrowed by `missing`. This roughly halves T2, which is
+> what §9 step 3 shows.
 
 **`explore`** — a ReAct loop over read-only introspection tools:
 `list_tables`, `describe_table`, `sample_column`, `count_distinct`. Bounded —
@@ -242,8 +241,8 @@ fact.
 **Compaction.** Cap at ~40 entries. Over the cap, one LLM call merges the set
 down. Rules: merge entries about the same table or concept; drop unverified
 entries with `hits = 0` and no use in 20 turns; **never touch `pinned` rows.** A
-compaction pass that silently eats a human's correction from last week is the
-worst bug this system can have.
+compaction pass that removes a human's correction from last week would undo it
+silently, with nothing in the output to show it happened.
 
 **Schema drift.** `schema_fp` is a hash of `information_schema` for the entry's
 `tables[]`. On load, recompute; on mismatch, mark the entry stale and force
@@ -318,8 +317,8 @@ Three things this buys beyond the demo:
 
 - **Correcting a recipe fixes every future question** that composes it. Fixing
   an answer in chat fixes one. This is the right layer for the human.
-- **`POST` is an adoption story, not a test hook.** Seed the cache from your
-  existing dbt definitions and skip the expensive exploration entirely.
+- **`POST` is not just a test hook.** Seed the cache from existing dbt
+  definitions and skip the expensive exploration entirely.
 - **Blast radius.** Show `hits` and, for recipes, what composes them — editing
   `revenue` changes every revenue answer, and whoever hits save should see that
   first.
@@ -409,7 +408,7 @@ first-`explore` request shape measured 600s+ (timed out) under contention and
 **22s** on a free machine. Under contention it looks like the model is
 incapable; it isn't. If a turn crawls, check what else is on the GPU before
 changing anything in the prompt or the graph — an earlier revision of this file
-concluded the model "can't reach beat 5" and prescribed a prompt fix, on
+concluded the model "can't reach step 5" and prescribed a prompt fix, on
 evidence that was entirely a busy machine.
 
 Generation controls, measured on the same request (free machine):
@@ -489,7 +488,7 @@ cancelled orders inflate revenue 10.3%; `product.unit_price` inflates it 11.0%.
 **Found here, for Phase 3:** `public` also holds the agent's own six tables
 (`cache_entry`, `turn`, and LangGraph's four checkpoint tables). `list_tables`
 must exclude them, or the agent explores its own memory, caches facts about the
-cache, and beat 2 fills up with noise.
+cache, and step 2 fills up with noise.
 
 ### Phase 2 — Cache and turn tables
 
@@ -535,7 +534,7 @@ comfortably, just not for the reason the plan assumed. Two implications:
 - Don't pad the schema further. It's already wide enough to be realistic, and
   wider won't buy expense.
 - The questions that are genuinely expensive are the ones spanning several
-  tables with several traps between them — beat 5's "revenue by region last
+  tables with several traps between them — step 5's "revenue by region last
   quarter" needs `customer`, `orders`, `order_item` and `product`, plus the
   casing, cancelled and historical-price traps. If T1 ever looks too cheap on
   Opus 5, the lever is the question, not the schema.
@@ -559,20 +558,20 @@ differs — encouraging for a reproducible T1 on stage.
 
 **Exploration depth is not deterministic.** The two T1 runs reached the same
 answer by different routes: the first sampled `deleted_at`, the second inferred
-soft deletes from the column being nullable and never sampled at all. Beat 1 of
+soft deletes from the column being nullable and never sampled at all. Step 1 of
 §9 promises the audience a visible sample. Worth revisiting at phase 5 — the
 lever is the prompt, and it should be tested, not assumed.
 
-⚠️ **The local model drifts, and beat 3 is where that shows.** Asked *"how many
+⚠️ **The local model drifts, and step 3 is where that shows.** Asked *"how many
 customers do we have?"* with a two-entry cache that mentioned nothing about
 regions, `qwen3.6:27b-mlx` called `count_distinct(region)` unprompted and
 answered **460** — the west-region figure — instead of 1,840. Nothing in the
 prompt pointed there.
 
-This matters more than a wrong answer: **§1's headline is that T2 reproduces
-T1's answer more cheaply.** A model that silently answers a different question
+This matters more than a single wrong answer: §1's claim is that T2 reproduces
+T1's answer more cheaply. A model that silently answers a different question
 on the second ask breaks the demo whatever the token count says. Verify T2
-reproduces T1 exactly on Opus 5 before trusting the beat — and if it doesn't,
+reproduces T1 exactly on Opus 5 before trusting the step — and if it doesn't,
 that is a prompt problem to solve in phase 5, not a number to report.
 
 Two separate things are still open, and only the second is a blocker:
@@ -587,7 +586,7 @@ Two separate things are still open, and only the second is a blocker:
 
   Caveat worth carrying forward: it reached `customer` in three calls, because
   a table called `customer` in an alphabetical list is not a search. §3.2 wants
-  T1 to be a real investigation — see "Making T1 expensive" below.
+  T1 to require real investigation — see "Making T1 expensive" below.
 - **The gate itself needs Opus 5.** "Is T1 over ~3,000 tokens?" is a question
   about the demo model — a different model tokenizes differently, explores
   differently, and gives a number that doesn't transfer. The
@@ -604,7 +603,7 @@ Two separate things are still open, and only the second is a blocker:
 - Increment `hits` on entries the turn actually used
 
 **Gate the extraction against the SQL, not against the prose.** Observed on the
-phase-3 beat-5 run: the model's SQL said
+phase-3 step-5 run: the model's SQL said
 
 ```sql
 WHERE o.status NOT IN ('cancelled', 'refunded')
@@ -646,11 +645,11 @@ sat one node away. Extraction is a bonus paid for by a question that has already
 been answered. It now emits `learned {count: 0, failed: …}` and continues.
 
 **Show `extract` the names already filed — and both failure modes around it.**
-Entries upsert on `name`, so naming is load-bearing in two opposite directions:
+Entries upsert on `name`, so naming can fail in two opposite directions:
 
 - *Too little reuse → duplicates.* Left to itself the model paraphrases: a live
   run filed `active customer count` on one turn and `active customers count` on
-  the next, which the upsert cannot merge. By beat 3 the cache reads as
+  the next, which the upsert cannot merge. By step 3 the cache reads as
   near-duplicates rather than the six clean entries §9 promises.
 - *Too much reuse → clobbering, which is worse.* After adding a "reuse the
   name" instruction, a west-region turn reused `number of customers` and
@@ -682,9 +681,9 @@ extraction and compaction, not a defect to prompt away. Two consequences:
 
 - Keep the current instruction (duplicates are the safe failure; clobbering
   destroys correct rules) and let phase 6 do the merging.
-- **Beat 2 of §9 depends on phase 6, not just phase 4.** "Six entries appeared,
+- **Step 2 of §9 depends on phase 6, not just phase 4.** "Six entries appeared,
   read them aloud" does not survive two duplicate pairs. Either compaction runs
-  before that beat, or the cap comes down so it triggers naturally within the
+  before that step, or the cap comes down so it triggers naturally within the
   demo's handful of turns.
 
 **Exit:** after T1 the cache holds ≥5 entries readable aloud as English; T2 still
@@ -742,7 +741,7 @@ Three things to carry into the measurement:
 
 - **Report totals, not input.** Prompt caching cuts the *cost* of the cached
   path but not its token count, and the counter on stage shows tokens. A chart
-  built on input tokens alone would show a triumph that isn't there.
+  built on input tokens alone would show a drop that the total does not.
 - **The risk is not local-only.** Opus 5 thinks by default and bills thinking as
   output. `effort_plan = low` is the mitigation and it is set — but whether a
   low-effort plan call is actually cheap enough is a measurement, not an
@@ -750,7 +749,7 @@ Three things to carry into the measurement:
 - **If T2 is not clearly cheaper, do not proceed to phase 6.** The gate is the
   point of this phase.
 
-**Exit — the money shot:**
+**Exit:**
 - T2 (same question) → no exploration, same answer, measured token drop recorded
 - T3 ("how many customers in the west region?") → never asked before, answered
   with **no new exploration** — recipes composed
@@ -779,7 +778,7 @@ compaction run over 45 entries preserves every pinned row.
 
 §6.2, plus `GET /stats`.
 
-**Exit:** beats 6 and 7 of §9 work — hand-edit the `revenue` recipe, re-ask the
+**Exit:** steps 6 and 7 of §9 work — hand-edit the `revenue` recipe, re-ask the
 revenue question, get the corrected answer.
 
 ### Phase 8 — Demo UI
@@ -792,7 +791,7 @@ cache browser with provenance and hits. Plus the tokens-per-turn chart.
 ### Phase 9 — Rehearsal hardening
 
 - `make reset` covers cache, turns, *and* checkpoint tables
-- Runbook: what to do when a beat misfires live
+- Runbook: what to do when a step misfires live
 - Rehearse the §9 script against a cold cache at least twice
 
 ---
@@ -814,8 +813,8 @@ Open with an empty `cache_entry` table, in front of the room.
 | 7 | Ask the revenue question again | Corrected — and every future revenue question with it. |
 | 8 | The chart | Tokens per turn, descending, with the step at turn 5. |
 
-Beat 3 is the headline. Beat 4 kills the "it's just a cache" objection. Beat 6
-is what makes it look shippable rather than a party trick.
+Step 3 shows the same question costing less. Step 4 shows a question that was
+never asked being answered from the cache. Step 6 shows the cache is editable.
 
 ---
 

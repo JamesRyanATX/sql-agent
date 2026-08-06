@@ -25,7 +25,7 @@ import pytest
 
 from app.settings import Settings, settings
 
-TEST_DB = "flyline_test"
+TEST_DB = "sql_agent_test"
 MIGRATIONS = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 
 

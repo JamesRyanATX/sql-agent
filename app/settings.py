@@ -8,7 +8,7 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    database_url: str = "postgresql://flyline:flyline@localhost:5432/flyline"
+    database_url: str = "postgresql://sql_agent:sql_agent@localhost:5432/sql_agent"
 
     # "anthropic" is the demo model. "openai_compat" points at any OpenAI-shaped
     # endpoint (Ollama, vLLM, LM Studio) for local development.

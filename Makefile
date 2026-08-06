@@ -1,8 +1,13 @@
-.PHONY: up down dev migrate seed reset test psql logs
+.PHONY: up down dev migrate seed reset test psql logs demo demo-verify
 
 SHELL := /bin/bash
 DC ?= docker compose
-PSQL = $(DC) exec -T db psql -U flyline -d flyline -v ON_ERROR_STOP=1
+PSQL = $(DC) exec -T db psql -U sql_agent -d sql_agent -v ON_ERROR_STOP=1
+
+# VHS needs ttyd and ffmpeg on PATH. Prefer a system install; otherwise pull all
+# three through nix so recording needs nothing installed permanently.
+VHS ?= $(shell command -v vhs 2>/dev/null || \
+         echo 'nix shell nixpkgs#vhs nixpkgs#ttyd nixpkgs#ffmpeg -c vhs')
 
 up:  ## start postgres and wait for it to accept connections
 	$(DC) up -d --wait
@@ -52,4 +57,35 @@ turns:  ## tokens per turn — the demo chart, as a table
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
 
 psql:
-	$(DC) exec db psql -U flyline -d flyline
+	$(DC) exec db psql -U sql_agent -d sql_agent
+
+demo:  ## record the terminal demo — live, 17-25 min of real model time
+	$(VHS) demo/demo.tape
+
+demo-verify:  ## did the last take earn its place? read it from the turn table
+	@echo "=== turns ==="
+	@$(PSQL) -P pager=off -c "SELECT id, left(question, 38) AS question, \
+	  explored, tokens_in + tokens_out AS tokens, answer \
+	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
+	@echo "=== gate ==="
+	@out=$$($(PSQL) -P pager=off -t -A -c \
+	  "WITH t AS ( \
+	     SELECT row_number() OVER (ORDER BY id) AS n, explored, \
+	            tokens_in + tokens_out AS tok, answer \
+	     FROM turn WHERE answer IS NOT NULL) \
+	   SELECT CASE WHEN ok THEN 'PASS  ' ELSE 'FAIL  ' END || label FROM ( \
+	     SELECT 1 AS i, (SELECT count(*) FROM t) = 3 AS ok, \
+	            'three turns recorded' AS label \
+	     UNION ALL SELECT 2, coalesce((SELECT explored AND answer ~ '1,?840' \
+	            FROM t WHERE n = 1), false), 'T1 explored, and answered 1,840' \
+	     UNION ALL SELECT 3, coalesce((SELECT NOT explored AND answer ~ '1,?840' \
+	            FROM t WHERE n = 2), false), 'T2 used the cache, same answer' \
+	     UNION ALL SELECT 4, coalesce(((SELECT tok FROM t WHERE n = 2) \
+	            < (SELECT tok FROM t WHERE n = 1)), false), 'T2 cost less than T1' \
+	     UNION ALL SELECT 5, coalesce((SELECT answer ~ '460' FROM t WHERE n = 3), \
+	            false), 'T3 answered 460' \
+	   ) x ORDER BY i"); \
+	echo "$$out"; \
+	if echo "$$out" | grep -q '^FAIL'; then \
+	  echo; echo "bad take — re-record with 'make demo'"; exit 1; \
+	else echo; echo "good take"; fi
