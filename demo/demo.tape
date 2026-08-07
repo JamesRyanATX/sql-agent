@@ -38,7 +38,7 @@ Set Height 700
 Set FontSize 16
 Set Padding 20
 Set Framerate 10
-Set PlaybackSpeed 10
+Set PlaybackSpeed 5
 Set WaitTimeout 40m
 
 # A bare prompt, so nothing in the frame depends on whose machine this is.
@@ -48,7 +48,6 @@ Enter
 Type "clear"
 Enter
 Show
-
 Sleep 5s
 
 # ---------------------------------------------------------------- step 1 ----
@@ -57,11 +56,10 @@ Sleep 5s
 
 Type "# The initial question implies schema discovery"
 Enter
-Sleep 20s
 Type 'uv run python -m scripts.ask "How many customers do we have?"'
 Enter
 Wait+Screen@40m /\[explored\]/
-Sleep 40s
+Sleep 20s
 
 # ---------------------------------------------------------------- step 2 ----
 # What it kept. This is the semantic layer, written by exploration.
@@ -69,11 +67,10 @@ Sleep 40s
 Ctrl+L
 Type "# What did we learn about the database?"
 Enter
-Sleep 15s
 Type "make cache"
 Enter
 Wait+Screen@2m /entries \(/
-Sleep 45s
+Sleep 20s
 
 # ---------------------------------------------------------------- step 3 ----
 # Same question, same answer, several times cheaper — and no exploration.
@@ -83,11 +80,10 @@ Sleep 45s
 Ctrl+L
 Type "# The same question should now be cheaper:"
 Enter
-Sleep 20s
 Type 'uv run python -m scripts.ask "How many customers do we have?"'
 Enter
 Wait+Screen@40m /\[no exploration\]/
-Sleep 40s
+Sleep 20s
 
 # ---------------------------------------------------------------- step 4 ----
 # A question never asked before, answered from what earlier turns learned.
@@ -96,20 +92,18 @@ Sleep 40s
 Ctrl+L
 Type "# Nuanced questions should require less exploration:"
 Enter
-Sleep 20s
 Type 'uv run python -m scripts.ask "How many customers are in the west region?"'
 Enter
 Wait+Screen@40m /tokens \(/
-Sleep 40s
+Sleep 20s
 
 # ------------------------------------------------------------------ close ----
 # The curve, as a table.
 
 Ctrl+L
-Type "# tokens per turn:"
+Type "# Dump of token cost per turn:"
 Enter
-Sleep 15s
 Type "make turns"
 Enter
 Wait+Screen@2m /rows\)/
-Sleep 50s
+Sleep 20s

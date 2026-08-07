@@ -119,12 +119,18 @@ intent was.
 
 Record two kinds of thing:
 
-- **schema_fact** — something true about the shape of the data: a table's \
-purpose, a column that isn't named what you'd guess, a join key, an enum's real \
-values.
+- **schema_fact** — something durably true about the shape of the data: a \
+table's purpose, a column that isn't named what you'd guess, a join key, an \
+enum's real values.
 - **recipe** — how to express a business concept in SQL. Give it the name a \
 person would use ("revenue", "active customer") and a `sql_fragment` copied \
 from the query that ran.
+
+Neither kind is a census. A row count, a percentage, or a parenthetical like \
+"(currently 1,840)" is this query's answer, not a fact about the schema — it \
+goes stale the instant a row changes, and nothing ever revisits it to check. \
+"deleted_at is a nullable soft-delete flag" is a schema_fact; "160 of 2,000 \
+rows are soft-deleted" is not — write the rule, not the count it produced today.
 
 Every entry needs a short, stable `name` — it is the key this is filed under, \
 and reusing a name **overwrites** what is already there.
