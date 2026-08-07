@@ -20,21 +20,22 @@ End to end on `claude-opus-5`, from a cold cache:
 
 **T3** had never been asked, but costs about the same as T2.
 
-#### What's happening behind the scenes
+## Quickstart
 
-The first question is expensive. The agent has never seen the database, so it
-goes and looks: lists tables, describes columns, samples values, writes SQL,
-fixes it when it breaks. Along the way it finds the things that make the obvious
-query wrong - customers are soft-deleted, `region` casing is inconsistent,
-cancelled orders still sit in `orders`. Then it writes down what it learned, in
-English, as cache entries. Every question after that is cheaper, because the next
-turn starts from those entries instead of from nothing - including questions it
-has never been asked, which get answered by composing what earlier turns found.
+```bash
+make up && make migrate && make seed   # two databases + API, then 2,000 customers
+make demo                              # generate demo video
+make cache                             # what it learned, as the model sees it
+make turns                             # tokens per turn
+```
 
-What accumulates is a semantic layer, derived from exploration rather than
-hand-maintained.
+Copy `.env.example` to `.env` and pick a provider: `PROVIDER=anthropic` for the
+demo model, or `PROVIDER=openai_compat` with `OPENAI_BASE_URL` / `OPENAI_MODEL`
+for anything OpenAI-shaped (Ollama, vLLM, LM Studio).
 
-#### The turn graph
+## Architecture
+
+### LangGraph Workflow
 
 ```mermaid
 flowchart TD
@@ -52,20 +53,7 @@ flowchart TD
     answer --> END([end])
 ```
 
-## Quickstart
-
-```bash
-make up && make migrate && make seed   # two databases + API, then 2,000 customers
-make t1                                # ask the first question
-make cache                             # what it learned, as the model sees it
-make turns                             # tokens per turn
-```
-
-Copy `.env.example` to `.env` and pick a provider: `PROVIDER=anthropic` for the
-demo model, or `PROVIDER=openai_compat` with `OPENAI_BASE_URL` / `OPENAI_MODEL`
-for anything OpenAI-shaped (Ollama, vLLM, LM Studio).
-
-## API
+### API
 
 The agent runs behind one server, and `make t1` / `make cache` / `make reset`
 are terminal renderers for these endpoints — there is no second code path.
@@ -84,7 +72,7 @@ Everything under `/v1` takes `Authorization: Bearer $API_TOKEN`. Leaving
 `--reload` — an edit restarts the server in place, and only a dependency change
 needs `make build`.
 
-## Two databases
+### Two databases
 
 The agent's memory and the data it queries are on **separate Postgres servers**,
 and it reaches the second through a role holding `SELECT` and nothing else.

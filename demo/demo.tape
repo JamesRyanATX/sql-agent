@@ -1,4 +1,4 @@
-# The terminal demo — §9 steps 1-5, recorded live.
+# The terminal demo — §9 steps 1-4, recorded live.
 #
 #   make demo          record it (17-25 min of real model time)
 #   make demo-verify   check the take was a good one, from the turn table
@@ -9,20 +9,21 @@
 # minutes between runs, and a guess would either truncate a turn or pad the
 # recording with dead air.
 #
-# Two things about VHS 0.11.0 shape this file:
+# The tape only records the demo itself — resetting and reseeding is prep,
+# not part of the story, so `make demo` does that first (see the `demo`
+# target). Question 1's exploration already tells the audience this is a
+# cold start; there's no separate beat proving the cache is empty first.
 #
-# 1. It can only see the FIRST SCREENFUL. Once output scrolls past it, `Wait`
-#    freezes on stale content and times out regardless of what the terminal is
-#    actually showing. The three turns print well past one screen, so they run
-#    through demo/ask.sh, which streams the turn and then clears and re-prints
-#    the tail as a card. The wait matches the card. See that file for detail.
+# `Wait+Screen` matches whatever is currently visible, so a leftover
+# "tokens (" line from an earlier step would satisfy the next wait instantly
+# and the tape would type into a still-running turn. Hence Ctrl+L per step.
 #
-# 2. `Wait+Screen` matches whatever is currently visible, so a leftover
-#    "tokens (" line from an earlier step would satisfy the next wait instantly
-#    and the tape would type into a still-running turn. Hence Ctrl+L per step.
-#
-# The short steps (reset, cache, turns) print inside one screen and are waited
-# on directly.
+# VHS 0.11.0 can only see the FIRST SCREENFUL — once output scrolls past it,
+# `Wait` freezes on stale content and times out regardless of what's actually
+# on screen. Every step here stays short (scripts.ask prints 4 lines; `make
+# cache`/`make turns` are waited on by text that always prints first), so
+# this doesn't currently bite — but a step that prints pages of output would
+# need to clear and re-print a short tail card instead of waiting directly.
 
 Output demo/demo.gif
 Output demo/demo.mp4
@@ -51,43 +52,22 @@ Show
 Sleep 5s
 
 # ---------------------------------------------------------------- step 1 ----
-# An empty cache, wiped on camera. Nothing up the sleeve.
-
-Type "# the agent has never seen this database. start from nothing:"
-Enter
-Sleep 20s
-Type "make reset"
-Enter
-Wait+Screen@10m /seed complete/
-Sleep 20s
-
-Ctrl+L
-Type "# what does it know?"
-Enter
-Sleep 15s
-Type "make cache"
-Enter
-Wait+Screen@2m /cache is empty/
-Sleep 25s
-
-# ---------------------------------------------------------------- step 2 ----
 # The expensive question. It explores: lists tables, describes columns,
 # samples values, and finds the soft-delete trap.
 
-Ctrl+L
-Type "# first question. it has to go and look:"
+Type "# The initial question implies schema discovery"
 Enter
 Sleep 20s
-Type 'bash demo/ask.sh "how many customers do we have?"'
+Type 'uv run python -m scripts.ask "How many customers do we have?"'
 Enter
 Wait+Screen@40m /\[explored\]/
 Sleep 40s
 
-# ---------------------------------------------------------------- step 3 ----
+# ---------------------------------------------------------------- step 2 ----
 # What it kept. This is the semantic layer, written by exploration.
 
 Ctrl+L
-Type "# it kept what it learned:"
+Type "# What did we learn about the database?"
 Enter
 Sleep 15s
 Type "make cache"
@@ -95,29 +75,29 @@ Enter
 Wait+Screen@2m /entries \(/
 Sleep 45s
 
-# ---------------------------------------------------------------- step 4 ----
+# ---------------------------------------------------------------- step 3 ----
 # Same question, same answer, several times cheaper — and no exploration.
 # Typed in full rather than as a make alias, so it is visible that this is
-# the same code path as step 2, not a replay.
+# the same code path as step 1, not a replay.
 
 Ctrl+L
-Type "# ask the exact same question again:"
+Type "# The same question should now be cheaper:"
 Enter
 Sleep 20s
-Type 'bash demo/ask.sh "how many customers do we have?"'
+Type 'uv run python -m scripts.ask "How many customers do we have?"'
 Enter
 Wait+Screen@40m /\[no exploration\]/
 Sleep 40s
 
-# ---------------------------------------------------------------- step 5 ----
+# ---------------------------------------------------------------- step 4 ----
 # A question never asked before, answered from what earlier turns learned.
 # This is the part that is not memoisation.
 
 Ctrl+L
-Type "# now something it has never been asked:"
+Type "# Nuanced questions should require less exploration:"
 Enter
 Sleep 20s
-Type 'bash demo/ask.sh "how many customers are in the west region?"'
+Type 'uv run python -m scripts.ask "How many customers are in the west region?"'
 Enter
 Wait+Screen@40m /tokens \(/
 Sleep 40s

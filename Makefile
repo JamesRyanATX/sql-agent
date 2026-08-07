@@ -1,5 +1,5 @@
 .PHONY: up down build migrate seed reset test psql-agent psql-demo logs \
-        logs-agent logs-demo logs-api health demo demo-verify
+        logs-agent logs-demo logs-api health t1 t2 t3 demo demo-verify
 
 SHELL := /bin/bash
 DC ?= docker compose
@@ -13,7 +13,7 @@ PSQL_DEMO  = $(DC) exec -T demo-db psql -U business -d business -v ON_ERROR_STOP
 # VHS needs ttyd and ffmpeg on PATH. Prefer a system install; otherwise pull all
 # three through nix so recording needs nothing installed permanently.
 VHS ?= $(shell command -v vhs 2>/dev/null || \
-         echo 'nix shell nixpkgs#vhs nixpkgs#ttyd nixpkgs#ffmpeg -c vhs')
+         echo 'nix shell nixpkgs\#vhs nixpkgs\#ttyd nixpkgs\#ffmpeg -c vhs')
 
 # --- core: environment, migrations, tests ----------------------------------
 
@@ -61,6 +61,7 @@ migrate:  ## apply migrations/*.sql to the agent database, in filename order
 
 seed:  ## build the demo database: role, schema, and 2,000 customers
 	@$(PSQL_DEMO) < demo/demo.sql
+	@echo "seed complete"
 
 reset:  ## wipe learned state and reseed — the stage recovery button
 	uv run python -m scripts.reset
@@ -74,8 +75,11 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 
 # --- demo: presentation & recording -----------------------------------------
 
-t1:  ## ask the cold-path question and print the token cost
+customer-count:  ## ask the cold-path question and print the token cost
 	uv run python -m scripts.ask "how many customers do we have?"
+
+west-coast-customer-count:  ## ask a new question the cache can compose an answer to
+	uv run python -m scripts.ask "how many customers do we have in the west region?"
 
 cache:  ## show what the agent has learned, as the model sees it
 	@uv run python -m scripts.cache
@@ -86,7 +90,7 @@ turns:  ## tokens per turn — the demo chart, as a table
 	  tokens_in + tokens_out AS tokens, latency_ms / 1000 AS secs \
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
 
-demo: health  ## record the terminal demo — live, 17-25 min of real model time
+demo: health reset  ## record the terminal demo — live, 17-25 min of real model time
 	$(VHS) demo/demo.tape
 
 demo-verify:  ## did the last take earn its place? read it from the turn table
