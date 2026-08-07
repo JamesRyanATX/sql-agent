@@ -55,7 +55,7 @@ flowchart TD
 ## Quickstart
 
 ```bash
-make up && make migrate && make seed   # postgres + API, schema, 2,000 customers
+make up && make migrate && make seed   # two databases + API, then 2,000 customers
 make t1                                # ask the first question
 make cache                             # what it learned, as the model sees it
 make turns                             # tokens per turn
@@ -80,9 +80,30 @@ GET    /health      unversioned and open, for a load balancer
 Everything under `/v1` takes `Authorization: Bearer $API_TOKEN`. Leaving
 `API_TOKEN` unset leaves it open, which the server warns about at startup.
 
-`make up` starts Postgres and the API together, with `app/` mounted and
+`make up` starts both databases and the API together, with `app/` mounted and
 `--reload` — an edit restarts the server in place, and only a dependency change
 needs `make build`.
+
+## Two databases
+
+The agent's memory and the data it queries are on **separate Postgres servers**,
+and it reaches the second through a role holding `SELECT` and nothing else.
+
+| | `agent-db` :5433 | `demo-db` :5432 |
+|---|---|---|
+| holds | what the agent has learned | `customer`, `orders`, 38 decoys |
+| built by | `migrations/*.sql` | `demo/demo.sql` |
+| agent connects as | owner | `reader` — **SELECT only** |
+
+So the agent can't explore its own cache and cache facts about caching, and
+generated SQL can't write to the business data. Neither of those rests on
+application code remembering to check: `make reset` wipes the agent's database
+because that connection cannot see any other, and a `DELETE FROM customer` fails
+on privileges before the read-only transaction guard is even consulted.
+
+`demo/demo.sql` is not the product — it's a booby-trapped fixture so the agent
+has something to explore, which is why it sits next to the tape that records it.
+Point `TARGET_DATABASE_URL` at a real warehouse and nothing else changes.
 
 To re-record the demo above:
 

@@ -9,11 +9,9 @@ Requires Postgres up (`make up`).
 
 from collections.abc import AsyncIterator
 
-import psycopg
 import pytest
 from httpx import AsyncClient
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 
 from app import store
 from app.settings import settings
@@ -22,23 +20,23 @@ PROBE = "api_probe"
 
 
 @pytest.fixture
-async def conn() -> AsyncIterator[AsyncConnection]:
-    """Committing, unlike test_store's: the endpoint reads on its own connection
-    and would not see an open transaction's writes. Cleaned up by `clean`."""
-    async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row, autocommit=True
-    ) as c:
-        yield c
+def conn(agent_conn):
+    """The cache lives on the agent's server."""
+    return agent_conn
 
 
 @pytest.fixture(autouse=True)
-async def clean(conn: AsyncConnection) -> AsyncIterator[None]:
+async def clean(
+    agent_conn: AsyncConnection, target_conn: AsyncConnection
+) -> AsyncIterator[None]:
     """An empty cache each side. The graph reads the cache in full, so a leftover
     entry from one test is an input to the next."""
-    await conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
+    await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
     yield
-    await conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
-    await conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
+    await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
+    # The probe table is on the demo server — that is where the schemas cache
+    # entries describe actually live.
+    await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
 
 
 async def seed_entries(conn: AsyncConnection) -> None:
@@ -191,26 +189,27 @@ async def test_kind_filters_the_entries_but_not_the_summary(client: AsyncClient,
     assert (await client.get("/v1/cache", params={"kind": "nonsense"})).status_code == 422
 
 
-async def test_a_renamed_column_marks_its_entry_stale(client: AsyncClient, conn):
-    """The §5 drift check, as the listing shows it. Phase 6 acts on it; here it
-    is reported."""
-    await conn.execute(f"CREATE TABLE {PROBE} (id bigint, created timestamptz)")
-    await store.write_entries(
-        conn,
-        [
-            store.CacheEntry(
-                kind="schema_fact",
-                name="probe shape",
-                claim="the probe table has a created column",
-                tables=[PROBE],
-            )
-        ],
+async def test_a_renamed_column_marks_its_entry_stale(
+    client: AsyncClient, conn, target_conn
+):
+    """The §5 drift check, as the listing shows it, and the clearest case of the
+    endpoint spanning both servers: the entry is on one, the schema it describes
+    is on the other. Phase 6 acts on it; here it is reported."""
+    await target_conn.execute(f"CREATE TABLE {PROBE} (id bigint, created timestamptz)")
+    entry = store.CacheEntry(
+        kind="schema_fact",
+        name="probe shape",
+        claim="the probe table has a created column",
+        tables=[PROBE],
     )
+    await store.fingerprint_entries(target_conn, [entry])
+    await store.write_entries(conn, [entry])
+
     body = (await client.get("/v1/cache")).json()
     assert body["entries"][0]["stale"] is False
     assert body["summary"]["stale"] == 0
 
-    await conn.execute(f"ALTER TABLE {PROBE} RENAME COLUMN created TO created_at")
+    await target_conn.execute(f"ALTER TABLE {PROBE} RENAME COLUMN created TO created_at")
 
     body = (await client.get("/v1/cache")).json()
     assert body["entries"][0]["stale"] is True
@@ -246,14 +245,18 @@ async def test_delete_wipes_learned_state_and_reports_what_it_took(
     assert (await client.get("/v1/cache")).json()["entries"] == []
 
 
-async def test_delete_leaves_the_business_schema_alone(client: AsyncClient, conn):
+async def test_delete_leaves_the_business_data_alone(client: AsyncClient, target_conn):
     """The stage recovery button forgets what the agent learned. It does not
-    touch the database the agent is answering questions about."""
-    cur = await conn.execute("SELECT count(*) AS n FROM customer")
+    touch the database the agent is answering questions about.
+
+    That used to rest on `reset_learned` naming the right six tables. It now
+    rests on the wiring: the connection it runs on cannot reach this server.
+    """
+    cur = await target_conn.execute("SELECT count(*) AS n FROM customer")
     before = (await cur.fetchone())["n"]
     assert before > 0
 
     await client.delete("/v1/cache")
 
-    cur = await conn.execute("SELECT count(*) AS n FROM customer")
+    cur = await target_conn.execute("SELECT count(*) AS n FROM customer")
     assert (await cur.fetchone())["n"] == before

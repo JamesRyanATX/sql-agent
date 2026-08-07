@@ -100,10 +100,13 @@ async def read_cache(kind: Kind | None = Query(default=None)) -> CacheListOut:
 
     `kind` filters the listing only. It never changes what the model would see.
     """
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         entries = await store.load_cache(conn)
-        stale = await store.stale_ids(conn, entries)
         disabled = await store.count_disabled(conn)
+    # Staleness is a question about the *business* schema — has it moved since
+    # these entries were learned? — so it is asked on the other server.
+    async with db.target() as conn:
+        stale = await store.stale_ids(conn, entries)
 
     shown = [e for e in entries if kind is None or e.kind == kind]
     return CacheListOut(
@@ -141,8 +144,10 @@ async def reset_cache() -> ResetOut:
     """Forget everything. The stage recovery button (PLAN.md §9).
 
     Takes the turn log and the checkpoints with it — see `store.reset_learned`.
-    The business schema is untouched; reseeding it is `scripts/seed.py`'s job.
+    The business data is on another server that this connection cannot reach,
+    so "leaves the business schema alone" is now a property of the wiring rather
+    than a promise.
     """
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         wiped = await store.reset_learned(conn)
     return ResetOut(wiped=wiped)

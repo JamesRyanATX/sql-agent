@@ -8,7 +8,22 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    database_url: str = "postgresql://sql_agent:sql_agent@localhost:5432/sql_agent"
+    # --- two databases, deliberately -------------------------------------
+    # The agent's memory and the data it queries live on separate servers, so
+    # neither can reach the other. There is no single DATABASE_URL and no
+    # fallback between these: a fallback is exactly how both connections end
+    # up back on one server, which is the thing being prevented.
+    agent_database_url: str = "postgresql://agent:agent@localhost:5433/agent"
+
+    # The agent connects as `reader`, which holds SELECT and nothing else.
+    # Named for the role it plays, not for the demo fixture that fills it —
+    # point this at a real warehouse and the name still reads true.
+    target_database_url: str = "postgresql://reader:reader@localhost:5432/business"
+
+    # The owner connection. Nothing in app/ reads it: it exists for the test
+    # harness, which has to create and populate a database, and for applying
+    # demo/demo.sql from outside Docker.
+    target_admin_url: str = "postgresql://business:business@localhost:5432/business"
 
     # --- the API, and the scripts that talk to it --------------------------
     # Everything under /v1 requires this token. Empty disables enforcement,

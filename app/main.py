@@ -15,8 +15,10 @@ log = logging.getLogger(__name__)
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    pool = await db.open_pool()
-    checkpointer = AsyncPostgresSaver(pool)
+    agent_pool, _ = await db.open_pools()
+    # Checkpoints are the agent's own state, so they belong on the agent's
+    # server — never on the database it is answering questions about.
+    checkpointer = AsyncPostgresSaver(agent_pool)
     await checkpointer.setup()  # idempotent; creates the checkpoint tables
 
     # Built once and shared: the graph, the pool and the checkpointer exist in
@@ -31,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await db.close_pool()
+        await db.close_pools()
 
 
 app = FastAPI(title="sql-agent", lifespan=lifespan)
@@ -40,8 +42,13 @@ app.include_router(v1)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Unversioned and unauthenticated, so a load balancer can reach it."""
-    async with db.connection() as conn:
-        cur = await conn.execute("SELECT 1 AS ok")
-        await cur.fetchone()
-    return {"status": "ok"}
+    """Unversioned and unauthenticated, so a load balancer can reach it.
+
+    Both servers, because a turn needs both: the agent can be perfectly able to
+    read its cache and still unable to answer anything.
+    """
+    async with db.agent() as conn:
+        await (await conn.execute("SELECT 1 AS ok")).fetchone()
+    async with db.target() as conn:
+        await (await conn.execute("SELECT 1 AS ok")).fetchone()
+    return {"status": "ok", "agent": "ok", "target": "ok"}

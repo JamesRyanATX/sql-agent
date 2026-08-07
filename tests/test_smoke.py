@@ -10,9 +10,11 @@ from app.events import to_events
 
 
 async def test_health(client: AsyncClient):
+    """Both servers, because a turn needs both — an agent that can read its
+    cache and not the business data is not healthy."""
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json() == {"status": "ok", "agent": "ok", "target": "ok"}
 
 
 @pytest.mark.live

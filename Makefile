@@ -1,10 +1,14 @@
-.PHONY: up down build migrate seed reset test psql logs logs-db logs-api \
-        health demo demo-verify
+.PHONY: up down build migrate seed reset test psql-agent psql-demo logs \
+        logs-agent logs-demo logs-api health demo demo-verify
 
 SHELL := /bin/bash
 DC ?= docker compose
-PSQL = $(DC) exec -T db psql -U sql_agent -d sql_agent -v ON_ERROR_STOP=1
 API ?= http://localhost:8000
+
+# Two servers. The agent's memory and the data it queries are not in the same
+# place, so neither are the psql invocations that reach them.
+PSQL_AGENT = $(DC) exec -T agent-db psql -U agent -d agent -v ON_ERROR_STOP=1
+PSQL_DEMO  = $(DC) exec -T demo-db psql -U business -d business -v ON_ERROR_STOP=1
 
 # VHS needs ttyd and ffmpeg on PATH. Prefer a system install; otherwise pull all
 # three through nix so recording needs nothing installed permanently.
@@ -13,7 +17,7 @@ VHS ?= $(shell command -v vhs 2>/dev/null || \
 
 # --- core: environment, migrations, tests ----------------------------------
 
-up:  ## start postgres and the API, and wait until both are healthy
+up:  ## start both databases and the API, and wait until all three are healthy
 	$(DC) up -d --wait
 
 down:
@@ -25,8 +29,11 @@ build:  ## rebuild the API image — only needed when dependencies change
 logs:
 	$(DC) logs -f
 
-logs-db:
-	$(DC) logs -f db
+logs-agent:
+	$(DC) logs -f agent-db
+
+logs-demo:
+	$(DC) logs -f demo-db
 
 logs-api:  ## the reload log lives here — an edit to app/ restarts in place
 	$(DC) logs -f api
@@ -36,21 +43,24 @@ health:  ## is the API up? every script needs it to be
 	  echo "no API at $(API) — start it with 'make up'"; exit 1; }
 	@echo
 
-psql:
-	$(DC) exec db psql -U sql_agent -d sql_agent
+psql-agent:  ## a shell on what the agent has learned
+	$(DC) exec agent-db psql -U agent -d agent
 
-migrate:  ## apply migrations/*.sql in filename order
+psql-demo:  ## a shell on the data it answers questions about
+	$(DC) exec demo-db psql -U business -d business
+
+migrate:  ## apply migrations/*.sql to the agent database, in filename order
 	@shopt -s nullglob; \
 	files=(migrations/*.sql); \
 	if [ $${#files[@]} -eq 0 ]; then echo "no migrations yet"; exit 0; fi; \
 	for f in "$${files[@]}"; do \
 	  echo "==> $$f"; \
-	  $(PSQL) < "$$f"; \
+	  $(PSQL_AGENT) < "$$f"; \
 	done
 	@echo "migrations applied"
 
-seed:
-	uv run python -m scripts.seed
+seed:  ## build the demo database: role, schema, and 2,000 customers
+	@$(PSQL_DEMO) < demo/demo.sql
 
 reset:  ## wipe learned state and reseed — the stage recovery button
 	uv run python -m scripts.reset
@@ -71,7 +81,7 @@ cache:  ## show what the agent has learned, as the model sees it
 	@uv run python -m scripts.cache
 
 turns:  ## tokens per turn — the demo chart, as a table
-	@$(PSQL) -P pager=off -c "SELECT id, left(question, 38) AS question, \
+	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
 	  explored, tool_calls AS tools, cache_entries AS cached, \
 	  tokens_in + tokens_out AS tokens, latency_ms / 1000 AS secs \
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
@@ -81,11 +91,11 @@ demo: health  ## record the terminal demo — live, 17-25 min of real model time
 
 demo-verify:  ## did the last take earn its place? read it from the turn table
 	@echo "=== turns ==="
-	@$(PSQL) -P pager=off -c "SELECT id, left(question, 38) AS question, \
+	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
 	  explored, tokens_in + tokens_out AS tokens, answer \
 	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
 	@echo "=== gate ==="
-	@out=$$($(PSQL) -P pager=off -t -A -c \
+	@out=$$($(PSQL_AGENT) -P pager=off -t -A -c \
 	  "WITH t AS ( \
 	     SELECT row_number() OVER (ORDER BY id) AS n, explored, \
 	            tokens_in + tokens_out AS tok, answer \

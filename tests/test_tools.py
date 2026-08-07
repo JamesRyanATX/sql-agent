@@ -1,20 +1,20 @@
 """Phase 3: the introspection tools are safe, and the traps are discoverable.
 
-No API calls — these run against the seeded database only.
+No API calls — these run against the demo database only, through `reader_conn`:
+the SELECT-only role the agent itself connects as, so what these tools can reach
+here is exactly what they can reach in a turn.
+
+That the agent cannot see its own memory is now a property of the two servers
+rather than of these tools, and lives in test_isolation.py.
+
 Requires `make up && make migrate && make seed`.
 """
 
 import json
-from collections.abc import AsyncIterator
 
-import psycopg
 import pytest
-from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 
-from app.settings import settings
 from app.tools import (
-    AGENT_TABLES,
     ToolError,
     count_distinct,
     describe_table,
@@ -25,28 +25,11 @@ from app.tools import (
 
 
 @pytest.fixture
-async def conn() -> AsyncIterator[AsyncConnection]:
-    async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
-    ) as c:
-        yield c
-        await c.rollback()
+def conn(reader_conn):
+    return reader_conn
 
 
 # ------------------------------------------------------------------- safety
-
-
-async def test_the_agent_cannot_see_its_own_memory(conn):
-    """Otherwise it explores the cache, caches facts about the cache, and
-    beat 2 of the demo fills up with noise."""
-    listed = await list_tables(conn)
-    names = {t.split(" ")[0] for t in listed["tables"]}
-    assert names.isdisjoint(AGENT_TABLES)
-    assert "customer" in names
-
-    for hidden in ("cache_entry", "turn", "checkpoints"):
-        with pytest.raises(ToolError, match="no such table"):
-            await describe_table(conn, hidden)
 
 
 async def test_identifiers_are_allowlisted_not_interpolated(conn):

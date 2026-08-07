@@ -3,6 +3,12 @@
 The cache is the product (PLAN.md §6.2), so this layer holds the two rules that
 protect it: a human's correction is never silently overwritten, and every entry
 records a fingerprint of the schema it was learned against.
+
+**Two servers, and the functions here are not interchangeable about which.**
+Everything takes an agent connection except `schema_fingerprint`,
+`fingerprint_entries` and `stale_ids`, which read the *target*'s
+`information_schema` — an entry is agent state describing target shape, and
+those three are the only places the two meet.
 """
 
 from __future__ import annotations
@@ -19,22 +25,6 @@ _COLUMNS = """
     id, kind, name, claim, sql_fragment, tables, origin, pinned, disabled,
     tombstone, verified, hits, schema_fp, created_turn, last_used_turn
 """
-
-# Everything the agent has learned, as opposed to the business it answers
-# questions about. Two consumers with opposite needs, and one list because they
-# have to agree: `tools` hides these from introspection so the agent can't
-# explore its own memory, and `reset_learned` wipes exactly this set.
-#
-# Ordered rather than a set: `reset_learned` reports per-table counts, and a
-# stable order keeps that output the same every run.
-AGENT_TABLES: tuple[str, ...] = (
-    "cache_entry",
-    "turn",
-    "checkpoints",
-    "checkpoint_blobs",
-    "checkpoint_writes",
-    "checkpoint_migrations",
-)
 
 
 @dataclass(slots=True)
@@ -64,7 +54,7 @@ class CacheEntry:
 
 
 async def schema_fingerprint(conn: AsyncConnection, tables: Sequence[str]) -> str:
-    """Hash the live shape of `tables`.
+    """Hash the live shape of `tables`. **Takes a target connection.**
 
     Stored on an entry at write time; recomputed on load. A mismatch means the
     schema moved under a recipe that was learned against the old shape, so the
@@ -88,6 +78,25 @@ async def schema_fingerprint(conn: AsyncConnection, tables: Sequence[str]) -> st
         for r in rows
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+async def fingerprint_entries(
+    conn: AsyncConnection, entries: Sequence[CacheEntry]
+) -> None:
+    """Stamp each entry with the shape of the tables it describes, in place.
+
+    **Takes a target connection**, and has to be called before `write_entries`,
+    which takes an agent one. Splitting them is what the two servers force: the
+    fingerprint is a fact about the business schema, the entry it lands on is
+    the agent's own memory, and no single connection can reach both.
+
+    An entry naming no tables gets no fingerprint. That is honest — there is
+    nothing to hash — and `stale_ids` reads a missing fingerprint as "unknown"
+    rather than "fine".
+    """
+    for e in entries:
+        if e.schema_fp is None and e.tables:
+            e.schema_fp = await schema_fingerprint(conn, e.tables)
 
 
 # --------------------------------------------------------------------- cache
@@ -124,7 +133,9 @@ async def count_disabled(conn: AsyncConnection) -> int:
 async def stale_ids(
     conn: AsyncConnection, entries: Sequence[CacheEntry]
 ) -> set[int]:
-    """Which of these entries were learned against a schema that has since moved?
+    """Which entries were learned against a schema that has since moved?
+
+    **Takes a target connection**, though the entries came from the agent DB.
 
     Recomputes `schema_fp` per entry and compares. An entry with no fingerprint
     or no tables can't be checked, so it is never reported stale — silence here
@@ -150,6 +161,13 @@ async def write_entries(
 ) -> list[int]:
     """Insert or refresh learned entries. Returns the ids actually written.
 
+    **Takes an agent connection**, and does not compute fingerprints — that is
+    `fingerprint_entries`, which needs the target. This function used to fall
+    back to hashing on its own connection, which quietly became wrong the day
+    the two databases split: it would have fingerprinted the *agent* schema and
+    stamped the answer onto an entry describing business tables, permanently
+    stale from the moment it was written.
+
     Named entries upsert, so re-learning `revenue` refines one row instead of
     accumulating near-duplicates for compaction to clean up later.
 
@@ -161,7 +179,6 @@ async def write_entries(
     """
     written: list[int] = []
     for e in entries:
-        fp = e.schema_fp or await schema_fingerprint(conn, e.tables)
         cur = await conn.execute(
             """
             INSERT INTO cache_entry (
@@ -195,7 +212,7 @@ async def write_entries(
                 e.disabled,
                 e.tombstone,
                 e.verified,
-                fp,
+                e.schema_fp,
                 e.created_turn if e.created_turn is not None else turn_id,
                 e.last_used_turn,
             ),
@@ -232,6 +249,20 @@ async def bump_hits(
 # --------------------------------------------------------------------- turns
 
 
+async def _wipe(conn: AsyncConnection, table: str) -> int:
+    """Empty one table, returning how many rows it held."""
+    cur = await conn.execute(
+        sql.SQL("SELECT count(*) AS n FROM {}").format(sql.Identifier(table))
+    )
+    row = await cur.fetchone()
+    await conn.execute(
+        sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+            sql.Identifier(table)
+        )
+    )
+    return row["n"] if row else 0
+
+
 async def reset_learned(conn: AsyncConnection) -> dict[str, int]:
     """Wipe every trace of what the agent has learned. Returns rows-per-table.
 
@@ -240,28 +271,24 @@ async def reset_learned(conn: AsyncConnection) -> dict[str, int]:
     checkpoints together: an empty cache beside a turn log that says the
     questions were already asked is a state nothing knows how to read.
 
-    The business schema is not touched — that is `scripts/seed.py`'s to own.
+    The business data is on another server and this connection cannot reach it.
+    That used to be a promise kept by a list of table names; now it is a promise
+    kept by the network.
 
-    Tolerant of tables that don't exist, so it stays usable on a database the
-    migrations haven't reached yet.
+    Written out rather than driven from a list: there is one caller, and these
+    six tables *are* the agent's database. The cost is that a
+    `langgraph-checkpoint-postgres` release adding a seventh has to be added
+    here by hand — and the failure mode is quiet, `make reset` no longer
+    resetting, so it is worth checking after an upgrade.
     """
-    wiped: dict[str, int] = {}
-    for table in AGENT_TABLES:
-        cur = await conn.execute("SELECT to_regclass(%s) AS oid", (f"public.{table}",))
-        row = await cur.fetchone()
-        if row is None or row["oid"] is None:
-            continue
-        cur = await conn.execute(
-            sql.SQL("SELECT count(*) AS n FROM {}").format(sql.Identifier(table))
-        )
-        row = await cur.fetchone()
-        wiped[table] = row["n"] if row else 0
-        await conn.execute(
-            sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
-                sql.Identifier(table)
-            )
-        )
-    return wiped
+    return {
+        "cache_entry": await _wipe(conn, "cache_entry"),
+        "turn": await _wipe(conn, "turn"),
+        "checkpoints": await _wipe(conn, "checkpoints"),
+        "checkpoint_blobs": await _wipe(conn, "checkpoint_blobs"),
+        "checkpoint_writes": await _wipe(conn, "checkpoint_writes"),
+        "checkpoint_migrations": await _wipe(conn, "checkpoint_migrations"),
+    }
 
 
 async def start_turn(

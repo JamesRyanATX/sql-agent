@@ -56,9 +56,9 @@ def tool_result(name: str, args: dict, *, tin: int = 100, tout: int = 20) -> llm
 
 @pytest.fixture
 async def pool() -> AsyncIterator[None]:
-    await db.open_pool()
+    await db.open_pools()
     yield
-    await db.close_pool()
+    await db.close_pools()
 
 
 async def run(question: str = "how many customers do we have?") -> tuple[list[dict], str]:
@@ -78,7 +78,7 @@ async def run(question: str = "how many customers do we have?") -> tuple[list[di
 
 async def turn_row(session: str) -> dict:
     async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
+        settings().agent_database_url, row_factory=dict_row
     ) as c:
         cur = await c.execute("SELECT * FROM turn WHERE session_id = %s", (session,))
         row = await cur.fetchone()
@@ -237,7 +237,7 @@ async def test_the_readonly_transaction_applies_both_guards(pool):
     """Regression: these were set with `SET LOCAL ... = %s`, which takes no bind
     parameters, so the timeout silently never applied — every generated query
     could have hung the demo for as long as it liked."""
-    async with db.readonly() as conn:
+    async with db.target_readonly() as conn:
         cur = await conn.execute("SHOW statement_timeout")
         assert (await cur.fetchone())["statement_timeout"] == settings().statement_timeout
         cur = await conn.execute("SHOW transaction_read_only")
@@ -246,7 +246,12 @@ async def test_the_readonly_transaction_applies_both_guards(pool):
 
 async def test_execute_is_read_only(pool, monkeypatch):
     """The generated SQL runs under transaction_read_only, so a destructive
-    query fails instead of running."""
+    query fails instead of running.
+
+    Belt and braces now — the role it connects as has no DELETE privilege
+    either. Both are kept: the transaction guard also carries the statement
+    timeout, which has no equivalent at the role level.
+    """
     model = ScriptedModel(
         text_result("findings"),
         json_result({"sql": "DELETE FROM customer", "assumptions": []}),
@@ -261,8 +266,9 @@ async def test_execute_is_read_only(pool, monkeypatch):
     assert "read-only" in error["message"].lower()
     await turn_row(session)
 
+    # On the demo server — `customer` is not in the agent's database at all.
     async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
+        settings().target_admin_url, row_factory=dict_row
     ) as c:
         cur = await c.execute("SELECT count(*) AS n FROM customer")
         assert (await cur.fetchone())["n"] == 2_000
@@ -272,12 +278,12 @@ async def test_execute_is_read_only(pool, monkeypatch):
 
 
 async def seed_cache(*entries) -> None:
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         await store.write_entries(conn, list(entries))
 
 
 async def clear_cache(prefix: str = "spec:") -> None:
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         await conn.execute("DELETE FROM cache_entry WHERE name LIKE %s", (f"{prefix}%",))
 
 
@@ -478,7 +484,7 @@ async def test_hits_are_credited_only_when_the_answer_worked(pool, monkeypatch):
     await seed_cache(ACTIVE)
 
     async def hits_now() -> tuple[int, int | None]:
-        async with db.connection() as conn:
+        async with db.agent() as conn:
             cur = await conn.execute(
                 "SELECT hits, last_used_turn FROM cache_entry WHERE name = %s",
                 ("spec:active customer",),
@@ -637,7 +643,7 @@ async def test_extract_writes_entries_and_gates_verification(pool, monkeypatch):
     # concurrent run would otherwise leak into the assertion.
     row = await turn_row(session)
     async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
+        settings().agent_database_url, row_factory=dict_row
     ) as c:
         cur = await c.execute(
             "SELECT name, kind, verified, sql_fragment, tables FROM cache_entry "
@@ -704,7 +710,7 @@ async def test_nothing_is_learned_from_a_query_that_never_ran(pool, monkeypatch)
 
     row = await turn_row(session)
     async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
+        settings().agent_database_url, row_factory=dict_row
     ) as c:
         cur = await c.execute(
             "SELECT count(*) AS n FROM cache_entry WHERE created_turn = %s", (row["id"],)
@@ -755,7 +761,7 @@ async def test_a_learned_entry_reaches_the_next_turns_prompt(pool, monkeypatch):
     assert "customer WHERE deleted_at IS NULL" in system
 
     r2 = await turn_row(s2)
-    async with await psycopg.AsyncConnection.connect(settings().database_url) as c:
+    async with await psycopg.AsyncConnection.connect(settings().agent_database_url) as c:
         await c.execute(
             "DELETE FROM cache_entry WHERE created_turn = ANY(%s)", ([r1["id"], r2["id"]],)
         )

@@ -17,16 +17,21 @@ docstrings throughout the code. Read the relevant section before changing a node
 ## Commands
 
 ```bash
-make up && make migrate && make seed   # postgres + API, schema, deterministic seed
+make up && make migrate && make seed   # two databases + API, then the demo data
 make test                              # pytest, excludes live model calls
 make test-live                         # includes tests that spend real tokens
 make t1                                # ask one question from the CLI
 make cache                             # print the cache as the model sees it
 make turns                             # tokens per turn, from the turn table
 make reset                             # wipe learned state + reseed (stage button)
-make logs-api                          # the reload log; make psql for a DB shell
+make psql-agent / psql-demo            # a shell on either database
+make logs-api                          # the reload log
 make build                             # rebuild the API image (dependency changes)
 ```
+
+`make migrate` applies `migrations/*.sql` to **agent-db only**. `make seed`
+applies `demo/demo.sql` to **demo-db** — that one file is role, schema and data
+together, and there is no Python seeder any more.
 
 `app/` is bind-mounted into the `api` container and uvicorn runs `--reload`, so
 an edit restarts the server in place. There is deliberately no second way to run
@@ -40,11 +45,43 @@ Ad-hoc questions: `uv run python -m scripts.ask "how many customers do we have?"
 — needs the API up, since it is an HTTP client.
 
 The tests do *not* need the API container: they mount the app over ASGI in-process
-via the `client` fixture in [tests/conftest.py](tests/conftest.py). The DB must be
-up for most of the suite — `tests/conftest.py` creates and drops a
-separate `sql_agent_test` database per session and repoints `DATABASE_URL` at it.
-Never point tests at the dev database: the cache is global state the graph reads
-in full, so per-test scoping cannot make a shared database safe.
+via the `client` fixture in [tests/conftest.py](tests/conftest.py). Both databases
+must be up — conftest builds `agent_test` and `business_test` per session (schema,
+checkpoint tables, and `demo.sql`) and repoints all three URLs at them. Never
+point tests at the dev databases: the cache is global state the graph reads in
+full, so per-test scoping cannot make a shared database safe.
+
+Connection fixtures mirror the split: `agent_conn`, `target_conn` (owner, for
+DDL) and `reader_conn` (the SELECT-only role the agent actually uses). Reach for
+`reader_conn` when the test is about what the agent can see.
+
+## Two databases
+
+**The agent's memory and the data it queries are on separate Postgres servers**,
+and it reaches the second as a role holding `SELECT` and nothing else. This is
+the single most important thing to know before changing anything in `app/`.
+
+| | agent-db :5433 | demo-db :5432 |
+|---|---|---|
+| holds | `cache_entry`, `turn`, checkpoints | `customer`, `orders`, 38 decoys |
+| built by | `migrations/*.sql` | `demo/demo.sql` |
+| reached via | `db.agent()` | `db.target()` / `db.target_readonly()` |
+| connects as | owner | `reader` — SELECT only |
+
+`TARGET_DATABASE_URL` names the *role* a database plays; `demo-db` names the
+fixture that fills it locally. That mismatch is deliberate — point the agent at
+a real warehouse and the connection name still reads true. Don't "fix" it.
+
+**Every function in [app/store.py](app/store.py) belongs to one server or the
+other and they are not interchangeable.** `schema_fingerprint`,
+`fingerprint_entries` and `stale_ids` take a *target* connection; everything
+else takes an *agent* one. The only operation spanning both is `extract`
+([app/graph.py](app/graph.py)), which fingerprints on the target and then writes
+on the agent — in that order, because no single connection reaches both.
+
+If you add a `db.` call, decide which server it belongs to before writing it.
+Getting this wrong doesn't fail loudly: it produces a fingerprint of the wrong
+schema, or a lookup against a table that isn't there.
 
 ## Architecture
 
@@ -52,8 +89,8 @@ in full, so per-test scoping cannot make a shared database safe.
 streams and JSON — they hold no business logic, and the graph, the pool and the
 checkpointer exist in exactly one process. If you find yourself importing
 `app.graph` or `app.store` from a script, the logic belongs behind an endpoint
-instead. The one exception is [scripts/seed.py](scripts/seed.py), which loads
-*business* fixture data and talks to Postgres directly.
+instead. `scripts/` holds no Python that touches a database at all — the demo
+data is [demo/demo.sql](demo/demo.sql), applied with psql.
 
 ```
 POST   /v1/ask      one turn, streamed as SSE
@@ -85,11 +122,11 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
   formats disagree about tool results.
 - **[app/store.py](app/store.py)** — cache and turn-log reads/writes, plus
   `stale_ids`, `count_disabled` and `reset_learned`, which back `/v1/cache`.
-  Owns `AGENT_TABLES`; `tools.py` imports it from here so the set that is hidden
-  from introspection and the set that gets wiped can't drift apart.
+  See the two-database note above for which connection each takes.
 - **[app/tools.py](app/tools.py)** — the four read-only introspection tools the
-  explore loop calls.
-- **[app/db.py](app/db.py)** — pool, plus `readonly()` for agent-generated SQL.
+  explore loop calls, on a target connection.
+- **[app/db.py](app/db.py)** — both pools: `agent()`, `target()`, and
+  `target_readonly()` for agent-generated SQL.
 - **[app/api.py](app/api.py)** / **[app/schemas.py](app/schemas.py)** — the v1
   router, the auth dependency, and the wire models. `CacheEntry` is deliberately
   not the wire format: `schema_fp` and the turn pointers stay off it.
@@ -128,14 +165,22 @@ the demo rather than failing a test.
 - **Effort, never thinking-off.** Cost is controlled per node via
   `EFFORT_*` settings. Disabling thinking on Opus 5 can turn a tool call into
   visible text that never executes, which silently breaks the explore loop.
-- **The agent cannot see its own tables.** `tools.AGENT_TABLES` hides
-  `cache_entry`, `turn` and the LangGraph checkpoint tables, or the agent caches
-  facts about the cache.
+- **The agent cannot see its own tables** — they are on another server. This
+  used to be a name filter in `tools.py`; it was deleted, because a filter that
+  matches on names also hides a *business* table that happens to be called
+  `cache_entry`, and it only works while every call site remembers it.
 - **Identifiers are allowlisted against `information_schema`, then quoted with
   `psycopg.sql.Identifier`** — table/column names can't be bound as parameters.
-- **Generated SQL runs inside `db.readonly()`**: `transaction_read_only` plus
-  `statement_timeout`, both via `set_config(..., is_local => true)` inside an
-  explicit transaction.
+- **`describe_table` reads constraints from `pg_catalog`, not
+  `information_schema`.** `information_schema.table_constraints` only shows
+  constraints to a caller with a **non-SELECT** privilege, so the read-only role
+  sees none — every table would look keyless and the agent would guess joins
+  from column names.
+- **Generated SQL runs inside `db.target_readonly()`**: `transaction_read_only`
+  plus `statement_timeout`, both via `set_config(..., is_local => true)` inside
+  an explicit transaction. The read-only half is now the second line of defence
+  (the role can't write either); the timeout has no role-level equivalent, which
+  is why the guard stays.
 - **`stream_turn` never raises.** A model timeout closes the open turn row via
   `store.fail_open_turn` and yields a fatal error event; the next question works.
 - Tool errors come back as `is_error` tool results, not exceptions — the model
@@ -143,9 +188,9 @@ the demo rather than failing a test.
 
 ### The five traps
 
-The seed ([scripts/seed.py](scripts/seed.py)) is deterministic (modular
-arithmetic, never `random()`), so **1,840 active customers is a fact, not a
-probability**. Five deliberate traps make naive SQL wrong, and finding them is
+[demo/demo.sql](demo/demo.sql) is deterministic (modular arithmetic over
+`generate_series`, never `random()`), so **1,840 active customers is a fact, not
+a probability**. Five deliberate traps make naive SQL wrong, and finding them is
 what T1's cost buys:
 
 1. `customer.deleted_at` — soft deletes, 160 of 2,000 rows
@@ -154,8 +199,13 @@ what T1's cost buys:
 4. `order_item.price` (historical) vs `product.unit_price` (current)
 5. `orders.created`, never `created_at`
 
-[tests/test_traps.py](tests/test_traps.py) asserts each one still bites. If you
-change the seed, those tests are the contract.
+[tests/test_traps.py](tests/test_traps.py) asserts each one still bites, and the
+report `SELECT` at the bottom of `demo.sql` prints the counts on every `make
+seed`. If you change the demo data, those two are the contract.
+
+Note `demo.sql` must stay free of psql meta-commands (`\echo`, `\i`) —
+[tests/conftest.py](tests/conftest.py) applies it through psycopg, which can't
+parse them.
 
 ## Build status
 

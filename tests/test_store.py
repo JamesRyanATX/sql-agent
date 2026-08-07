@@ -1,6 +1,11 @@
 """Phase 2: the cache round-trips, and fingerprints track schema shape.
 
-Requires Postgres up and migrated (`make up && make migrate`).
+**Two connections, and they are not interchangeable.** `conn` is the agent's own
+database, where entries live. `fp` is the demo database, whose shape they
+describe — every fingerprint call takes that one. An entry is agent state about
+target structure, and these tests are where that seam is checked.
+
+Requires `make up && make migrate && make seed`.
 """
 
 from collections.abc import AsyncIterator
@@ -16,6 +21,7 @@ from app.store import (
     CacheEntry,
     bump_hits,
     finish_turn,
+    fingerprint_entries,
     load_cache,
     schema_fingerprint,
     start_turn,
@@ -25,21 +31,36 @@ from app.store import (
 FP_TABLE = "fp_probe"
 
 
-@pytest.fixture
-async def conn() -> AsyncIterator[AsyncConnection]:
+async def _rollback_conn(url: str) -> AsyncIterator[AsyncConnection]:
     """A connection whose writes are rolled back, so tests don't leak rows."""
     async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
+        url, row_factory=dict_row
     ) as c:
         yield c
         await c.rollback()
 
 
 @pytest.fixture
-async def probe_table(conn: AsyncConnection) -> AsyncIterator[str]:
-    """A throwaway table to fingerprint. DDL is transactional in Postgres, so
-    the rollback in the `conn` fixture drops it again."""
-    await conn.execute(
+async def conn() -> AsyncIterator[AsyncConnection]:
+    """The agent's memory."""
+    async for c in _rollback_conn(settings().agent_database_url):
+        yield c
+
+
+@pytest.fixture
+async def fp() -> AsyncIterator[AsyncConnection]:
+    """The demo database, as its owner — these tests need DDL to move a schema
+    under an entry and watch the fingerprint change."""
+    async for c in _rollback_conn(settings().target_admin_url):
+        yield c
+
+
+@pytest.fixture
+async def probe_table(fp: AsyncConnection) -> AsyncIterator[str]:
+    """A throwaway table to fingerprint, on the *demo* server — that is where
+    the schemas entries describe actually live. DDL is transactional in
+    Postgres, so the rollback in the `fp` fixture drops it again."""
+    await fp.execute(
         f"CREATE TABLE {FP_TABLE} (id bigint, label text, created timestamptz)"
     )
     yield FP_TABLE
@@ -48,43 +69,44 @@ async def probe_table(conn: AsyncConnection) -> AsyncIterator[str]:
 # ---------------------------------------------------------------- fingerprint
 
 
-async def test_fingerprint_is_stable_across_calls(conn, probe_table):
-    assert await schema_fingerprint(conn, [probe_table]) == await schema_fingerprint(
-        conn, [probe_table]
+async def test_fingerprint_is_stable_across_calls(fp, probe_table):
+    assert await schema_fingerprint(fp, [probe_table]) == await schema_fingerprint(
+        fp, [probe_table]
     )
 
 
-async def test_fingerprint_changes_when_a_column_is_renamed(conn, probe_table):
-    before = await schema_fingerprint(conn, [probe_table])
+async def test_fingerprint_changes_when_a_column_is_renamed(fp, probe_table):
+    before = await schema_fingerprint(fp, [probe_table])
     # The `created` vs `created_at` trap, as a schema change.
-    await conn.execute(f"ALTER TABLE {probe_table} RENAME COLUMN created TO created_at")
-    assert await schema_fingerprint(conn, [probe_table]) != before
+    await fp.execute(f"ALTER TABLE {probe_table} RENAME COLUMN created TO created_at")
+    assert await schema_fingerprint(fp, [probe_table]) != before
 
 
-async def test_fingerprint_changes_on_add_drop_and_type_change(conn, probe_table):
-    before = await schema_fingerprint(conn, [probe_table])
+async def test_fingerprint_changes_on_add_drop_and_type_change(fp, probe_table):
+    before = await schema_fingerprint(fp, [probe_table])
 
-    await conn.execute(f"ALTER TABLE {probe_table} ADD COLUMN deleted_at timestamptz")
-    added = await schema_fingerprint(conn, [probe_table])
+    await fp.execute(f"ALTER TABLE {probe_table} ADD COLUMN deleted_at timestamptz")
+    added = await schema_fingerprint(fp, [probe_table])
     assert added != before
 
-    await conn.execute(f"ALTER TABLE {probe_table} DROP COLUMN deleted_at")
-    assert await schema_fingerprint(conn, [probe_table]) == before
+    await fp.execute(f"ALTER TABLE {probe_table} DROP COLUMN deleted_at")
+    assert await schema_fingerprint(fp, [probe_table]) == before
 
-    await conn.execute(f"ALTER TABLE {probe_table} ALTER COLUMN label TYPE varchar(64)")
-    assert await schema_fingerprint(conn, [probe_table]) != before
+    await fp.execute(f"ALTER TABLE {probe_table} ALTER COLUMN label TYPE varchar(64)")
+    assert await schema_fingerprint(fp, [probe_table]) != before
 
 
-async def test_fingerprint_ignores_unrelated_tables(conn, probe_table):
-    before = await schema_fingerprint(conn, [probe_table])
-    await conn.execute("CREATE TABLE fp_unrelated (x int)")
-    assert await schema_fingerprint(conn, [probe_table]) == before
+async def test_fingerprint_ignores_unrelated_tables(fp, probe_table):
+    before = await schema_fingerprint(fp, [probe_table])
+    await fp.execute("CREATE TABLE fp_unrelated (x int)")
+    assert await schema_fingerprint(fp, [probe_table]) == before
 
 
 # --------------------------------------------------------------------- cache
 
 
-async def test_write_and_load_round_trip(conn, probe_table):
+async def test_write_and_load_round_trip(conn, fp, probe_table):
+    """The full seam: fingerprint on the demo server, write on the agent's."""
     turn_id = await start_turn(conn, session_id=uuid4(), question="how many customers?")
     entry = CacheEntry(
         kind="recipe",
@@ -94,6 +116,7 @@ async def test_write_and_load_round_trip(conn, probe_table):
         tables=[probe_table],
         verified=True,
     )
+    await fingerprint_entries(fp, [entry])
     written = await write_entries(conn, [entry], turn_id=turn_id)
     assert len(written) == 1
 
@@ -105,8 +128,35 @@ async def test_write_and_load_round_trip(conn, probe_table):
     assert got.verified is True
     assert got.origin == "learned"
     assert got.created_turn == turn_id
-    # Stamped at write time, so drift is detectable later.
-    assert got.schema_fp == await schema_fingerprint(conn, [probe_table])
+    # Stamped before the write, so drift is detectable later.
+    assert got.schema_fp == await schema_fingerprint(fp, [probe_table])
+
+
+async def test_writing_without_fingerprinting_leaves_it_unstamped(conn, probe_table):
+    """`write_entries` no longer computes fingerprints, and must not pretend to.
+
+    It used to fall back to hashing on its own connection. Once the databases
+    split that became actively wrong — it would have fingerprinted the *agent*
+    schema and stamped the result onto an entry describing business tables,
+    permanently stale from the moment it was written. Unstamped is the honest
+    answer, and `stale_ids` reads it as "unknown" rather than "fine".
+    """
+    entry = CacheEntry(
+        kind="schema_fact",
+        name="spec:unstamped",
+        claim="written without a fingerprint",
+        tables=[probe_table],
+    )
+    await write_entries(conn, [entry])
+    got = next(e for e in await load_cache(conn) if e.name == "spec:unstamped")
+    assert got.schema_fp is None
+
+
+async def test_fingerprinting_skips_entries_with_no_tables(conn, fp):
+    """Nothing to hash, so nothing is claimed."""
+    entry = CacheEntry(kind="recipe", name="spec:tableless", claim="…", tables=[])
+    await fingerprint_entries(fp, [entry])
+    assert entry.schema_fp is None
 
 
 async def test_named_entries_upsert_rather_than_duplicate(conn):

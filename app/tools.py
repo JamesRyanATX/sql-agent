@@ -10,9 +10,11 @@ Two safety properties, both structural rather than conventional:
    `psycopg.sql.Identifier`.** Table and column names can't be bound as
    parameters, so an allowlist is the only correct answer. Everything else is a
    bound parameter.
-2. **The agent's own tables are invisible.** `public` also holds `cache_entry`,
-   `turn` and LangGraph's checkpoint tables; without this the agent explores its
-   own memory and caches facts about the cache.
+2. **These run on a target connection, which holds `SELECT` and nothing else.**
+   The agent's own tables aren't hidden from this listing, they simply aren't in
+   this database — `cache_entry`, `turn` and the checkpoints are on another
+   server. There used to be a name filter here doing that job; it was one
+   forgotten call site away from not working.
 """
 
 from __future__ import annotations
@@ -21,13 +23,6 @@ import json
 from typing import Any
 
 from psycopg import AsyncConnection, sql
-
-from app.store import AGENT_TABLES as _AGENT_TABLES
-
-# The agent's memory is not part of the business it's answering questions about.
-# Defined in `store`, which also wipes exactly this set — the list has to be one
-# list, or a table added to the reset would stay visible to introspection.
-AGENT_TABLES = frozenset(_AGENT_TABLES)
 
 SAMPLE_LIMIT = 12
 
@@ -40,8 +35,6 @@ class ToolError(Exception):
 
 
 async def _check_table(conn: AsyncConnection, table: str) -> str:
-    if table in AGENT_TABLES:
-        raise ToolError(f"no such table: {table!r}")
     cur = await conn.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = 'public' AND table_name = %s",
@@ -77,10 +70,8 @@ async def list_tables(conn: AsyncConnection) -> dict[str, Any]:
         JOIN information_schema.tables t
           ON t.table_schema = c.table_schema AND t.table_name = c.table_name
         WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-          AND NOT (c.table_name = ANY(%s))
         GROUP BY c.table_name ORDER BY c.table_name
-        """,
-        (list(AGENT_TABLES),),
+        """
     )
     rows = await cur.fetchall()
     return {
@@ -112,24 +103,40 @@ async def describe_table(conn: AsyncConnection, table: str) -> dict[str, Any]:
         for r in await cur.fetchall()
     ]
 
+    # pg_catalog, not information_schema, and this is not a style preference.
+    # `information_schema.table_constraints` only shows constraints on tables
+    # the caller owns or holds a **non-SELECT** privilege on — so the read-only
+    # role the agent connects as sees an empty set, and every table comes back
+    # with no primary key and no foreign keys. Join discovery would silently
+    # degrade to guessing from column names. pg_catalog applies no such filter.
     cur = await conn.execute(
         """
-        SELECT kcu.column_name, tc.constraint_type,
-               ccu.table_name AS ref_table, ccu.column_name AS ref_column
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON kcu.constraint_name = tc.constraint_name
-        LEFT JOIN information_schema.constraint_column_usage ccu
-          ON ccu.constraint_name = tc.constraint_name
-         AND tc.constraint_type = 'FOREIGN KEY'
-        WHERE tc.table_schema = 'public' AND tc.table_name = %s
-          AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
+        SELECT c.contype,
+               src.attname AS column_name,
+               ref_t.relname AS ref_table,
+               ref.attname AS ref_column
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        -- One row per constrained column, ordinality preserved so a composite
+        -- foreign key pairs its columns with the right referenced ones.
+        JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+        JOIN pg_attribute src
+          ON src.attrelid = c.conrelid AND src.attnum = k.attnum
+        LEFT JOIN pg_class ref_t ON ref_t.oid = c.confrelid
+        LEFT JOIN LATERAL unnest(c.confkey) WITH ORDINALITY AS fk(attnum, ord)
+          ON fk.ord = k.ord
+        LEFT JOIN pg_attribute ref
+          ON ref.attrelid = c.confrelid AND ref.attnum = fk.attnum
+        WHERE n.nspname = 'public' AND t.relname = %s
+          AND c.contype IN ('p', 'f')
+        ORDER BY c.contype, c.conname, k.ord
         """,
         (table,),
     )
     primary_key, foreign_keys = [], []
     for r in await cur.fetchall():
-        if r["constraint_type"] == "PRIMARY KEY":
+        if r["contype"] == "p":
             primary_key.append(r["column_name"])
         else:
             foreign_keys.append(

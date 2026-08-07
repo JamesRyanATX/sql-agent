@@ -4,27 +4,22 @@ Each test asserts the *naive* query returns a different answer from the correct
 one. That's the point — if a trap doesn't bite, T1 is a formality and there's no
 recipe worth reading aloud in beat 2 of the demo.
 
+These are also the regression net for `demo/demo.sql`: the schema and the seed
+used to be a migration plus a Python script, and the counts they produce (1,840
+active, 460 west, 750 cancelled) are the demo's contract.
+
 Requires `make up && make migrate && make seed`.
 """
 
-from collections.abc import AsyncIterator
-
-import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.errors import UndefinedColumn
-from psycopg.rows import dict_row
-
-from app.settings import settings
 
 
 @pytest.fixture
-async def conn() -> AsyncIterator[AsyncConnection]:
-    async with await psycopg.AsyncConnection.connect(
-        settings().database_url, row_factory=dict_row
-    ) as c:
-        yield c
-        await c.rollback()
+def conn(reader_conn):
+    """The demo database as the agent sees it — SELECT and nothing else."""
+    return reader_conn
 
 
 async def scalar(conn: AsyncConnection, sql: str):

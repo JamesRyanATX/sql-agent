@@ -247,7 +247,7 @@ def render_cache(entries: list[dict[str, Any]]) -> str:
 
 async def load_cache(state: TurnState) -> TurnState:
     """Open the turn and load everything not disabled, ordered by hits."""
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         turn_id = await store.start_turn(
             conn, session_id=state["session_id"], question=state["question"]
         )
@@ -350,7 +350,7 @@ async def explore(state: TurnState) -> TurnState:
     tokens_in = tokens_out = calls = 0
     result: llm.Result | None = None
 
-    async with db.connection() as conn:
+    async with db.target() as conn:
         while calls < settings().max_tool_calls:
             result = await llm.complete(
                 system=system,
@@ -450,7 +450,7 @@ async def execute(state: TurnState) -> TurnState:
     """Run the generated SQL under a read-only transaction with a timeout."""
     emit = get_stream_writer()
     try:
-        async with db.readonly() as conn:
+        async with db.target_readonly() as conn:
             cur = await conn.execute(state["sql"])
             fetched = await cur.fetchmany(settings().max_rows)
         rows = json.loads(json.dumps(fetched, default=str))
@@ -551,12 +551,12 @@ async def infer_tables(sql: str) -> list[str]:
     over nothing, so the entry can never go stale (§5) no matter what happens
     to the schema it depends on.
     """
-    async with db.connection() as conn:
+    async with db.target() as conn:
         cur = await conn.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
         )
-        known = {r["table_name"] for r in await cur.fetchall()} - tools.AGENT_TABLES
+        known = {r["table_name"] for r in await cur.fetchall()}
     seen = set(_tokens(sql))
     return sorted(known & seen)
 
@@ -640,7 +640,12 @@ async def extract(state: TurnState) -> TurnState:
         for e in parsed
     ]
 
-    async with db.connection() as conn:
+    # The one operation that spans both databases, and the order is forced: the
+    # fingerprint is a fact about the business schema, the entry it lands on is
+    # the agent's own memory, and no single connection reaches both.
+    async with db.target() as conn:
+        await store.fingerprint_entries(conn, entries)
+    async with db.agent() as conn:
         written = await store.write_entries(conn, entries, turn_id=state["turn_id"])
 
     emit(
@@ -694,7 +699,7 @@ async def answer(state: TurnState) -> TurnState:
     total_out = state.get("tokens_out", 0) + tokens_out
     latency = int((time.monotonic() - state.get("started_at", time.monotonic())) * 1000)
 
-    async with db.connection() as conn:
+    async with db.agent() as conn:
         # Credit the entries this turn leaned on, but only now — an entry that
         # fed a query which never ran has not earned a hit, and `hits` both
         # orders the cache and shows blast radius in /admin/cache.
@@ -773,7 +778,7 @@ async def stream_turn(compiled, session_id: str, question: str):
         detail = str(e).strip()
         message = f"{type(e).__name__}{': ' + detail if detail else ''}"
         try:
-            async with db.connection() as conn:
+            async with db.agent() as conn:
                 await store.fail_open_turn(conn, session_id, f"failed — {message}")
         except Exception:  # the turn is already lost; don't lose the event too
             pass

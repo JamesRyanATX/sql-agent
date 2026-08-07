@@ -85,6 +85,14 @@ written by people.
 
 ## 3. Schema
 
+**As shipped, this is two Postgres servers, not one.** §3.1 lives on `agent-db`,
+built from `migrations/*.sql`. §3.2 lives on `demo-db`, built from
+`demo/demo.sql`, and the agent reaches it as a role holding `SELECT` and nothing
+else. The plan below assumed a single database and a `public` schema shared
+between them — the §5 tombstone and drift machinery is unaffected, but "the
+agent's own tables are hidden from introspection" is now "they are on another
+server", and §3.2's schema is a demo fixture rather than part of the product.
+
 ### 3.1 The cache
 
 ```sql
@@ -144,6 +152,10 @@ Two invariants the store layer enforces rather than the schema:
   correction silently.
 
 ### 3.2 The business schema
+
+Shipped as [demo/demo.sql](demo/demo.sql) — role, schema and deterministic data
+in one file, applied by `make seed`. It is a fixture, not the product, which is
+why it sits under `demo/` beside the tape that records it.
 
 Two properties matter.
 
@@ -477,14 +489,16 @@ was containerized; `make up` now starts it with reload.)
 
 Half the work, all the yak-shaving.
 
-- `migrations/001_business.sql` — the four real tables per §3.2 plus ~36 decoys
+- the four real tables per §3.2 plus ~36 decoys
   (`audit_log`, `sessions`, `feature_flags`, `webhook_delivery`, `email_queue`, …)
   with plausible columns and non-trivial row counts, so exploration has to search
-- `scripts/seed.py`, deterministic and idempotent:
+- the seed, deterministic and idempotent:
   - 2,000 customers, 160 with `deleted_at` → **1,840 active**
   - `region` deliberately mixed-case (`west` / `West` / `WEST`)
   - `orders.created` (never `created_at`), `status` including `'cancelled'`
   - `order_item.price` diverging from `product.unit_price` on older orders
+  (both shipped as `demo/demo.sql`; this was a migration plus a Python script
+  until the databases split)
 - `tests/test_traps.py` — one test per trap, asserting the naive query returns a
   *different* answer from the correct one
 

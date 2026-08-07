@@ -1,19 +1,48 @@
 name: sql-agent
 
+# Two Postgres servers, deliberately. The agent's memory and the data it queries
+# can't reach each other because they aren't in the same place.
+#
+# `demo-db` is named for what it is — a booby-trapped fixture this repo ships so
+# the agent has something to explore. The app calls the same connection the
+# *target*, because that names a role rather than a fixture: point it at a real
+# warehouse and TARGET_DATABASE_URL still reads true.
+
 services:
-  db:
+  agent-db:
     image: postgres:15-alpine
-    container_name: sql-agent-db
+    container_name: sql-agent-agent-db
     environment:
-      POSTGRES_USER: sql_agent
-      POSTGRES_PASSWORD: sql_agent
-      POSTGRES_DB: sql_agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports:
+      # 5433 on the host: the demo database keeps 5432, since narratively it is
+      # the one that already existed.
+      - "5433:5432"
+    volumes:
+      - agent-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  demo-db:
+    image: postgres:15-alpine
+    container_name: sql-agent-demo-db
+    environment:
+      # Distinct from the agent's, so a crossed URL fails authentication
+      # immediately instead of connecting and then failing on a missing table.
+      POSTGRES_USER: business
+      POSTGRES_PASSWORD: business
+      POSTGRES_DB: business
     ports:
       - "5432:5432"
     volumes:
-      - sql-agent-pgdata:/var/lib/postgresql/data
+      - demo-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sql_agent -d sql_agent"]
+      test: ["CMD-SHELL", "pg_isready -U business -d business"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -22,16 +51,19 @@ services:
     build: .
     container_name: sql-agent-api
     depends_on:
-      db:
+      agent-db:
+        condition: service_healthy
+      demo-db:
         condition: service_healthy
     env_file:
       # Optional, so `make up` works on a fresh clone before .env is copied.
       - path: .env
         required: false
     environment:
-      # Overrides .env, which points at localhost for the host-side scripts.
+      # Override .env, which points at localhost for the host-side scripts.
       # In here, localhost is this container.
-      DATABASE_URL: postgresql://sql_agent:sql_agent@db:5432/sql_agent
+      AGENT_DATABASE_URL: postgresql://agent:agent@agent-db:5432/agent
+      TARGET_DATABASE_URL: postgresql://reader:reader@demo-db:5432/business
       # ANTHROPIC_API_KEY is deliberately NOT forwarded from the host shell.
       # `environment` beats `env_file`, so a passthrough would let a stale key
       # exported in some terminal silently override the one in .env — measured:
@@ -44,7 +76,7 @@ services:
       # Only a dependency change needs `docker compose build`.
       - ./app:/srv/app
     healthcheck:
-      # So `make up`'s --wait covers the API too, not just Postgres.
+      # So `make up`'s --wait covers the API too. /health checks both servers.
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 3s
       timeout: 5s
@@ -52,4 +84,5 @@ services:
       start_period: 10s
 
 volumes:
-  sql-agent-pgdata:
+  agent-pgdata:
+  demo-pgdata:
