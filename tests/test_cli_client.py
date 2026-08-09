@@ -1,16 +1,19 @@
-"""SSE framing in scripts/_client.py.
+"""SSE framing in sql_agent_cli/http.py.
 
-The scripts render whatever comes out of here, so a dropped or mis-split frame
-is a turn that looks like it never finished. Driven through a mock transport
-rather than a live turn: the framing is the thing under test, not the agent.
+The CLI renders whatever comes out of here, so a dropped or mis-split frame is a
+turn that looks like it never finished. Driven through a mock transport rather
+than a live turn: the framing is the thing under test, not the agent.
+
+This file imports both sides on purpose — `app.events.sse` builds the fixtures
+and `sql_agent_cli.http` parses them. It is the contract test for the split, and
+the one place in the suite where the two halves are allowed to meet.
 """
 
 import httpx
 import pytest
 
 from app.events import sse
-from app.settings import settings
-from scripts import _client
+from sql_agent_cli import http as _client
 
 
 def stream_of(*chunks: str) -> httpx.MockTransport:
@@ -36,7 +39,7 @@ async def collect(transport: httpx.MockTransport, monkeypatch) -> list[dict]:
             transport=transport, base_url="http://test"
         )
     )
-    return [ev async for ev in _client.stream_events("/v1/ask", {"question": "x"})]
+    return [ev async for ev in _client.stream_events("/ask", {"question": "x"})]
 
 
 # ---------------------------------------------------------------------- framing
@@ -100,17 +103,51 @@ def test_the_ask_stream_has_no_read_timeout():
 
 
 def test_the_token_is_sent_only_when_one_is_set(monkeypatch):
+    monkeypatch.delenv("SQL_AGENT_API_KEY", raising=False)
     assert _client._headers() == {}
 
-    monkeypatch.setenv("API_TOKEN", "s3cret")
-    settings.cache_clear()
-    try:
-        assert _client._headers() == {"authorization": "Bearer s3cret"}
-    finally:
-        settings.cache_clear()
+    monkeypatch.setenv("SQL_AGENT_API_KEY", "s3cret")
+    assert _client._headers() == {"authorization": "Bearer s3cret"}
 
 
-# --------------------------------------------------------------------- failures
+def test_the_base_url_keeps_its_v1_prefix(monkeypatch):
+    """SQL_AGENT_URL carries /v1 and every call site writes the path without it.
+    httpx preserves a base_url's path when merging; urljoin would eat it."""
+    monkeypatch.setenv("SQL_AGENT_URL", "http://localhost:3000/v1")
+    client = _client._client(_client.REQUEST_TIMEOUT)
+    merged = client._merge_url("/connections/prod/cache")
+    assert str(merged) == "http://localhost:3000/v1/connections/prod/cache"
+
+
+class _DyingStream(httpx.AsyncByteStream):
+    """Hands back `chunk`, then drops the connection the way a reload does."""
+
+    def __init__(self, chunk: bytes, request: httpx.Request) -> None:
+        self._chunk, self._request = chunk, request
+
+    async def __aiter__(self):
+        yield self._chunk
+        raise httpx.RemoteProtocolError("peer closed", request=self._request)
+
+
+async def test_a_stream_that_dies_mid_turn_is_a_message_not_a_traceback(monkeypatch):
+    """A turn runs for minutes with no read timeout. The api container
+    restarting under --reload raises out of aiter_lines, three minutes in, and a
+    traceback there says nothing anyone can act on. The count distinguishes
+    "nothing arrived" from "it died most of the way through"."""
+
+    def die_after_two(request: httpx.Request) -> httpx.Response:
+        two = (sse({"type": "usage", "node": "explore"}) * 2).encode()
+        return httpx.Response(200, stream=_DyingStream(two, request))
+
+    monkeypatch.setattr(
+        _client, "_client", lambda timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(die_after_two), base_url="http://test"
+        )
+    )
+    with pytest.raises(_client.ApiError, match="stream ended after 2 events"):
+        async for _ in _client.stream_events("/ask", {"question": "x"}):
+            pass
 
 
 async def test_a_server_that_is_not_running_is_a_message_not_a_traceback(monkeypatch):
@@ -122,8 +159,8 @@ async def test_a_server_that_is_not_running_is_a_message_not_a_traceback(monkeyp
             transport=httpx.MockTransport(refuse), base_url="http://test"
         )
     )
-    with pytest.raises(_client.ApiError, match="make up"):
-        await _client.get("/v1/cache")
+    with pytest.raises(_client.ApiError, match="no API at"):
+        await _client.get("/cache")
 
 
 async def test_a_401_says_what_to_do_about_it(monkeypatch):
@@ -134,11 +171,11 @@ async def test_a_401_says_what_to_do_about_it(monkeypatch):
         )
     )
     with pytest.raises(_client.ApiError, match="API_TOKEN"):
-        await _client.get("/v1/cache")
+        await _client.get("/cache")
 
 
 async def test_an_error_before_the_stream_starts_is_raised_not_streamed(monkeypatch):
-    """A 500 on /v1/ask would otherwise render as a turn that produced no events."""
+    """A 500 on /ask would otherwise render as a turn that produced no events."""
     monkeypatch.setattr(
         _client, "_client", lambda timeout: httpx.AsyncClient(
             transport=httpx.MockTransport(
@@ -148,5 +185,5 @@ async def test_an_error_before_the_stream_starts_is_raised_not_streamed(monkeypa
         )
     )
     with pytest.raises(_client.ApiError, match="500"):
-        async for _ in _client.stream_events("/v1/ask", {"question": "x"}):
+        async for _ in _client.stream_events("/ask", {"question": "x"}):
             pass

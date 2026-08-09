@@ -1,4 +1,4 @@
-"""Reads and writes for the cache and the turn log.
+"""Reads and writes for the connection registry, the cache and the turn log.
 
 The cache is the product (PLAN.md §6.2), so this layer holds the two rules that
 protect it: a human's correction is never silently overwritten, and every entry
@@ -9,6 +9,15 @@ Everything takes an agent connection except `schema_fingerprint`,
 `fingerprint_entries` and `stale_ids`, which read the *target*'s
 `information_schema` — an entry is agent state describing target shape, and
 those three are the only places the two meet.
+
+**And now N targets.** Everything that reads or writes what the agent has
+learned is scoped to one `connection_id`, and **none of these functions has a
+default for it**. A default is how one warehouse's cache ends up answering
+another warehouse's question, and nothing about that failure is loud: the
+answer looks right, the SQL looks right, and the numbers come from the wrong
+database. The three fingerprint functions keep their signatures, but their
+caller now owes them a target connection belonging to *the entry's own*
+connection.
 """
 
 from __future__ import annotations
@@ -20,10 +29,18 @@ from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+from app.secrets import seal, unseal
 
 _COLUMNS = """
     id, kind, name, claim, sql_fragment, tables, origin, pinned, disabled,
     tombstone, verified, hits, schema_fp, created_turn, last_used_turn
+"""
+
+_CONNECTION_COLUMNS = """
+    id, label, origin, host, port, database, username, password, sslmode,
+    created_at, updated_at
 """
 
 
@@ -48,6 +65,195 @@ class CacheEntry:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> CacheEntry:
         return cls(**{k: row[k] for k in row if k in cls.__slots__})
+
+
+# ------------------------------------------------------------------- registry
+#
+# A registered database the agent can be pointed at. Note the word: `app/db.py`
+# uses "connection" ~20 times to mean a psycopg connection, and these are not
+# that. Never bind a bare `connection` variable to one of these rows — it is
+# `connection_id: str` or `registered: store.Connection`, always.
+
+
+@dataclass(slots=True)
+class Connection:
+    id: str
+    origin: str = "api"  # api | env — who owns the address
+    label: str | None = None
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    # **Plaintext**, unsealed on read. It exists to be handed to psycopg and
+    # nothing else; the wire model in app/schemas.py has no password field at
+    # all, so this can never be leaked by serialising the wrong object.
+    password: str | None = None
+    sslmode: str = "prefer"
+    created_at: Any = None
+    updated_at: Any = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> Connection:
+        return cls(**{**{k: row[k] for k in row if k in cls.__slots__},
+                      "password": unseal(row.get("password"))})
+
+    def conninfo(self) -> str:
+        """The DSN psycopg connects with.
+
+        `make_conninfo`, never an f-string URL: a password containing `@`, `/`
+        or `%` produces a wrong-and-confusing DSN under string formatting, and
+        the resulting authentication failure points at the password rather than
+        at the quoting.
+        """
+        return make_conninfo(
+            host=self.host,
+            port=self.port,
+            dbname=self.database,
+            user=self.username,
+            password=self.password,
+            sslmode=self.sslmode,
+        )
+
+    def safe_dsn(self) -> str:
+        """The address, renderable. Never carries the password.
+
+        What `GET /v1/connections` shows and what an error message may quote.
+        """
+        host = self.host or ""
+        port = f":{self.port}" if self.port else ""
+        user = f"{self.username}@" if self.username else ""
+        return f"postgresql://{user}{host}{port}/{self.database or ''}"
+
+
+def connection_from_url(url: str, *, id: str, origin: str = "api") -> Connection:
+    """Parse a DSN into a registry row.
+
+    Used for the env-owned `default` row, whose address is TARGET_DATABASE_URL,
+    and by the test harness — which has to agree with the lifespan about how a
+    URL becomes a row, or the two disagree in exactly the way that is hardest
+    to see.
+    """
+    d = conninfo_to_dict(url)
+    port = d.get("port")
+    return Connection(
+        id=id,
+        origin=origin,
+        host=d.get("host") or "localhost",
+        port=int(port) if port else 5432,
+        database=d.get("dbname"),
+        username=d.get("user"),
+        password=d.get("password"),
+        sslmode=d.get("sslmode") or "prefer",
+    )
+
+
+async def get_connection(conn: AsyncConnection, connection_id: str) -> Connection | None:
+    cur = await conn.execute(
+        f"SELECT {_CONNECTION_COLUMNS} FROM connection WHERE id = %s",
+        (connection_id,),
+    )
+    row = await cur.fetchone()
+    return Connection.from_row(row) if row else None
+
+
+async def list_connections(conn: AsyncConnection) -> list[Connection]:
+    cur = await conn.execute(
+        f"SELECT {_CONNECTION_COLUMNS} FROM connection ORDER BY id"
+    )
+    return [Connection.from_row(r) for r in await cur.fetchall()]
+
+
+async def connection_stats(conn: AsyncConnection) -> dict[str, dict[str, int]]:
+    """Cache and turn counts per connection, in one query.
+
+    Kept off `Connection` deliberately: the dataclass is the registry row, and
+    these are facts about other tables that happen to point at it.
+    """
+    cur = await conn.execute(
+        """
+        SELECT c.id,
+               (SELECT count(*) FROM cache_entry e WHERE e.connection_id = c.id)
+                   AS cache_entries,
+               (SELECT count(*) FROM turn t WHERE t.connection_id = c.id)
+                   AS turns
+        FROM connection c
+        """
+    )
+    return {
+        r["id"]: {"cache_entries": r["cache_entries"], "turns": r["turns"]}
+        for r in await cur.fetchall()
+    }
+
+
+async def create_connection(conn: AsyncConnection, row: Connection) -> Connection:
+    """Register a database. Raises `psycopg.errors.UniqueViolation` on a reused id."""
+    cur = await conn.execute(
+        f"""
+        INSERT INTO connection (
+            id, label, origin, host, port, database, username, password, sslmode
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING {_CONNECTION_COLUMNS}
+        """,
+        (
+            row.id,
+            row.label,
+            row.origin,
+            row.host,
+            row.port,
+            row.database,
+            row.username,
+            seal(row.password),
+            row.sslmode,
+        ),
+    )
+    written = await cur.fetchone()
+    assert written is not None
+    return Connection.from_row(written)
+
+
+async def update_connection(
+    conn: AsyncConnection, connection_id: str, **fields: Any
+) -> Connection | None:
+    """Change the named fields and nothing else. None if there is no such row.
+
+    Partial by construction: a caller that passes no fields gets the row back
+    untouched, and a field absent from `fields` is never confused with a field
+    set to NULL. `password` is sealed on the way in.
+    """
+    allowed = ("label", "host", "port", "database", "username", "password", "sslmode")
+    unknown = set(fields) - set(allowed)
+    assert not unknown, f"not a connection field: {sorted(unknown)}"
+    if not fields:
+        return await get_connection(conn, connection_id)
+
+    if "password" in fields:
+        fields = {**fields, "password": seal(fields["password"])}
+    assignments = sql.SQL(", ").join(
+        sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder()) for k in fields
+    )
+    cur = await conn.execute(
+        sql.SQL(
+            "UPDATE connection SET {}, updated_at = now() WHERE id = {} "
+            "RETURNING " + _CONNECTION_COLUMNS
+        ).format(assignments, sql.Placeholder()),
+        (*fields.values(), connection_id),
+    )
+    row = await cur.fetchone()
+    return Connection.from_row(row) if row else None
+
+
+async def delete_connection(conn: AsyncConnection, connection_id: str) -> dict[str, int]:
+    """Remove a connection and everything learned about it.
+
+    The counted deletes run here rather than being left to the foreign keys'
+    `ON DELETE CASCADE`, so the caller can report what it destroyed. The cascade
+    stays as a backstop for a `DELETE FROM connection` typed at psql, where
+    there is nobody to report to.
+    """
+    wiped = await reset_learned(conn, connection_id=connection_id)
+    await conn.execute("DELETE FROM connection WHERE id = %s", (connection_id,))
+    return wiped
 
 
 # ---------------------------------------------------------------- fingerprint
@@ -102,11 +308,15 @@ async def fingerprint_entries(
 # --------------------------------------------------------------------- cache
 
 
-async def load_cache(conn: AsyncConnection) -> list[CacheEntry]:
-    """Everything not disabled, ordered by hits.
+async def load_cache(
+    conn: AsyncConnection, *, connection_id: str
+) -> list[CacheEntry]:
+    """One connection's entries, not disabled, ordered by hits.
 
     All of it, every turn — it fits in context, and retrieval would only add a
-    way to miss the entry you needed (§4).
+    way to miss the entry you needed (§4). "All of it" now means all of *this
+    connection's*: what the agent knows about one warehouse is not evidence
+    about another, and handing the model both is how a recipe crosses over.
 
     Tombstones are included deliberately. A tombstone *is* the useful content:
     a visible negative constraint that stops exploration rediscovering the same
@@ -114,18 +324,23 @@ async def load_cache(conn: AsyncConnection) -> list[CacheEntry]:
     """
     cur = await conn.execute(
         f"SELECT {_COLUMNS} FROM cache_entry "
-        "WHERE NOT disabled ORDER BY hits DESC, id ASC"
+        "WHERE connection_id = %s AND NOT disabled ORDER BY hits DESC, id ASC",
+        (connection_id,),
     )
     return [CacheEntry.from_row(r) for r in await cur.fetchall()]
 
 
-async def count_disabled(conn: AsyncConnection) -> int:
-    """How many entries `load_cache` filtered out.
+async def count_disabled(conn: AsyncConnection, *, connection_id: str) -> int:
+    """How many of this connection's entries `load_cache` filtered out.
 
     The one number a caller cannot derive from the entries themselves, and the
     cache listing shows it so a disabled entry never goes quietly missing.
     """
-    cur = await conn.execute("SELECT count(*) AS n FROM cache_entry WHERE disabled")
+    cur = await conn.execute(
+        "SELECT count(*) AS n FROM cache_entry "
+        "WHERE connection_id = %s AND disabled",
+        (connection_id,),
+    )
     row = await cur.fetchone()
     return row["n"] if row else 0
 
@@ -157,6 +372,7 @@ async def write_entries(
     conn: AsyncConnection,
     entries: Sequence[CacheEntry],
     *,
+    connection_id: str,
     turn_id: int | None = None,
 ) -> list[int]:
     """Insert or refresh learned entries. Returns the ids actually written.
@@ -168,8 +384,10 @@ async def write_entries(
     stamped the answer onto an entry describing business tables, permanently
     stale from the moment it was written.
 
-    Named entries upsert, so re-learning `revenue` refines one row instead of
-    accumulating near-duplicates for compaction to clean up later.
+    Named entries upsert **within a connection**, so re-learning `revenue`
+    refines one row instead of accumulating near-duplicates for compaction to
+    clean up later — while `revenue` on another warehouse stays a separate
+    entry, because it is a separate fact.
 
     **A human's pinned entry is never overwritten.** That is the whole point of
     the admin surface: correcting a recipe fixes every future question that
@@ -182,12 +400,14 @@ async def write_entries(
         cur = await conn.execute(
             """
             INSERT INTO cache_entry (
-                kind, name, claim, sql_fragment, tables, origin,
+                connection_id, kind, name, claim, sql_fragment, tables, origin,
                 pinned, disabled, tombstone, verified, schema_fp,
                 created_turn, last_used_turn
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (name) WHERE name IS NOT NULL
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            -- Postgres infers cache_entry_conn_name_key from the columns plus
+            -- the matching predicate.
+            ON CONFLICT (connection_id, name) WHERE name IS NOT NULL
             DO UPDATE SET
                 kind         = EXCLUDED.kind,
                 claim        = EXCLUDED.claim,
@@ -202,6 +422,7 @@ async def write_entries(
             RETURNING id
             """,
             (
+                connection_id,
                 e.kind,
                 e.name,
                 e.claim,
@@ -225,12 +446,22 @@ async def write_entries(
 
 
 async def bump_hits(
-    conn: AsyncConnection, ids: Sequence[int], *, turn_id: int | None = None
+    conn: AsyncConnection,
+    ids: Sequence[int],
+    *,
+    connection_id: str,
+    turn_id: int | None = None,
 ) -> None:
     """Mark the entries a turn actually used.
 
     `hits` orders the cache and shows blast radius in the admin list;
     `last_used_turn` is what lets compaction drop entries nothing has needed.
+
+    The `connection_id` clause is belt and braces — the ids come from an
+    already-scoped `load_cache`. It earns its place on the resumed-checkpoint
+    path: a checkpointed TurnState carries entry ids, and a thread replayed
+    against another connection would otherwise silently credit that
+    connection's entries to this one's turn.
     """
     if not ids:
         return
@@ -240,9 +471,9 @@ async def bump_hits(
         SET hits = hits + 1,
             last_used_turn = COALESCE(%s, last_used_turn),
             updated_at = now()
-        WHERE id = ANY(%s)
+        WHERE id = ANY(%s) AND connection_id = %s
         """,
-        (turn_id, list(ids)),
+        (turn_id, list(ids), connection_id),
     )
 
 
@@ -263,23 +494,73 @@ async def _wipe(conn: AsyncConnection, table: str) -> int:
     return row["n"] if row else 0
 
 
-async def reset_learned(conn: AsyncConnection) -> dict[str, int]:
-    """Wipe every trace of what the agent has learned. Returns rows-per-table.
+async def reset_learned(
+    conn: AsyncConnection, *, connection_id: str
+) -> dict[str, int]:
+    """Forget what the agent learned about *one* connection. Rows-per-table.
 
     The stage recovery button (PLAN.md §9), and the only destructive operation
     the API exposes. It takes the cache, the turn log *and* LangGraph's
     checkpoints together: an empty cache beside a turn log that says the
     questions were already asked is a state nothing knows how to read.
 
+    The checkpoint tables are LangGraph's and are keyed by `thread_id` — the
+    session UUID — with no idea a connection exists. `turn` records both, so it
+    is the mapping, and **the order below is load-bearing**: the turn rows are
+    what the mapping is made of, so they go last.
+
+    Leaving the checkpoints alone would be wrong rather than untidy. A
+    checkpointed TurnState holds a `turn_id` and a list of cache-entry ids;
+    after this runs, both dangle, and the next question on that thread resumes
+    into a state describing rows that no longer exist.
+
+    `checkpoint_migrations` is deliberately absent — it is LangGraph's schema
+    version table, not turn state.
+
     The business data is on another server and this connection cannot reach it.
     That used to be a promise kept by a list of table names; now it is a promise
     kept by the network.
+    """
+    threads = "SELECT DISTINCT session_id::text FROM turn WHERE connection_id = %s"
+    wiped = {}
+    for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+        cur = await conn.execute(
+            sql.SQL("DELETE FROM {} WHERE thread_id IN (" + threads + ")").format(
+                sql.Identifier(table)
+            ),
+            (connection_id,),
+        )
+        wiped[table] = cur.rowcount
+    for table in ("turn", "cache_entry"):
+        cur = await conn.execute(
+            sql.SQL("DELETE FROM {} WHERE connection_id = %s").format(
+                sql.Identifier(table)
+            ),
+            (connection_id,),
+        )
+        wiped[table] = cur.rowcount
+    # Ordered as a reader expects to see it, not as the deletes had to run.
+    return {k: wiped[k] for k in ("cache_entry", "turn", "checkpoints",
+                                  "checkpoint_blobs", "checkpoint_writes")}
 
-    Written out rather than driven from a list: there is one caller, and these
-    six tables *are* the agent's database. The cost is that a
-    `langgraph-checkpoint-postgres` release adding a seventh has to be added
-    here by hand — and the failure mode is quiet, `make reset` no longer
-    resetting, so it is worth checking after an upgrade.
+
+async def reset_everything(conn: AsyncConnection) -> dict[str, int]:
+    """Empty the agent's database. Every connection, every turn, every thread.
+
+    **Not exposed on the API** — the destructive operation a user gets is scoped
+    to a connection they named. This exists for the test suite and for a `make`
+    target, where "start over" means all of it.
+
+    `connection` is deliberately excluded: the registry is configuration, not
+    learned state, and wiping it would delete the address of every warehouse
+    somebody registered. It also cannot be truncated alongside these anyway —
+    the foreign keys cascade the other way.
+
+    Written out rather than driven from a list: these six tables *are* the
+    agent's database. The cost is that a `langgraph-checkpoint-postgres` release
+    adding a seventh has to be added here by hand — and the failure mode is
+    quiet, `make reset-all` no longer resetting, so it is worth checking after
+    an upgrade.
     """
     return {
         "cache_entry": await _wipe(conn, "cache_entry"),
@@ -292,7 +573,7 @@ async def reset_learned(conn: AsyncConnection) -> dict[str, int]:
 
 
 async def start_turn(
-    conn: AsyncConnection, *, session_id: str | UUID, question: str
+    conn: AsyncConnection, *, connection_id: str, session_id: str | UUID, question: str
 ) -> int:
     """Open the turn row and return its id.
 
@@ -301,8 +582,9 @@ async def start_turn(
     ends.
     """
     cur = await conn.execute(
-        "INSERT INTO turn (session_id, question) VALUES (%s, %s) RETURNING id",
-        (str(session_id), question),
+        "INSERT INTO turn (connection_id, session_id, question) "
+        "VALUES (%s, %s, %s) RETURNING id",
+        (connection_id, str(session_id), question),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -310,7 +592,11 @@ async def start_turn(
 
 
 async def fail_open_turn(
-    conn: AsyncConnection, session_id: str | UUID, message: str
+    conn: AsyncConnection,
+    session_id: str | UUID,
+    message: str,
+    *,
+    connection_id: str,
 ) -> int | None:
     """Close the most recent unfinished turn for a session.
 
@@ -323,15 +609,65 @@ async def fail_open_turn(
         UPDATE turn SET answer = %s
         WHERE id = (
             SELECT id FROM turn
-            WHERE session_id = %s AND answer IS NULL
+            WHERE session_id = %s AND connection_id = %s AND answer IS NULL
             ORDER BY id DESC LIMIT 1
         )
         RETURNING id
         """,
-        (message, str(session_id)),
+        (message, str(session_id), connection_id),
     )
     row = await cur.fetchone()
     return row["id"] if row else None
+
+
+async def session_connection(
+    conn: AsyncConnection, session_id: str | UUID
+) -> str | None:
+    """Which connection this session has been asking about, if any.
+
+    A thread's history is checkpointed, so reusing a session id against a second
+    warehouse would hand the model warehouse A's conversation while it answers
+    about B. The caller refuses that; this is how it finds out.
+    """
+    cur = await conn.execute(
+        "SELECT connection_id FROM turn WHERE session_id = %s "
+        "ORDER BY id DESC LIMIT 1",
+        (str(session_id),),
+    )
+    row = await cur.fetchone()
+    return row["connection_id"] if row else None
+
+
+async def read_turns(
+    conn: AsyncConnection,
+    *,
+    connection_id: str,
+    limit: int = 50,
+    finished: bool = True,
+) -> list[dict[str, Any]]:
+    """The demo chart, as rows: what each turn asked and what it cost.
+
+    Queried newest-first with a LIMIT so a long-lived connection paginates, and
+    returned **ascending** so it reads left-to-right like the chart. The
+    reversal is deliberate — this endpoint exists to replace `make turns`, which
+    ordered by id.
+
+    `finished` defaults to true for the same reason: `make turns` filtered
+    `answer IS NOT NULL`, so a turn still in flight never appeared. Passing
+    false shows those, and the failed ones, which the old query could not.
+    """
+    cur = await conn.execute(
+        f"""
+        SELECT id, question, sql, answer, tool_calls, explored,
+               tokens_in, tokens_out, latency_ms, cache_entries, created_at
+        FROM turn
+        WHERE connection_id = %s {"AND answer IS NOT NULL" if finished else ""}
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (connection_id, limit),
+    )
+    return list(reversed(await cur.fetchall()))
 
 
 async def finish_turn(

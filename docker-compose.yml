@@ -76,7 +76,9 @@ services:
       # Only a dependency change needs `docker compose build`.
       - ./app:/srv/app
     healthcheck:
-      # So `make up`'s --wait covers the API too. /health checks both servers.
+      # So `make up`'s --wait covers the API too. /health checks the agent's own
+      # database; a registered target being down is a fact about that connection,
+      # not about this process — see POST /v1/connections/{id}/test.
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 3s
       timeout: 5s

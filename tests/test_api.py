@@ -15,6 +15,12 @@ from psycopg import AsyncConnection
 
 from app import store
 from app.settings import settings
+from tests.conftest import DEFAULT_CONNECTION as CID
+
+# Every route about learned state hangs off the connection it is about, so the
+# unscoped path does not exist to be reached by accident.
+CACHE = f"/v1/connections/{CID}/cache"
+
 
 PROBE = "api_probe"
 
@@ -58,6 +64,7 @@ async def seed_entries(conn: AsyncConnection) -> None:
                 tables=["orders"],
             ),
         ],
+        connection_id=CID,
     )
 
 
@@ -87,7 +94,7 @@ async def test_v1_rejects_anything_but_the_token(client: AsyncClient, monkeypatc
     monkeypatch.setenv("API_TOKEN", "s3cret")
     settings.cache_clear()
     try:
-        resp = await client.get("/v1/cache", headers=header)
+        resp = await client.get(CACHE, headers=header)
         assert resp.status_code == 401
         assert resp.headers["www-authenticate"] == "Bearer"
     finally:
@@ -98,7 +105,7 @@ async def test_the_right_token_gets_in(client: AsyncClient, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "s3cret")
     settings.cache_clear()
     try:
-        resp = await client.get("/v1/cache", headers={"authorization": "Bearer s3cret"})
+        resp = await client.get(CACHE, headers={"authorization": "Bearer s3cret"})
         assert resp.status_code == 200
     finally:
         settings.cache_clear()
@@ -108,21 +115,21 @@ async def test_an_unset_token_leaves_v1_open(client: AsyncClient):
     """What a first `make up` and the test suite run on. The server warns at
     startup rather than leaving it silent."""
     assert settings().api_token == ""
-    assert (await client.get("/v1/cache")).status_code == 200
+    assert (await client.get(CACHE)).status_code == 200
 
 
 # ---------------------------------------------------------------- GET /v1/cache
 
 
 async def test_cache_is_empty_before_anything_is_learned(client: AsyncClient):
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
     assert body["entries"] == []
     assert body["summary"] == {"total": 0, "verified": 0, "stale": 0, "disabled": 0}
 
 
 async def test_cache_lists_entries_as_the_model_sees_them(client: AsyncClient, conn):
     await seed_entries(conn)
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
 
     assert body["summary"]["total"] == 2
     assert body["summary"]["verified"] == 1
@@ -141,9 +148,9 @@ async def test_the_listing_is_ordered_by_hits_like_load_cache(client: AsyncClien
     is for."""
     await seed_entries(conn)
     cur = await conn.execute("SELECT id FROM cache_entry WHERE name = 'orders.created'")
-    await store.bump_hits(conn, [(await cur.fetchone())["id"]])
+    await store.bump_hits(conn, [(await cur.fetchone())["id"]], connection_id=CID)
 
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
     assert [e["name"] for e in body["entries"]] == ["orders.created", "active customer"]
 
 
@@ -170,8 +177,9 @@ async def test_tombstones_are_listed_and_disabled_entries_are_only_counted(
                 disabled=True,
             ),
         ],
+        connection_id=CID,
     )
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
 
     assert [e["name"] for e in body["entries"]] == ["revenue"]
     assert body["entries"][0]["tombstone"] is True
@@ -181,12 +189,12 @@ async def test_tombstones_are_listed_and_disabled_entries_are_only_counted(
 async def test_kind_filters_the_entries_but_not_the_summary(client: AsyncClient, conn):
     """Filtering the view must not misreport how big the cache is."""
     await seed_entries(conn)
-    body = (await client.get("/v1/cache", params={"kind": "recipe"})).json()
+    body = (await client.get(CACHE, params={"kind": "recipe"})).json()
 
     assert [e["name"] for e in body["entries"]] == ["active customer"]
     assert body["summary"]["total"] == 2
 
-    assert (await client.get("/v1/cache", params={"kind": "nonsense"})).status_code == 422
+    assert (await client.get(CACHE, params={"kind": "nonsense"})).status_code == 422
 
 
 async def test_a_renamed_column_marks_its_entry_stale(
@@ -203,15 +211,15 @@ async def test_a_renamed_column_marks_its_entry_stale(
         tables=[PROBE],
     )
     await store.fingerprint_entries(target_conn, [entry])
-    await store.write_entries(conn, [entry])
+    await store.write_entries(conn, [entry], connection_id=CID)
 
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
     assert body["entries"][0]["stale"] is False
     assert body["summary"]["stale"] == 0
 
     await target_conn.execute(f"ALTER TABLE {PROBE} RENAME COLUMN created TO created_at")
 
-    body = (await client.get("/v1/cache")).json()
+    body = (await client.get(CACHE)).json()
     assert body["entries"][0]["stale"] is True
     assert body["summary"]["stale"] == 1
 
@@ -220,7 +228,7 @@ async def test_internal_bookkeeping_stays_off_the_wire(client: AsyncClient, conn
     """`schema_fp` and the turn pointers exist for the graph. Putting them on the
     wire would make them part of a versioned contract."""
     await seed_entries(conn)
-    entry = (await client.get("/v1/cache")).json()["entries"][0]
+    entry = (await client.get(CACHE)).json()["entries"][0]
     for field in ("schema_fp", "created_turn", "last_used_turn", "created_at"):
         assert field not in entry
 
@@ -232,17 +240,18 @@ async def test_delete_wipes_learned_state_and_reports_what_it_took(
     client: AsyncClient, conn
 ):
     await seed_entries(conn)
-    await store.start_turn(conn, session_id="11111111-1111-1111-1111-111111111111",
+    await store.start_turn(conn, connection_id=CID,
+                          session_id="11111111-1111-1111-1111-111111111111",
                            question="how many customers do we have?")
 
-    wiped = (await client.delete("/v1/cache")).json()["wiped"]
+    wiped = (await client.delete(CACHE)).json()["wiped"]
     assert wiped["cache_entry"] == 2
     assert wiped["turn"] >= 1
     # The checkpoints go too: an empty cache beside a turn log saying the
     # questions were already asked is a state nothing knows how to read.
     assert "checkpoints" in wiped
 
-    assert (await client.get("/v1/cache")).json()["entries"] == []
+    assert (await client.get(CACHE)).json()["entries"] == []
 
 
 async def test_delete_leaves_the_business_data_alone(client: AsyncClient, target_conn):
@@ -256,7 +265,7 @@ async def test_delete_leaves_the_business_data_alone(client: AsyncClient, target
     before = (await cur.fetchone())["n"]
     assert before > 0
 
-    await client.delete("/v1/cache")
+    await client.delete(CACHE)
 
     cur = await target_conn.execute("SELECT count(*) AS n FROM customer")
     assert (await cur.fetchone())["n"] == before

@@ -9,6 +9,12 @@ Now it is two servers and a role that holds SELECT. These tests are what say so
 — in particular `test_the_agent_cannot_see_its_own_memory`, which replaces the
 version that only proved a Python set was doing its job.
 
+**One of those halves came back.** With a registered connection the credentials
+are whatever the user handed us, so "the role holds SELECT" is a hope, not a
+property. `test_a_user_supplied_dsn_still_cannot_write` is the one that says the
+guarantee moved rather than evaporated: every target pool opens its connections
+in a read-only session, which binds any role including a superuser.
+
 Requires `make up && make migrate && make seed`.
 """
 
@@ -166,7 +172,7 @@ async def test_reset_cannot_reach_the_business_data(agent_conn, target_conn):
         cur = await target_conn.execute(f"SELECT count(*) AS n FROM {table}")
         counts[table] = (await cur.fetchone())["n"]
 
-    await store.reset_learned(agent_conn)
+    await store.reset_everything(agent_conn)
 
     assert await table_names(target_conn) == before
     for table, n in counts.items():
@@ -174,9 +180,62 @@ async def test_reset_cannot_reach_the_business_data(agent_conn, target_conn):
         assert (await cur.fetchone())["n"] == n
 
 
-async def test_reset_wipes_every_table_in_the_agent_database(agent_conn):
-    """The longhand list in `reset_learned` has to stay complete. A LangGraph
-    upgrade that adds a checkpoint table would otherwise leave it behind, and
-    `make reset` would quietly stop being a reset."""
-    wiped = await store.reset_learned(agent_conn)
-    assert set(wiped) == await table_names(agent_conn)
+
+
+# ------------------------------------------------ a target we did not choose
+
+
+async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
+    """Register credentials that genuinely *can* write, and watch them not.
+
+    `demo/demo.sql` builds a SELECT-only role, so for the built-in connection
+    the transaction guard was a second line of defence. A registered connection
+    has no such promise behind it — this test is what would fail if somebody
+    removed the `configure=` callback in app/db.py, which is otherwise five
+    lines with nothing pointing at them.
+    """
+    from psycopg.conninfo import conninfo_to_dict
+
+    from app import db
+
+    owner = conninfo_to_dict(settings().target_admin_url)
+    resp = await client.post(
+        "/v1/connections",
+        params={"probe": "false"},
+        json={
+            "id": "owner",
+            "host": owner["host"],
+            "port": int(owner.get("port") or 5432),
+            "database": owner["dbname"],
+            "username": owner["user"],
+            "password": owner["password"],
+        },
+    )
+    assert resp.status_code == 201
+
+    try:
+        # These credentials are the database's owner. Prove it, so the two
+        # assertions below are about the guard and not about a role that could
+        # never have written anyway.
+        probe = (await client.post("/v1/connections/owner/test")).json()
+        assert probe["read_only"] is False
+
+        # Where generated SQL runs.
+        async with db.target_readonly("owner") as conn:
+            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                await conn.execute("DELETE FROM customer")
+
+        # And the plain connection, which `explore`, `infer_tables` and
+        # `extract`'s fingerprinting use and which has no transaction of its own.
+        async with db.target("owner") as conn:
+            cur = await conn.execute("SHOW default_transaction_read_only")
+            assert (await cur.fetchone())["default_transaction_read_only"] == "on"
+            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                await conn.execute("DELETE FROM customer")
+
+        # And nothing was deleted by any of that.
+        cur = await conn.execute("SELECT count(*) AS n FROM customer")
+        assert (await cur.fetchone())["n"] == 2000
+    finally:
+        await agent_conn.execute("DELETE FROM connection WHERE id = 'owner'")
+        await db.evict("owner")

@@ -25,14 +25,12 @@ CREATE TABLE IF NOT EXISTS cache_entry (
   updated_at     timestamptz NOT NULL DEFAULT now()
 );
 
--- load_cache() reads everything not disabled, ordered by hits.
-CREATE INDEX IF NOT EXISTS cache_entry_load_idx
-  ON cache_entry (disabled, hits DESC);
-
--- A named concept is one entry, not one per turn that re-learned it.
--- Partial, because schema facts are frequently unnamed.
-CREATE UNIQUE INDEX IF NOT EXISTS cache_entry_name_key
-  ON cache_entry (name) WHERE name IS NOT NULL;
+-- Both of cache_entry's indexes moved to 002, where they gained a
+-- connection_id. Leaving the global unique name index here would not merely be
+-- redundant: this file is re-applied on every `make migrate`, so it would
+-- recreate the index 002 had dropped, and the first time two connections both
+-- learned an entry called `revenue` the run would fail mid-file under
+-- ON_ERROR_STOP=1.
 
 CREATE TABLE IF NOT EXISTS turn (
   id            bigserial PRIMARY KEY,

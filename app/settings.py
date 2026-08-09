@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # The agent connects as `reader`, which holds SELECT and nothing else.
     # Named for the role it plays, not for the demo fixture that fills it —
     # point this at a real warehouse and the name still reads true.
+    #
+    # This is now one connection among however many are registered: it is the
+    # address of the `default` row, the only one the environment owns. Every
+    # other target comes out of the `connection` table.
     target_database_url: str = "postgresql://reader:reader@localhost:5432/business"
 
     # The owner connection. Nothing in app/ reads it: it exists for the test
@@ -25,13 +29,19 @@ class Settings(BaseSettings):
     # demo/demo.sql from outside Docker.
     target_admin_url: str = "postgresql://business:business@localhost:5432/business"
 
-    # --- the API, and the scripts that talk to it --------------------------
+    # --- the API -----------------------------------------------------------
+    # Where the client looks for the server is the client's business: the CLI
+    # reads SQL_AGENT_URL itself and imports nothing from here.
     # Everything under /v1 requires this token. Empty disables enforcement,
     # which is what tests and a first `make up` run on; the server says so
     # at startup rather than leaving it silent.
     api_token: str = ""
-    # Where scripts/* look for the server. Not read by the server itself.
-    api_url: str = "http://localhost:8000"
+
+    # A urlsafe-base64 32-byte Fernet key. Set, and registered warehouse
+    # passwords are encrypted at rest on agent-db; empty, and they are stored in
+    # plaintext and the server warns at startup — the same bargain api_token
+    # makes above. See app/secrets.py for what this does and does not buy.
+    connection_secret: str = ""
 
     # "anthropic" is the demo model. "openai_compat" points at any OpenAI-shaped
     # endpoint (Ollama, vLLM, LM Studio) for local development.
@@ -72,6 +82,14 @@ class Settings(BaseSettings):
     max_fix_attempts: int = 3
     statement_timeout: str = "5s"
     max_rows: int = 50  # rows handed back to the model from execute
+
+    # Per-target pools. Small and short-lived by default: these are somebody
+    # else's databases, and a registry of ten should not mean ten idle sockets.
+    target_pool_max: int = 5
+    target_pool_max_idle: float = 300.0
+    # A registered warehouse that is down should say so in seconds, not hang the
+    # turn that asked about it.
+    target_connect_timeout: float = 10.0
 
 
 @lru_cache

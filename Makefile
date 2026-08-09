@@ -1,9 +1,25 @@
-.PHONY: up down build migrate seed reset test psql-agent psql-demo logs \
-        logs-agent logs-demo logs-api health t1 t2 t3 demo demo-verify
+.PHONY: up down build migrate seed reset reset-all test test-live connections \
+        psql-agent psql-demo logs logs-agent logs-demo logs-api health \
+        customer-count west-coast-customer-count cache turns demo demo-verify
 
 SHELL := /bin/bash
 DC ?= docker compose
-API ?= http://localhost:8000
+
+# `sql-agent` reads these and nothing else. `-include` so a fresh clone with no
+# .env still runs; the names are listed explicitly on `export` so an
+# ANTHROPIC_API_KEY sitting in .env does not leak into every recipe.
+-include .env
+# The default has to precede the `export`: `export FOO` on an undefined variable
+# defines it as empty, which then makes `?=` a no-op and leaves every recipe
+# calling a CLI with no server to talk to.
+SQL_AGENT_URL ?= http://localhost:8000/v1
+export SQL_AGENT_URL SQL_AGENT_API_KEY
+# /health is unversioned, so strip the suffix rather than keep a second variable.
+API := $(SQL_AGENT_URL:/v1=)
+
+# Everything the demo does runs against the built-in connection, whose address
+# is TARGET_DATABASE_URL. A registered one would be `-c <id>`.
+CONN ?= default
 
 # Two servers. The agent's memory and the data it queries are not in the same
 # place, so neither are the psql invocations that reach them.
@@ -38,7 +54,7 @@ logs-demo:
 logs-api:  ## the reload log lives here — an edit to app/ restarts in place
 	$(DC) logs -f api
 
-health:  ## is the API up? every script needs it to be
+health:  ## is the API up? the CLI needs it to be
 	@curl -fsS $(API)/health || { \
 	  echo "no API at $(API) — start it with 'make up'"; exit 1; }
 	@echo
@@ -63,9 +79,14 @@ seed:  ## build the demo database: role, schema, and 2,000 customers
 	@$(PSQL_DEMO) < demo/demo.sql
 	@echo "seed complete"
 
-reset:  ## wipe learned state and reseed — the stage recovery button
-	uv run python -m scripts.reset
+reset:  ## wipe what the demo connection learned, and reseed — the stage button
+	uv run sql-agent reset -c $(CONN) --yes
 	$(MAKE) seed
+
+reset-all:  ## every connection, plus the registry's turn log. Rarely what you want.
+	@$(PSQL_AGENT) -c "TRUNCATE cache_entry, turn, checkpoints, checkpoint_blobs, \
+	  checkpoint_writes RESTART IDENTITY CASCADE"
+	@echo "all learned state wiped (the connection registry is untouched)"
 
 test:
 	uv run pytest -q
@@ -76,19 +97,19 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # --- demo: presentation & recording -----------------------------------------
 
 customer-count:  ## ask the cold-path question and print the token cost
-	uv run python -m scripts.ask "how many customers do we have?"
+	uv run sql-agent -c $(CONN) "how many customers do we have?"
 
 west-coast-customer-count:  ## ask a new question the cache can compose an answer to
-	uv run python -m scripts.ask "how many customers do we have in the west region?"
+	uv run sql-agent -c $(CONN) "how many customers do we have in the west region?"
+
+connections:  ## every database the agent can be pointed at
+	@uv run sql-agent connections ls
 
 cache:  ## show what the agent has learned, as the model sees it
-	@uv run python -m scripts.cache
+	@uv run sql-agent cache -c $(CONN)
 
 turns:  ## tokens per turn — the demo chart, as a table
-	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
-	  explored, tool_calls AS tools, cache_entries AS cached, \
-	  tokens_in + tokens_out AS tokens, latency_ms / 1000 AS secs \
-	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
+	@uv run sql-agent turns -c $(CONN)
 
 demo: health reset  ## record the terminal demo — live, 17-25 min of real model time
 	$(VHS) demo/demo.tape
@@ -97,13 +118,14 @@ demo-verify:  ## did the last take earn its place? read it from the turn table
 	@echo "=== turns ==="
 	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
 	  explored, tokens_in + tokens_out AS tokens, answer \
-	  FROM turn WHERE answer IS NOT NULL ORDER BY id"
+	  FROM turn WHERE answer IS NOT NULL AND connection_id = '$(CONN)' \
+	  ORDER BY id"
 	@echo "=== gate ==="
 	@out=$$($(PSQL_AGENT) -P pager=off -t -A -c \
 	  "WITH t AS ( \
 	     SELECT row_number() OVER (ORDER BY id) AS n, explored, \
 	            tokens_in + tokens_out AS tok, answer \
-	     FROM turn WHERE answer IS NOT NULL) \
+	     FROM turn WHERE answer IS NOT NULL AND connection_id = '$(CONN)') \
 	   SELECT CASE WHEN ok THEN 'PASS  ' ELSE 'FAIL  ' END || label FROM ( \
 	     SELECT 1 AS i, (SELECT count(*) FROM t) = 3 AS ok, \
 	            'three turns recorded' AS label \

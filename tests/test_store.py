@@ -27,6 +27,7 @@ from app.store import (
     start_turn,
     write_entries,
 )
+from tests.conftest import DEFAULT_CONNECTION as CID
 
 FP_TABLE = "fp_probe"
 
@@ -107,7 +108,7 @@ async def test_fingerprint_ignores_unrelated_tables(fp, probe_table):
 
 async def test_write_and_load_round_trip(conn, fp, probe_table):
     """The full seam: fingerprint on the demo server, write on the agent's."""
-    turn_id = await start_turn(conn, session_id=uuid4(), question="how many customers?")
+    turn_id = await start_turn(conn, connection_id=CID, session_id=uuid4(), question="how many customers?")
     entry = CacheEntry(
         kind="recipe",
         name="spec:store roundtrip",
@@ -117,10 +118,10 @@ async def test_write_and_load_round_trip(conn, fp, probe_table):
         verified=True,
     )
     await fingerprint_entries(fp, [entry])
-    written = await write_entries(conn, [entry], turn_id=turn_id)
+    written = await write_entries(conn, [entry], connection_id=CID, turn_id=turn_id)
     assert len(written) == 1
 
-    loaded = {e.name: e for e in await load_cache(conn)}
+    loaded = {e.name: e for e in await load_cache(conn, connection_id=CID)}
     got = loaded["spec:store roundtrip"]
     assert got.kind == "recipe"
     assert got.sql_fragment == "customer WHERE deleted_at IS NULL"
@@ -147,8 +148,8 @@ async def test_writing_without_fingerprinting_leaves_it_unstamped(conn, probe_ta
         claim="written without a fingerprint",
         tables=[probe_table],
     )
-    await write_entries(conn, [entry])
-    got = next(e for e in await load_cache(conn) if e.name == "spec:unstamped")
+    await write_entries(conn, [entry], connection_id=CID)
+    got = next(e for e in await load_cache(conn, connection_id=CID) if e.name == "spec:unstamped")
     assert got.schema_fp is None
 
 
@@ -161,16 +162,16 @@ async def test_fingerprinting_skips_entries_with_no_tables(conn, fp):
 
 async def test_named_entries_upsert_rather_than_duplicate(conn):
     first = CacheEntry(kind="recipe", name="spec:revenue", claim="qty * price", tables=[])
-    await write_entries(conn, [first])
+    await write_entries(conn, [first], connection_id=CID)
     refined = CacheEntry(
         kind="recipe",
         name="spec:revenue",
         claim="qty * price, excluding cancelled orders",
         tables=[],
     )
-    await write_entries(conn, [refined])
+    await write_entries(conn, [refined], connection_id=CID)
 
-    matches = [e for e in await load_cache(conn) if e.name == "spec:revenue"]
+    matches = [e for e in await load_cache(conn, connection_id=CID) if e.name == "spec:revenue"]
     assert len(matches) == 1
     assert matches[0].claim == "qty * price, excluding cancelled orders"
 
@@ -189,15 +190,15 @@ async def test_a_humans_pinned_entry_is_never_overwritten(conn):
         pinned=True,
         tables=[],
     )
-    await write_entries(conn, [human])
+    await write_entries(conn, [human], connection_id=CID)
 
     relearned = CacheEntry(
         kind="recipe", name="spec:revenue", claim="SUM(oi.qty * p.unit_price)", tables=[]
     )
-    written = await write_entries(conn, [relearned])
+    written = await write_entries(conn, [relearned], connection_id=CID)
 
     assert written == [], "the pinned row must not be updated"
-    survivor = next(e for e in await load_cache(conn) if e.name == "spec:revenue")
+    survivor = next(e for e in await load_cache(conn, connection_id=CID) if e.name == "spec:revenue")
     assert survivor.claim == "SUM(oi.qty * oi.price) excluding cancelled orders"
     assert survivor.origin == "human"
 
@@ -216,12 +217,13 @@ async def test_load_cache_orders_by_hits_and_skips_disabled(conn):
                 disabled=True,
             ),
         ],
+        connection_id=CID,
     )
-    cache = {e.name: e for e in await load_cache(conn)}
+    cache = {e.name: e for e in await load_cache(conn, connection_id=CID)}
     assert "spec:off" not in cache
 
-    await bump_hits(conn, [cache["spec:hot"].id], turn_id=7)
-    reloaded = await load_cache(conn)
+    await bump_hits(conn, [cache["spec:hot"].id], connection_id=CID, turn_id=7)
+    reloaded = await load_cache(conn, connection_id=CID)
     assert reloaded[0].name == "spec:hot"
     assert reloaded[0].hits == 1
     assert reloaded[0].last_used_turn == 7
@@ -241,8 +243,9 @@ async def test_tombstones_stay_visible_to_the_model(conn):
                 tombstone=True,
             )
         ],
+        connection_id=CID,
     )
-    loaded = await load_cache(conn)
+    loaded = await load_cache(conn, connection_id=CID)
     assert any(e.tombstone for e in loaded)
 
 
@@ -251,7 +254,7 @@ async def test_tombstones_stay_visible_to_the_model(conn):
 
 async def test_turn_records_what_it_cost(conn):
     session = uuid4()
-    turn_id = await start_turn(conn, session_id=session, question="how many customers?")
+    turn_id = await start_turn(conn, connection_id=CID, session_id=session, question="how many customers?")
     await finish_turn(
         conn,
         turn_id,

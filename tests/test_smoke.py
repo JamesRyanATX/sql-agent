@@ -10,11 +10,18 @@ from app.events import to_events
 
 
 async def test_health(client: AsyncClient):
-    """Both servers, because a turn needs both — an agent that can read its
-    cache and not the business data is not healthy."""
+    """The agent's own database only.
+
+    It used to ping the target too, back when there was one. With a registry it
+    would answer "unhealthy" for a process that is perfectly able to serve every
+    *other* connection — see the docstring on the endpoint.
+    """
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "agent": "ok", "target": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok" and body["agent"] == "ok"
+    assert body["connections"] >= 1  # `default` at least; the suite registers two
+    assert "target" not in body
 
 
 @pytest.mark.live

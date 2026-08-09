@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 
 from app import db, graph, llm, store
 from app.settings import settings
+from tests.conftest import DEFAULT_CONNECTION
 
 
 class ScriptedModel:
@@ -61,13 +62,20 @@ async def pool() -> AsyncIterator[None]:
     await db.close_pools()
 
 
-async def run(question: str = "how many customers do we have?") -> tuple[list[dict], str]:
+async def run(
+    question: str = "how many customers do we have?",
+    connection_id: str = DEFAULT_CONNECTION,
+) -> tuple[list[dict], str]:
     """Drive one turn, collecting the custom events the UI would see."""
     session = str(uuid4())
     compiled = graph.build_graph()
     events: list[dict] = []
     async for mode, chunk in compiled.astream(
-        {"session_id": session, "question": question},
+        {
+            "session_id": session,
+            "question": question,
+            "connection_id": connection_id,
+        },
         stream_mode=["custom"],
         config={"configurable": {"thread_id": session}},
     ):
@@ -237,7 +245,7 @@ async def test_the_readonly_transaction_applies_both_guards(pool):
     """Regression: these were set with `SET LOCAL ... = %s`, which takes no bind
     parameters, so the timeout silently never applied — every generated query
     could have hung the demo for as long as it liked."""
-    async with db.target_readonly() as conn:
+    async with db.target_readonly(DEFAULT_CONNECTION) as conn:
         cur = await conn.execute("SHOW statement_timeout")
         assert (await cur.fetchone())["statement_timeout"] == settings().statement_timeout
         cur = await conn.execute("SHOW transaction_read_only")
@@ -277,9 +285,9 @@ async def test_execute_is_read_only(pool, monkeypatch):
 # ------------------------------------------------------------- the plan branch
 
 
-async def seed_cache(*entries) -> None:
+async def seed_cache(*entries, connection_id: str = DEFAULT_CONNECTION) -> None:
     async with db.agent() as conn:
-        await store.write_entries(conn, list(entries))
+        await store.write_entries(conn, list(entries), connection_id=connection_id)
 
 
 async def clear_cache(prefix: str = "spec:") -> None:
@@ -583,12 +591,13 @@ async def test_tables_are_inferred_when_the_model_omits_them(pool):
     moves under it — schema_fp would be a hash over nothing."""
     assert await graph.infer_tables(
         "SELECT c.region, SUM(oi.qty * oi.price) FROM orders o "
-        "JOIN order_item oi ON o.id = oi.order_id JOIN customer c ON c.id = o.customer_id"
+        "JOIN order_item oi ON o.id = oi.order_id JOIN customer c ON c.id = o.customer_id",
+        DEFAULT_CONNECTION,
     ) == ["customer", "order_item", "orders"]
 
     # Only real tables, and never the agent's own.
-    assert await graph.infer_tables("SELECT * FROM cache_entry") == []
-    assert await graph.infer_tables("SELECT 1") == []
+    assert await graph.infer_tables("SELECT * FROM cache_entry", DEFAULT_CONNECTION) == []
+    assert await graph.infer_tables("SELECT 1", DEFAULT_CONNECTION) == []
 
 
 async def test_extract_writes_entries_and_gates_verification(pool, monkeypatch):

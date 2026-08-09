@@ -36,6 +36,14 @@ def _add(a: int, b: int) -> int:
 class TurnState(TypedDict, total=False):
     session_id: str
     question: str
+    # Which registered database this turn is about. In the state and not in
+    # `config["configurable"]` alongside thread_id, deliberately: a resumed
+    # thread replays its checkpointed state, so a value living outside the
+    # checkpoint could silently switch warehouses mid-conversation — replaying
+    # a `cache` loaded from one while `execute` runs against another. It is
+    # also domain data (it scopes load_cache and lands in turn.connection_id),
+    # where thread_id is infrastructure.
+    connection_id: str
 
     turn_id: int
     started_at: float
@@ -255,9 +263,12 @@ async def load_cache(state: TurnState) -> TurnState:
     """Open the turn and load everything not disabled, ordered by hits."""
     async with db.agent() as conn:
         turn_id = await store.start_turn(
-            conn, session_id=state["session_id"], question=state["question"]
+            conn,
+            connection_id=state["connection_id"],
+            session_id=state["session_id"],
+            question=state["question"],
         )
-        entries = await store.load_cache(conn)
+        entries = await store.load_cache(conn, connection_id=state["connection_id"])
 
     cache = [
         {
@@ -356,7 +367,7 @@ async def explore(state: TurnState) -> TurnState:
     tokens_in = tokens_out = calls = 0
     result: llm.Result | None = None
 
-    async with db.target() as conn:
+    async with db.target(state["connection_id"]) as conn:
         while calls < settings().max_tool_calls:
             result = await llm.complete(
                 system=system,
@@ -456,7 +467,7 @@ async def execute(state: TurnState) -> TurnState:
     """Run the generated SQL under a read-only transaction with a timeout."""
     emit = get_stream_writer()
     try:
-        async with db.target_readonly() as conn:
+        async with db.target_readonly(state["connection_id"]) as conn:
             cur = await conn.execute(state["sql"])
             fetched = await cur.fetchmany(settings().max_rows)
         rows = json.loads(json.dumps(fetched, default=str))
@@ -549,7 +560,7 @@ def grounded_in(fragment: str | None, sql: str) -> bool:
     return all(token in ran for token in wanted)
 
 
-async def infer_tables(sql: str) -> list[str]:
+async def infer_tables(sql: str, connection_id: str) -> list[str]:
     """Which real tables does this SQL touch?
 
     The model is asked for `tables` and sometimes returns an empty list. Left
@@ -557,7 +568,7 @@ async def infer_tables(sql: str) -> list[str]:
     over nothing, so the entry can never go stale (§5) no matter what happens
     to the schema it depends on.
     """
-    async with db.target() as conn:
+    async with db.target(connection_id) as conn:
         cur = await conn.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
@@ -633,7 +644,7 @@ async def extract(state: TurnState) -> TurnState:
         return {}
 
     sql = state["sql"]
-    fallback_tables = await infer_tables(sql)
+    fallback_tables = await infer_tables(sql, state["connection_id"])
     entries = [
         store.CacheEntry(
             kind=e["kind"],
@@ -649,10 +660,15 @@ async def extract(state: TurnState) -> TurnState:
     # The one operation that spans both databases, and the order is forced: the
     # fingerprint is a fact about the business schema, the entry it lands on is
     # the agent's own memory, and no single connection reaches both.
-    async with db.target() as conn:
+    async with db.target(state["connection_id"]) as conn:
         await store.fingerprint_entries(conn, entries)
     async with db.agent() as conn:
-        written = await store.write_entries(conn, entries, turn_id=state["turn_id"])
+        written = await store.write_entries(
+            conn,
+            entries,
+            connection_id=state["connection_id"],
+            turn_id=state["turn_id"],
+        )
 
     emit(
         {
@@ -711,7 +727,10 @@ async def answer(state: TurnState) -> TurnState:
         # orders the cache and shows blast radius in /admin/cache.
         if not state.get("error"):
             await store.bump_hits(
-                conn, state.get("used_ids") or [], turn_id=state["turn_id"]
+                conn,
+                state.get("used_ids") or [],
+                connection_id=state["connection_id"],
+                turn_id=state["turn_id"],
             )
         await store.finish_turn(
             conn,
@@ -757,7 +776,7 @@ def route_after_execute(state: TurnState) -> str:
     return "extract"
 
 
-async def stream_turn(compiled, session_id: str, question: str):
+async def stream_turn(compiled, session_id: str, question: str, connection_id: str):
     """Drive one turn, yielding UI events. Never raises.
 
     A model timeout or a dropped connection would otherwise surface as a
@@ -767,7 +786,11 @@ async def stream_turn(compiled, session_id: str, question: str):
     """
     try:
         async for mode, chunk in compiled.astream(
-            {"session_id": session_id, "question": question},
+            {
+                "session_id": session_id,
+                "question": question,
+                "connection_id": connection_id,
+            },
             stream_mode=["updates", "custom"],
             config={"configurable": {"thread_id": session_id}},
         ):
@@ -785,7 +808,12 @@ async def stream_turn(compiled, session_id: str, question: str):
         message = f"{type(e).__name__}{': ' + detail if detail else ''}"
         try:
             async with db.agent() as conn:
-                await store.fail_open_turn(conn, session_id, f"failed — {message}")
+                await store.fail_open_turn(
+                    conn,
+                    session_id,
+                    f"failed — {message}",
+                    connection_id=connection_id,
+                )
         except Exception:  # the turn is already lost; don't lose the event too
             pass
         yield {"type": "error", "message": message, "fatal": True}
