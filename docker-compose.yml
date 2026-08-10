@@ -97,6 +97,11 @@ services:
       # exported in some terminal silently override the one in .env — measured:
       # a valid key in .env, a dead key in the shell, and every turn returning
       # 401 with .env looking correct. The container's key comes from .env.
+      #
+      # Same reason as the URLs above, and the same exception: the *address* of
+      # the trace stack genuinely differs in here, so it is overridden. The two
+      # LANGFUSE_ keys are not — they stay in .env with ANTHROPIC_API_KEY.
+      LANGFUSE_HOST: http://langfuse-web:3000
     ports:
       - "8000:8000"
     volumes:
@@ -113,7 +118,206 @@ services:
       retries: 20
       start_period: 10s
 
+  # --- the trace stack ------------------------------------------------------
+  #
+  # Opt-in, behind a profile, for the same reason mysql-db is: `make up` is two
+  # databases and an API, and this is six more containers and ~2GB of RAM.
+  # `make langfuse-up` starts it; the app degrades to doing nothing when it is
+  # absent, so `api` deliberately does not depend_on any of it — a non-profiled
+  # service depending on a profiled one is how `make up` starts failing.
+  #
+  # Ported from langfuse/langfuse's own docker-compose.yml (v4) with three
+  # deliberate changes:
+  #
+  #  1. No `${VAR:-default}` interpolation. Compose resolves that form against
+  #     *this repo's* .env, which is the passthrough hazard already documented on
+  #     `api` above. The credentials below are literals because this is a local
+  #     dev stack whose only published port is the UI; anything else should start
+  #     from the upstream file rather than from here.
+  #  2. Only langfuse-web publishes a port. Upstream binds its Postgres to
+  #     127.0.0.1:5432, which is demo-db, and ClickHouse, Redis and MinIO are
+  #     not wanted from the host at all. The consequence: the media endpoints
+  #     stay on the internal address, so media download from the browser will
+  #     not work. This agent uploads none.
+  #  3. LANGFUSE_INIT_* seeds the org, project, user and API keys, so the stack
+  #     comes up already holding the keys .env.example names. Without it the
+  #     first trace is gated on a click-through, and a demo that needs a
+  #     click-through before it can record anything gets recorded without it.
+  #
+  # Everything here is named langfuse-*: `postgres`, `redis` and `clickhouse`
+  # would be generic names sharing one default network with agent-db and
+  # demo-db, and this file's whole thesis is that those must not be confusable.
+
+  # The worker declares the shared environment, and web merges it. That way
+  # round rather than the other, because web's block is a *superset*: the
+  # LANGFUSE_INIT_* seeding belongs to the one container that owns the migration,
+  # and an anchor taken from web would hand a second writer the same seed on
+  # first boot.
+  langfuse-worker:
+    image: langfuse/langfuse-worker:4
+    container_name: sql-agent-langfuse-worker
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    depends_on: &langfuse-deps
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      SALT: sql-agent-local-salt
+      # Quoted, and not a run of zeros: YAML reads a bare all-digit scalar as an
+      # integer, so `0000…0000` reaches the container as the string "0" and the
+      # worker crash-loops on a validator demanding 64 hex characters.
+      # `openssl rand -hex 32` generated this one; it protects nothing here.
+      ENCRYPTION_KEY: "fba0d16c1bd5bf51b8c231ecc5668967684326c7923a3b7f63ca033f548f1778"
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: sql-agent-local-nextauth-secret
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: langfuse-redis-secret
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+  langfuse-web:
+    image: langfuse/langfuse:4
+    container_name: sql-agent-langfuse-web
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    depends_on: *langfuse-deps
+    environment:
+      <<: *langfuse-env
+      # Seeded on first boot only — no-ops once the rows exist. The key pair is
+      # the one .env.example ships commented out, so enabling tracing is two
+      # uncommented lines and a restart, with no click-through in between.
+      LANGFUSE_INIT_ORG_ID: sql-agent
+      LANGFUSE_INIT_ORG_NAME: sql-agent
+      LANGFUSE_INIT_PROJECT_ID: sql-agent
+      LANGFUSE_INIT_PROJECT_NAME: sql-agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-0000000000000000000000000000000000000000
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-0000000000000000000000000000000000000000
+      LANGFUSE_INIT_USER_EMAIL: dev@sql-agent.local
+      LANGFUSE_INIT_USER_NAME: dev
+      LANGFUSE_INIT_USER_PASSWORD: sql-agent-dev
+    ports:
+      - "3000:3000"
+    healthcheck:
+      # Upstream ships none, which makes `up -d --wait` return before the UI can
+      # answer — and opening the UI is the first thing anyone does.
+      #
+      # $$HOSTNAME and not localhost: next-server binds the container's own
+      # address rather than 0.0.0.0, so a loopback probe is refused while the
+      # published port answers 200 and the container sits unhealthy forever.
+      # The doubled $$ escapes compose's own interpolation.
+      test: ["CMD-SHELL", "wget -q --spider \"http://$$HOSTNAME:3000/api/public/health\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+  langfuse-db:
+    image: postgres:17-alpine
+    container_name: sql-agent-langfuse-db
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    container_name: sql-agent-langfuse-clickhouse
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: sql-agent-langfuse-redis
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    command: >
+      --requirepass langfuse-redis-secret
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "langfuse-redis-secret", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  langfuse-minio:
+    image: minio/minio
+    container_name: sql-agent-langfuse-minio
+    profiles: ["langfuse"]
+    restart: unless-stopped
+    entrypoint: sh
+    # The bucket has to exist before the server starts; nothing else creates it.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
 volumes:
   mysql-data:
   agent-pgdata:
   demo-pgdata:
+  langfuse-pgdata:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:
+  langfuse-redis-data:

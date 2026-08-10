@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from app import db, store
+from app import db, store, tracing
 from app.api import router as v1
 from app.graph import build_graph
 from app.settings import settings
@@ -55,9 +55,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "stored in plaintext on agent-db"
         )
 
+    if tracing.enabled():
+        # A warning and not an info, for both of the reasons the three below are:
+        # turning this on starts copying every question, prompt and result row
+        # into another datastore, which is the same kind of fact as "/v1 is
+        # open" — and uvicorn configures handlers for its own loggers only, so
+        # anything this module logs below WARNING reaches the root logger's
+        # last-resort handler and is dropped. An informational line nobody sees
+        # is not information.
+        log.warning(
+            "tracing to Langfuse at %s — questions, SQL and result rows are captured",
+            settings().langfuse_host,
+        )
+    elif settings().langfuse_public_key or settings().langfuse_secret_key:
+        # `Settings` has extra="ignore", so a mistyped key name is dropped in
+        # silence and half-configured looks exactly like unconfigured: nothing
+        # in the UI, nothing in the log, and no reason given.
+        log.warning(
+            "only one of LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY is set — "
+            "tracing needs both and is off"
+        )
+
     try:
         yield
     finally:
+        # Before the pools: shutdown() flushes what is buffered, and a trace of
+        # the last turn is worth more than a few milliseconds of teardown.
+        tracing.shutdown()
         await db.close_pools()
 
 

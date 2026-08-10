@@ -72,6 +72,22 @@ class Settings(BaseSettings):
     effort_sql: str = "high"
     effort_extract: str = "low"
 
+    # --- observability -----------------------------------------------------
+    # Tracing is on when both keys are set and off otherwise. There is
+    # deliberately no third `enabled` flag: a flag is a state that can disagree
+    # with the keys, and "on but unconfigured" is a startup warning nobody reads.
+    #
+    # On means the prompts, the generated SQL and the result rows go into the
+    # trace — that is what makes a trace worth opening, and there is no useful
+    # half-measure. The store is the container stack behind
+    # `make langfuse-up`, so nothing leaves the machine; it still holds whatever
+    # the registered warehouse holds. See app/tracing.py.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    # localhost for host-side use; docker-compose.yml overrides it for the API
+    # container, where localhost is the container.
+    langfuse_host: str = "http://localhost:3000"
+
     # Server-side refusal fallbacks. Low-probability for schema introspection,
     # but a refusal mid-demo is unrecoverable, and the cost of having it on is
     # zero when it never fires. Turn off if the account lacks the beta.

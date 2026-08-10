@@ -179,6 +179,33 @@ everything says so when you create it and carries its tier in
 `sql-agent connections get`. An undisclosed gap and an undisclosed hole are the
 same bug.
 
+### Watching a turn
+
+The token counter says a turn cost 11,500 tokens. Tracing says where they went.
+
+```bash
+make langfuse-up   # six containers, ~2GB, UI on http://localhost:3000
+```
+
+Then uncomment `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env` and run
+`docker compose up -d api` — `restart` reuses the environment the container was
+created with. The stack seeds itself with that key pair, so there is nothing to
+click through first; log in as `dev@sql-agent.local` / `sql-agent-dev`.
+
+Every turn becomes one trace — a span per graph node, a generation per model call
+with its tokens and its prompt-cache reads, and a span per introspection tool
+call, which is the 24 that the turn table shows you as the number 24. T1 and T2
+side by side are the whole argument of this project in one screen. Each turn
+carries the trace it was recorded as — `turn.trace_id`, on the row and on
+`GET /v1/connections/{id}/turns` — so a number on the chart leads back to the
+calls that produced it.
+
+It is **off** unless both keys are set, and off costs nothing: no client is built
+and `langfuse` is never imported. On, the trace holds the question, the prompts,
+the generated SQL and the rows handed back to the model. The stack is
+self-hosted, so none of that leaves your machine — but it does mean the trace
+store holds whatever the warehouse you pointed it at holds.
+
 `demo/demo.sql` is not the product — it's a booby-trapped fixture so the agent
 has something to explore, which is why it sits next to the tape that records it.
 Point `TARGET_DATABASE_URL` at a real warehouse, or register one with

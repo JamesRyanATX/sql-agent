@@ -21,6 +21,7 @@ make up && make migrate && make seed   # two databases + API, then the demo data
 make test                              # pytest, excludes live model calls
 make test-live                         # includes tests that spend real tokens
 docker compose --profile mysql up -d   # opt-in; the dialect tests skip without it
+make langfuse-up                       # opt-in; the trace stack, UI on :3000
 make customer-count                    # ask the cold-path question
 make connections                       # every database the agent can be pointed at
 make cache                             # print the cache as the model sees it
@@ -188,6 +189,9 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
 - **[app/secrets.py](app/secrets.py)** — `seal`/`unseal` for a registered
   warehouse password. Tagged values (`plain:` / `fernet:`), so turning
   encryption on is config rather than a migration.
+- **[app/tracing.py](app/tracing.py)** — the *only* module that imports
+  `langfuse`, on the same rule `dialects.py` has for dialect names. Four context
+  managers and a boolean; see Observability below.
 - **[app/tools.py](app/tools.py)** — the four read-only introspection tools the
   explore loop calls, on a target connection, through SQLAlchemy's `Inspector`.
 - **[app/db.py](app/db.py)** — the agent's psycopg pool, and a registry of
@@ -206,6 +210,55 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
   one); `config.py` holds the two `SQL_AGENT_*` variables and the connection
   precedence; `main.py` holds `AskOrCommand`, which decides whether argv is a
   question or a subcommand; the rest render.
+
+### Observability
+
+Off unless **both** `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, and
+off has to stay free: no client is constructed, `langfuse` is never imported, and
+every helper yields the same do-nothing handle. There is deliberately no third
+`enabled` flag — a flag is a state that can disagree with the keys, and "on but
+unconfigured" is a startup warning nobody reads. Exactly one key set is a
+`log.warning`, because `extra="ignore"` makes a typo'd name indistinguishable
+from an absent one.
+
+The stack is six containers behind `profiles: ["langfuse"]` — `make langfuse-up`,
+same opt-in bargain as `mysql-db`, and the `api` service deliberately does **not**
+`depends_on` any of it. Only `langfuse-web` publishes a port; upstream's compose
+binds its Postgres to 5432, which is demo-db.
+
+One turn is one trace:
+
+```
+turn (span)                          stream_turn — session_id, connection_id
+├── load_cache (span)                one per graph node, from `traced()`
+├── plan (span) → plan (generation)  the model call, with usage and cache reads
+├── explore (span)
+│   ├── explore (generation)         one per loop iteration, not one per node
+│   └── tool.describe_table (tool)   the 24 the turn table shows as "24"
+├── execute (span) → sql.execute     the statement, the row count, the error
+└── answer (span) → answer (generation)
+```
+
+- **`llm.complete()` is the only place a generation is opened**, which follows
+  from it being the only place that talks to a model — one seam, both backends,
+  and the `explore` loop's per-call cost visible instead of summed away inside
+  the node. The wrapper is on the dispatcher and not in `_complete_anthropic` /
+  `_complete_openai`, so there is one thing to keep in step rather than two. The
+  `node=` keyword at the seven call sites is the only thing in `llm.py` that
+  knows the graph exists.
+- **Node spans are hand-rolled** (`traced()` in `graph.py`), not
+  `langfuse.langchain.CallbackHandler`: that needs the whole `langchain`
+  meta-package, and this project has langgraph and langchain-core only.
+- **The trace id is minted in `stream_turn` and carried in `TurnState`**, not
+  read back out of the ambient OpenTelemetry context inside `answer`. Same
+  argument as `connection_id`: a turn's identity belongs in the checkpointed
+  state, and `turn.trace_id` should not depend on context propagation into
+  LangGraph's tasks. `tracing.turn()`'s `with` sits **outside** `stream_turn`'s
+  `try`, because api.py breaks out of that generator on client disconnect.
+- **On means the prompts, the SQL and the rows are captured.** That is what makes
+  a trace worth opening and there is no useful half-measure; the store is
+  self-hosted, so nothing leaves the machine, but it holds whatever the
+  registered warehouse holds.
 
 ### Invariants that are load-bearing
 
@@ -380,9 +433,17 @@ extraction, and the `plan` node. Not yet built: §5 compaction and schema-drift
 invalidation on load (`schema_fp` is written but not checked), the `/admin/cache`
 API of §6.2, and the browser UI of Phase 8.
 
+Tracing (Observability above) is built and off by default. Not wired up: cost in
+currency — Langfuse prices a generation from its model name, and `claude-opus-5`
+is not in its table, so a custom model definition is what would turn the token
+counts into money. Nothing reads a trace back: scores, evals and datasets are all
+available and all unused.
+
 ## Conventions
 
 - `uv` for everything (`uv run …`); dependencies in [pyproject.toml](pyproject.toml).
+- `langfuse` is import-legal in [app/tracing.py](app/tracing.py) and nowhere
+  else, `sqlalchemy`-style. Everything else takes a context manager from there.
 - `sqlalchemy` is import-legal in `app/db.py`, `app/tools.py`, `app/dialects.py`,
   `app/api.py` and `app/store.py`'s four target functions, and nowhere else — in
   particular not in `app/graph.py` beyond what `db.` hands back, and never in

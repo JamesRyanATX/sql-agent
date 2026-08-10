@@ -1,6 +1,7 @@
 .PHONY: up down build migrate seed reset reset-all test test-live connections \
         psql-agent psql-demo logs logs-agent logs-demo logs-api health \
-        customer-count west-coast-customer-count cache turns demo demo-verify
+        customer-count west-coast-customer-count cache turns demo demo-verify \
+        langfuse-up langfuse-down langfuse-logs
 
 SHELL := /bin/bash
 DC ?= docker compose
@@ -62,6 +63,23 @@ logs-demo:
 
 logs-api:  ## the reload log lives here — an edit to app/ restarts in place
 	$(DC) logs -f api
+
+# The trace stack is opt-in, like the MySQL container: six more services and
+# ~2GB of RAM, and the agent answers questions identically without it. Enabling
+# it is these targets plus two uncommented keys in .env — see .env.example.
+
+langfuse-up:  ## start the trace stack, UI on :3000 (six containers, ~2GB)
+	$(DC) --profile langfuse up -d --wait
+	@echo "Langfuse at http://localhost:3000 — dev@sql-agent.local / sql-agent-dev"
+	@echo "uncomment LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env, then:"
+	@echo "  $(DC) up -d api    # not 'restart' — that does not re-read .env"
+
+langfuse-down:  ## stop it. The volumes survive, so traces do too.
+	$(DC) --profile langfuse stop langfuse-web langfuse-worker \
+	  langfuse-db langfuse-clickhouse langfuse-redis langfuse-minio
+
+langfuse-logs:  ## why a trace never showed up
+	$(DC) logs -f langfuse-web langfuse-worker
 
 health:  ## is the API up? the CLI needs it to be
 	@curl -fsS $(API)/health || { \

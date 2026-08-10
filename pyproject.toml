@@ -27,6 +27,11 @@ dependencies = [
     # Pure Python and tiny. Also the cheapest target to test against: a tempfile
     # is a whole warehouse, with no container and no fixture.
     "aiosqlite>=0.20",
+    # Tracing (app/tracing.py). Optional at *run* time — with no keys set no
+    # client is ever constructed — but deliberately not an extra: the Dockerfile
+    # runs `uv sync --frozen --no-dev` with no `--extra`, so an extra is a
+    # dependency the image sometimes has, which is a dependency you debug twice.
+    "langfuse>=4.14",
 ]
 
 [project.optional-dependencies]

@@ -232,6 +232,9 @@ class TurnOut(BaseModel):
     sql: str | None
     answer: str | None
     created_at: datetime
+    # The Langfuse trace, when the turn was taken with tracing on. None is the
+    # common case and means "not recorded", not "lost".
+    trace_id: str | None = None
 
 
 class TurnListOut(BaseModel):

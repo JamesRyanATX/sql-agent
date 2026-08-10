@@ -15,6 +15,7 @@ down what it learned.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import time
@@ -25,7 +26,7 @@ from sqlalchemy import inspect
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from app import db, llm, store, tools
+from app import db, llm, store, tools, tracing
 from app.events import to_events
 from app.settings import settings
 
@@ -55,6 +56,13 @@ class TurnState(TypedDict, total=False):
     turn_id: int
     started_at: float
     cache: list[dict[str, Any]]
+    # The Langfuse trace this turn is recorded as, or "" when tracing is off —
+    # which is the common case. Minted in `stream_turn` and carried in, rather
+    # than read back out of the ambient OpenTelemetry context inside `answer`,
+    # so writing it to the turn row does not depend on that context reaching
+    # LangGraph's tasks. Same argument as connection_id above: a turn's
+    # identity belongs in the checkpointed state.
+    trace_id: str
 
     sufficient: bool
     used_ids: list[int]
@@ -363,6 +371,7 @@ async def plan(state: TurnState) -> TurnState:
         effort=settings().effort_plan,
         schema=PLAN_SCHEMA,
         cache_system=True,
+        node="plan",
     )
     parsed = result.parsed()
 
@@ -428,6 +437,7 @@ async def explore(state: TurnState) -> TurnState:
                 messages=messages,
                 effort=settings().effort_explore,
                 tools=tools.SCHEMAS,
+                node="explore",
             )
             tokens_in += result.tokens_in
             tokens_out += result.tokens_out
@@ -439,7 +449,13 @@ async def explore(state: TurnState) -> TurnState:
             outcomes: list[tuple[str, str, bool]] = []
             for call in result.tool_uses:
                 calls += 1
-                payload, is_error = await tools.run_tool(conn, call.name, call.input)
+                # A span each, because the alternative is what the turn table
+                # already shows: 24 introspection calls as the integer 24.
+                with tracing.span(
+                    name=f"tool.{call.name}", input=call.input, as_type="tool"
+                ) as sp:
+                    payload, is_error = await tools.run_tool(conn, call.name, call.input)
+                    sp.update(output=payload, level="WARNING" if is_error else None)
                 emit(
                     {
                         "type": "explore",
@@ -475,7 +491,10 @@ async def explore(state: TurnState) -> TurnState:
                 }
             )
             result = await llm.complete(
-                system=system, messages=messages, effort=settings().effort_explore
+                system=system,
+                messages=messages,
+                effort=settings().effort_explore,
+                node="explore.summary",
             )
             tokens_in += result.tokens_in
             tokens_out += result.tokens_out
@@ -506,6 +525,7 @@ async def generate_sql(state: TurnState) -> TurnState:
         ],
         effort=settings().effort_sql,
         schema=SQL_SCHEMA,
+        node="generate_sql",
     )
     parsed = result.parsed()
     emit({"type": "sql", "sql": parsed["sql"], "assumptions": parsed["assumptions"]})
@@ -537,30 +557,33 @@ async def execute(state: TurnState) -> TurnState:
     """Run the generated SQL under a read-only transaction with a timeout."""
     emit = get_stream_writer()
     try:
-        async with db.target_readonly(state["connection_id"]) as conn:
-            # exec_driver_sql, never text(). `text()` reads `:name` as a bind
-            # parameter, and this string is whatever the model wrote — a literal
-            # like `WHERE status = ':pending'` would become a missing-parameter
-            # error instead of the SQL error the fix node knows how to react to.
-            # Postgres `::` casts happen to survive text()'s regex, which makes
-            # the failure rare enough to ship and confusing enough to lose a day
-            # to. exec_driver_sql hands the string to the driver untouched,
-            # exactly as psycopg did.
-            result = await conn.exec_driver_sql(state["sql"])
-            # A statement that returned no result set — the model occasionally
-            # writes an EXPLAIN — has already closed its cursor, and .mappings()
-            # on a closed one raises ResourceClosedError, which reads to `fix`
-            # as a driver fault rather than as "that isn't a SELECT".
-            #
-            # Drained inside the `async with`: the connection returns to the
-            # pool on exit and the result closes with it. dict(m) because
-            # RowMapping is dict-*like* and json.dumps will not serialise it.
-            fetched = (
-                [dict(m) for m in result.mappings().fetchmany(settings().max_rows)]
-                if result.returns_rows
-                else []
-            )
-        rows = json.loads(json.dumps(fetched, default=str))
+        with tracing.span(name="sql.execute", input=state["sql"]) as sp:
+            async with db.target_readonly(state["connection_id"]) as conn:
+                # exec_driver_sql, never text(). `text()` reads `:name` as a bind
+                # parameter, and this string is whatever the model wrote — a
+                # literal like `WHERE status = ':pending'` would become a
+                # missing-parameter error instead of the SQL error the fix node
+                # knows how to react to. Postgres `::` casts happen to survive
+                # text()'s regex, which makes the failure rare enough to ship and
+                # confusing enough to lose a day to. exec_driver_sql hands the
+                # string to the driver untouched, exactly as psycopg did.
+                result = await conn.exec_driver_sql(state["sql"])
+                # A statement that returned no result set — the model
+                # occasionally writes an EXPLAIN — has already closed its cursor,
+                # and .mappings() on a closed one raises ResourceClosedError,
+                # which reads to `fix` as a driver fault rather than as "that
+                # isn't a SELECT".
+                #
+                # Drained inside the `async with`: the connection returns to the
+                # pool on exit and the result closes with it. dict(m) because
+                # RowMapping is dict-*like* and json.dumps will not serialise it.
+                fetched = (
+                    [dict(m) for m in result.mappings().fetchmany(settings().max_rows)]
+                    if result.returns_rows
+                    else []
+                )
+            rows = json.loads(json.dumps(fetched, default=str))
+            sp.update(output={"count": len(rows), "rows": rows[:5]})
         emit({"type": "rows", "count": len(rows), "rows": rows[:5]})
         return {"rows": rows, "error": ""}
     except Exception as e:
@@ -590,6 +613,7 @@ async def fix(state: TurnState) -> TurnState:
         ],
         effort=settings().effort_sql,
         schema=FIX_SCHEMA,
+        node="fix",
     )
     parsed = result.parsed()
     emit(
@@ -741,6 +765,7 @@ async def extract(state: TurnState) -> TurnState:
             ],
             effort=settings().effort_extract,
             schema=EXTRACT_SCHEMA,
+            node="extract",
         )
         parsed = result.parsed().get("entries", [])
     except Exception as e:
@@ -826,6 +851,7 @@ async def answer(state: TurnState) -> TurnState:
                 }
             ],
             effort=settings().effort_extract,
+            node="answer",
         )
         text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
 
@@ -855,6 +881,7 @@ async def answer(state: TurnState) -> TurnState:
             tokens_out=total_out,
             latency_ms=latency,
             cache_entries=len(state.get("cache", [])),
+            trace_id=state.get("trace_id") or None,
         )
 
     emit(
@@ -895,41 +922,81 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
     traceback and leave the turn row open. On stage that reads as the demo
     crashing; here it reads as one turn that failed, and the next question
     still works.
+
+    This is also the turn boundary for tracing, and the `with` sits *outside* the
+    `try` deliberately: app/api.py breaks out of this generator when the client
+    disconnects, so the span has to close on `aclose()` too and not only on the
+    paths that reach the end.
     """
-    try:
-        async for mode, chunk in compiled.astream(
-            {
-                "session_id": session_id,
-                "question": question,
-                "connection_id": connection_id,
-            },
-            stream_mode=["updates", "custom"],
-            config={"configurable": {"thread_id": session_id}},
-        ):
-            if mode == "custom" and isinstance(chunk, dict):
-                yield chunk
-            else:
-                # Per-node token deltas, so the counter climbs during
-                # exploration rather than jumping once at the end.
-                for ev in to_events(mode, chunk):
-                    yield ev
-    except Exception as e:
-        # Transport errors often stringify to nothing (httpx.ReadTimeout), so
-        # the class name has to carry the meaning.
-        detail = str(e).strip()
-        message = f"{type(e).__name__}{': ' + detail if detail else ''}"
+    with tracing.turn(
+        session_id=session_id, question=question, connection_id=connection_id
+    ) as trace:
         try:
-            async with db.agent() as conn:
-                await store.fail_open_turn(
-                    conn,
-                    session_id,
-                    f"failed — {message}",
-                    connection_id=connection_id,
-                )
-        except Exception:  # the turn is already lost; don't lose the event too
-            pass
-        yield {"type": "error", "message": message, "fatal": True}
+            async for mode, chunk in compiled.astream(
+                {
+                    "session_id": session_id,
+                    "question": question,
+                    "connection_id": connection_id,
+                    "trace_id": trace.trace_id or "",
+                },
+                stream_mode=["updates", "custom"],
+                config={"configurable": {"thread_id": session_id}},
+            ):
+                if mode == "custom" and isinstance(chunk, dict):
+                    # The turn's own output, taken off the event stream rather
+                    # than out of the final state — `answer` computes the totals
+                    # and this is where they arrive already assembled.
+                    if chunk.get("type") == "answer":
+                        trace.update(output=chunk)
+                    yield chunk
+                else:
+                    # Per-node token deltas, so the counter climbs during
+                    # exploration rather than jumping once at the end.
+                    for ev in to_events(mode, chunk):
+                        yield ev
+        except Exception as e:
+            # Transport errors often stringify to nothing (httpx.ReadTimeout), so
+            # the class name has to carry the meaning.
+            detail = str(e).strip()
+            message = f"{type(e).__name__}{': ' + detail if detail else ''}"
+            trace.update(level="ERROR", status_message=message)
+            try:
+                async with db.agent() as conn:
+                    await store.fail_open_turn(
+                        conn,
+                        session_id,
+                        f"failed — {message}",
+                        connection_id=connection_id,
+                    )
+            except Exception:  # the turn is already lost; don't lose the event too
+                pass
+            yield {"type": "error", "message": message, "fatal": True}
     yield {"type": "done"}
+
+
+def traced(node):
+    """A node, wrapped in a span named after it.
+
+    The nesting the trace shows is just Python's call stack, so nothing here
+    needs to know about the generations and tool spans that open underneath it.
+    Written by hand rather than taken from `langfuse.langchain.CallbackHandler`,
+    which needs the whole `langchain` package: this project has langgraph and
+    langchain-core only, and a meta-package pulled in to draw a box on a diagram
+    would be the largest dependency in the lock file.
+
+    The span's output is the node's returned *delta* — the same thing LangGraph
+    streams as an `updates` chunk, and the smallest honest answer to "what did
+    this node do".
+    """
+
+    @functools.wraps(node)
+    async def wrapper(state: TurnState) -> TurnState:
+        with tracing.span(name=node.__name__) as sp:
+            out = await node(state)
+            sp.update(output=out)
+            return out
+
+    return wrapper
 
 
 def build_graph(checkpointer: AsyncPostgresSaver | None = None):
@@ -937,7 +1004,9 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None):
     for node in (
         load_cache, plan, explore, generate_sql, execute, fix, extract, answer
     ):
-        g.add_node(node.__name__, node)
+        # functools.wraps keeps __name__, which is what names the node — the
+        # graph's shape does not change because it is being watched.
+        g.add_node(node.__name__, traced(node))
 
     g.add_edge(START, "load_cache")
     g.add_edge("load_cache", "plan")

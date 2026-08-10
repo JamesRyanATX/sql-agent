@@ -29,6 +29,7 @@ from typing import Any
 import anthropic
 import httpx
 
+from app import tracing
 from app.settings import settings
 
 # Generous, and deliberately so: on Opus 5 max_tokens caps thinking *plus*
@@ -393,31 +394,72 @@ async def complete(
     schema: dict[str, Any] | None = None,
     max_tokens: int = MAX_TOKENS,
     cache_system: bool = False,
+    node: str = "model",
 ) -> Result:
     """One model call.
 
     `effort` and `cache_system` are Anthropic-only and ignored elsewhere — an
     OpenAI-compatible endpoint has no equivalent of either.
+
+    `node` names the caller for the trace, and is the only reason this function
+    knows the graph exists. Being the one place that talks to a model makes this
+    also the one place a generation is opened: both backends, and every iteration
+    of the explore loop, whose per-call cost is otherwise summed away inside the
+    node before anything can see it. The wrapper goes here rather than in the two
+    `_complete_*` functions so there is one thing to keep in step, not two.
     """
     assert not (tools and schema), "a structured call takes no tools"
-    if settings().provider == "anthropic":
-        return await _complete_anthropic(
-            system=system,
-            messages=messages,
-            effort=effort,
-            tools=tools,
-            schema=schema,
-            max_tokens=max_tokens,
-            cache_system=cache_system,
+    anthropic_backend = settings().provider == "anthropic"
+
+    with tracing.generation(
+        name=node,
+        model=settings().model if anthropic_backend else settings().openai_model,
+        input={"system": system, "messages": messages},
+        metadata={
+            "provider": settings().provider,
+            "effort": effort,
+            "cache_system": cache_system,
+            "structured": schema is not None,
+            "tools": [t["name"] for t in tools or []],
+            "max_tokens": max_tokens,
+        },
+    ) as gen:
+        if anthropic_backend:
+            result = await _complete_anthropic(
+                system=system,
+                messages=messages,
+                effort=effort,
+                tools=tools,
+                schema=schema,
+                max_tokens=max_tokens,
+                cache_system=cache_system,
+            )
+        else:
+            result = await _complete_openai(
+                system=system,
+                messages=messages,
+                effort=effort,
+                tools=tools,
+                schema=schema,
+                max_tokens=max_tokens,
+            )
+
+        gen.update(
+            output={
+                "text": result.text,
+                "tool_uses": [{"name": t.name, "input": t.input} for t in result.tool_uses],
+            },
+            # `cache_read` has been on `Result` all along and read by nothing.
+            # The cached `plan` path is exactly what prompt caching is for, so a
+            # regression there is the one this number would catch.
+            usage_details={
+                "input": result.tokens_in,
+                "output": result.tokens_out,
+                "cache_read_input_tokens": result.cache_read,
+            },
+            metadata={"stop_reason": result.stop_reason},
         )
-    return await _complete_openai(
-        system=system,
-        messages=messages,
-        effort=effort,
-        tools=tools,
-        schema=schema,
-        max_tokens=max_tokens,
-    )
+        return result
 
 
 async def aclose() -> None:

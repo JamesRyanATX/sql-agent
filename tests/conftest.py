@@ -44,7 +44,7 @@ from psycopg.rows import dict_row
 from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app import store
+from app import store, tracing
 from app.main import app
 from app.secrets import seal
 from app.settings import Settings, settings
@@ -180,10 +180,17 @@ def test_databases() -> str:
     # is testing the plaintext path or the encrypted one. test_connections.py
     # sets it explicitly for the tests that are about encryption.
     os.environ["CONNECTION_SECRET"] = ""
+    # And again: a developer's Langfuse keys in .env must not make the suite ship
+    # their prompts to their real project — or hang teardown on an exporter
+    # retrying against a stack that isn't running. test_tracing.py sets them
+    # explicitly for the tests that are about tracing.
+    os.environ["LANGFUSE_PUBLIC_KEY"] = ""
+    os.environ["LANGFUSE_SECRET_KEY"] = ""
     settings.cache_clear()
     assert settings().agent_database_url == agent_url
     assert settings().target_database_url == reader_url
     assert settings().api_token == ""
+    assert not tracing.enabled()
 
     # Seed the registry here rather than in the lifespan. test_store.py,
     # test_coldpath.py and test_isolation.py never run the lifespan — they open
