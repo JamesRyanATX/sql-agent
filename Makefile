@@ -5,6 +5,15 @@
 SHELL := /bin/bash
 DC ?= docker compose
 
+# SQLAlchemy's asyncio layer needs greenlet, whose manylinux wheel dlopens
+# libstdc++. On NixOS that is not on the default search path, so `import
+# sqlalchemy.ext.asyncio` fails with "the greenlet library is required" —
+# nix-ld has already collected the library, it just is not where dlopen looks.
+# A no-op anywhere NIX_LD_LIBRARY_PATH is unset, which is everywhere else.
+ifdef NIX_LD_LIBRARY_PATH
+export LD_LIBRARY_PATH := $(NIX_LD_LIBRARY_PATH)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
+endif
+
 # `sql-agent` reads these and nothing else. `-include` so a fresh clone with no
 # .env still runs; the names are listed explicitly on `export` so an
 # ANTHROPIC_API_KEY sitting in .env does not leak into every recipe.

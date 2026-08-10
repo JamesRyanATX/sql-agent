@@ -80,7 +80,11 @@ class Settings(BaseSettings):
     # Bounds, so T1 doesn't run forever on stage.
     max_tool_calls: int = 24
     max_fix_attempts: int = 3
-    statement_timeout: str = "5s"
+    # Milliseconds, an integer, because that is the only unit all three
+    # supported dialects can be told. It was the string "5s" — a Postgres
+    # interval literal, which MySQL parses as neither a number nor an error.
+    # See app/dialects.py for what each one does with it.
+    statement_timeout_ms: int = 5_000
     max_rows: int = 50  # rows handed back to the model from execute
 
     # Per-target pools. Small and short-lived by default: these are somebody

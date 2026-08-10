@@ -16,6 +16,11 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app import store
 from app.settings import settings
 from app.store import (
     CacheEntry,
@@ -49,21 +54,38 @@ async def conn() -> AsyncIterator[AsyncConnection]:
 
 
 @pytest.fixture
-async def fp() -> AsyncIterator[AsyncConnection]:
+async def fp() -> AsyncIterator[TargetConnection]:
     """The demo database, as its owner — these tests need DDL to move a schema
-    under an entry and watch the fingerprint change."""
-    async for c in _rollback_conn(settings().target_admin_url):
-        yield c
+    under an entry and watch the fingerprint change.
+
+    A **SQLAlchemy** connection, because that is what the fingerprint functions
+    take now. Deliberately not AUTOCOMMIT: the DDL and the reflection have to
+    share one transaction, both so the reflection sees the uncommitted DDL and
+    so the rollback at the end drops it again. DDL is transactional in Postgres,
+    which is what makes that work.
+    """
+    engine = create_async_engine(
+        store.connection_from_url(settings().target_admin_url, id="_fp").url()
+    )
+    try:
+        async with engine.connect() as c:
+            yield c
+            await c.rollback()
+    finally:
+        await engine.dispose()
+
+
+async def ddl(conn: TargetConnection, statement: str) -> None:
+    """Raw DDL through SQLAlchemy. `text()` is fine here — unlike the model's
+    SQL, these strings are ours and contain no colons."""
+    await conn.execute(text(statement))
 
 
 @pytest.fixture
-async def probe_table(fp: AsyncConnection) -> AsyncIterator[str]:
+async def probe_table(fp: TargetConnection) -> AsyncIterator[str]:
     """A throwaway table to fingerprint, on the *demo* server — that is where
-    the schemas entries describe actually live. DDL is transactional in
-    Postgres, so the rollback in the `fp` fixture drops it again."""
-    await fp.execute(
-        f"CREATE TABLE {FP_TABLE} (id bigint, label text, created timestamptz)"
-    )
+    the schemas entries describe actually live."""
+    await ddl(fp, f"CREATE TABLE {FP_TABLE} (id bigint, label text, created timestamptz)")
     yield FP_TABLE
 
 
@@ -79,27 +101,27 @@ async def test_fingerprint_is_stable_across_calls(fp, probe_table):
 async def test_fingerprint_changes_when_a_column_is_renamed(fp, probe_table):
     before = await schema_fingerprint(fp, [probe_table])
     # The `created` vs `created_at` trap, as a schema change.
-    await fp.execute(f"ALTER TABLE {probe_table} RENAME COLUMN created TO created_at")
+    await ddl(fp, f"ALTER TABLE {probe_table} RENAME COLUMN created TO created_at")
     assert await schema_fingerprint(fp, [probe_table]) != before
 
 
 async def test_fingerprint_changes_on_add_drop_and_type_change(fp, probe_table):
     before = await schema_fingerprint(fp, [probe_table])
 
-    await fp.execute(f"ALTER TABLE {probe_table} ADD COLUMN deleted_at timestamptz")
+    await ddl(fp, f"ALTER TABLE {probe_table} ADD COLUMN deleted_at timestamptz")
     added = await schema_fingerprint(fp, [probe_table])
     assert added != before
 
-    await fp.execute(f"ALTER TABLE {probe_table} DROP COLUMN deleted_at")
+    await ddl(fp, f"ALTER TABLE {probe_table} DROP COLUMN deleted_at")
     assert await schema_fingerprint(fp, [probe_table]) == before
 
-    await fp.execute(f"ALTER TABLE {probe_table} ALTER COLUMN label TYPE varchar(64)")
+    await ddl(fp, f"ALTER TABLE {probe_table} ALTER COLUMN label TYPE varchar(64)")
     assert await schema_fingerprint(fp, [probe_table]) != before
 
 
 async def test_fingerprint_ignores_unrelated_tables(fp, probe_table):
     before = await schema_fingerprint(fp, [probe_table])
-    await fp.execute("CREATE TABLE fp_unrelated (x int)")
+    await ddl(fp, "CREATE TABLE fp_unrelated (x int)")
     assert await schema_fingerprint(fp, [probe_table]) == before
 
 

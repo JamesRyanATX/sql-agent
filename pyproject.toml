@@ -18,7 +18,22 @@ dependencies = [
     # The CLI. Already in uv.lock as a transitive of uvicorn, so naming it here
     # resolves nothing new — which is most of why it is click and not typer.
     "click>=8.1",
+    # The target half. Targets are no longer all Postgres, and `[asyncio]` is
+    # the greenlet extra — SQLAlchemy drives a sync Core through a greenlet, so
+    # greenlet is a hard requirement rather than an optimisation, and it is the
+    # fourth C extension in a lock that had three. The agent's own database is
+    # still psycopg; see CLAUDE.md.
+    "sqlalchemy[asyncio]>=2.0.36",
+    # Pure Python and tiny. Also the cheapest target to test against: a tempfile
+    # is a whole warehouse, with no container and no fixture.
+    "aiosqlite>=0.20",
 ]
+
+[project.optional-dependencies]
+# asyncmy is Cython and python:3.12-slim has no compiler, so a missing wheel
+# fails at image build rather than at run — the good failure. Behind an extra so
+# a developer with no MySQL container does not carry it.
+mysql = ["asyncmy>=0.2.10"]
 
 # The wheel is the CLI, and only the CLI. `app/` ships as a container image (see
 # Dockerfile), so there is no distribution on which the CLI could import the
@@ -50,5 +65,12 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # `live` tests call the Anthropic API and cost real tokens, so `make test`
 # stays fast and free. `make test-live` runs them.
-markers = ["live: hits the Anthropic API (costs tokens)"]
+markers = [
+    "live: hits the Anthropic API (costs tokens)",
+    # Same bargain as `live`: opt-in, because it needs a container that is not
+    # part of `make up`. It skips itself when MySQL is not there, so it is not
+    # in addopts — a skip is more honest than a deselect for something that
+    # would run if you started the container.
+    "mysql: needs the MySQL container (docker compose --profile mysql up -d)",
+]
 addopts = "-m 'not live'"

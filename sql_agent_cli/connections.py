@@ -57,12 +57,12 @@ async def _list() -> None:
         return
     current = config.selected()
     render.table(
-        ["", "id", "host", "port", "database", "username", "cache", "turns"],
+        ["", "id", "driver", "host", "port", "database", "username", "cache", "turns"],
         [
             [
                 "*" if r["id"] == current else "",
-                r["id"], r["host"], r["port"], r["database"], r["username"],
-                r["cache_entries"], r["turns"],
+                r["id"], r["driver"], r["host"], r["port"], r["database"],
+                r["username"], r["cache_entries"], r["turns"],
             ]
             for r in rows
         ],
@@ -83,11 +83,13 @@ async def _get(connection_id: str) -> None:
     render.detail(
         [
             ("label", body["label"]),
+            ("driver", body["driver"]),
             ("host", body["host"]),
             ("port", body["port"]),
             ("database", body["database"]),
             ("username", body["username"]),
             ("sslmode", body["sslmode"]),
+            ("read-only", body["readonly_tier"]),
             # Never the value, and never a masked length either — a length is a
             # fact about the password.
             ("password", "(set)" if body["has_password"] else "(unset)"),
@@ -158,16 +160,23 @@ def resolve_password(value, from_stdin, prompt, *, required: bool) -> str | None
 
 @connections.command("create")
 @click.argument("connection_id", metavar="ID")
-@click.option("--hostname", required=True, help="Host the database is on.")
-@click.option("--database", required=True, help="Database name.")
-@click.option("--username", required=True, help="Role to connect as.")
-@click.option("--port", type=int, default=5432, show_default=True)
+@click.option(
+    "--driver",
+    type=click.Choice(["postgresql+psycopg", "mysql+asyncmy", "sqlite+aiosqlite"]),
+    default="postgresql+psycopg",
+    show_default=True,
+    help="Which engine. SQLite needs only --database, the file path.",
+)
+@click.option("--hostname", help="Host the database is on. Not for sqlite.")
+@click.option("--database", required=True, help="Database name, or a file path for sqlite.")
+@click.option("--username", help="Role to connect as. Not for sqlite.")
+@click.option("--port", type=int, help="Defaults to the driver's usual port.")
 @click.option("--label", help="A human note. Shown by `connections get`.")
 @click.option("--sslmode", default="prefer", show_default=True)
 @_password_options
 @click.option("--no-test", is_flag=True, help="Skip the connection check.")
 def create_connection(
-    connection_id, hostname, database, username, port, label, sslmode,
+    connection_id, driver, hostname, database, username, port, label, sslmode,
     password, password_stdin, password_prompt, no_test,
 ) -> None:
     """Register a database the agent can be pointed at.
@@ -178,11 +187,19 @@ def create_connection(
     read-only role. With no password flag you are prompted, so it stays out of
     your shell history and out of everyone else's `ps`.
     """
-    secret = resolve_password(password, password_stdin, password_prompt, required=True)
-    body = {
-        "id": connection_id, "host": hostname, "database": database,
-        "username": username, "port": port, "sslmode": sslmode, "password": secret,
-    }
+    # SQLite has no host, user or password, and the server rejects them rather
+    # than ignoring them — so do not prompt for a password it cannot use.
+    sqlite = driver.startswith("sqlite")
+    secret = (
+        None if sqlite
+        else resolve_password(password, password_stdin, password_prompt, required=True)
+    )
+    body: dict = {"id": connection_id, "driver": driver, "database": database}
+    if not sqlite:
+        body |= {"host": hostname, "username": username, "sslmode": sslmode,
+                 "password": secret}
+        if port is not None:
+            body["port"] = port
     if label:
         body["label"] = label
     http.run(_create(body, probe=not no_test))
@@ -210,11 +227,14 @@ def _show_test(test: dict | None) -> None:
         click.secho(f"  cannot reach it: {test['error']}", fg="red")
         click.secho("  registered anyway — fix it with 'connections update'", dim=True)
         return
+    who = f"as {test['username']} " if test.get("username") else ""
     click.secho(
-        f"  reached it in {test['latency_ms']}ms as {test['username']} "
-        f"— {test['tables']} tables",
+        f"  reached it in {test['latency_ms']}ms {who}— {test['tables']} tables "
+        f"in {test.get('default_schema') or 'the default schema'}",
         dim=True,
     )
+    if test.get("readonly_tier") == "partial":
+        click.secho("  read-only: partial on this engine", fg="yellow")
     for warning in test["warnings"]:
         click.secho(f"  warning: {warning}", fg="yellow")
 

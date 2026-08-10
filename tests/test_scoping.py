@@ -98,7 +98,7 @@ async def test_bump_hits_will_not_credit_another_connections_entry(agent_conn):
 
 
 async def test_stale_is_computed_against_the_entrys_own_target(
-    agent_conn, target_conn, target_conn_b
+    agent_conn, target_conn, reader_conn, reader_conn_b
 ):
     """The quiet one.
 
@@ -107,25 +107,29 @@ async def test_stale_is_computed_against_the_entrys_own_target(
     stale against B — otherwise resolving the target by anything other than the
     entry's own connection_id is undetectable.
     """
+    # DDL as the owner, on psycopg — the agent never does this. The fingerprint
+    # is taken as the *reader*, on SQLAlchemy, which is what `extract` does.
     await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
     await target_conn.execute(f"CREATE TABLE {PROBE} (id bigint, created timestamptz)")
     await target_conn.execute(f"GRANT SELECT ON {PROBE} TO reader")
+    try:
+        learned = entry("spec:probe shape", "the probe table", tables=[PROBE])
+        await store.fingerprint_entries(reader_conn, [learned])
+        await store.write_entries(agent_conn, [learned], connection_id=A)
+        assert learned.schema_fp  # it named a table, so it got stamped
 
-    learned = entry("spec:probe shape", "the probe table", tables=[PROBE])
-    await store.fingerprint_entries(target_conn, [learned])
-    await store.write_entries(agent_conn, [learned], connection_id=A)
-    assert learned.schema_fp  # it named a table, so it got stamped
-
-    entries = await store.load_cache(agent_conn, connection_id=A)
-    assert await store.stale_ids(target_conn, entries) == set()
-    # B's fp_probe is (id, created_at) — same name, different columns.
-    assert await store.stale_ids(target_conn_b, entries) == {learned.id}
-
-    await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
+        entries = await store.load_cache(agent_conn, connection_id=A)
+        assert await store.stale_ids(reader_conn, entries) == set()
+        # B's fp_probe is (id, created_at) — same name, different columns.
+        assert await store.stale_ids(reader_conn_b, entries) == {learned.id}
+    finally:
+        # try/finally, because a failure here used to leave the probe table
+        # behind and take tests/test_store.py's own fp_probe down with it.
+        await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
 
 
 async def test_the_cache_endpoint_asks_the_right_target(
-    client: AsyncClient, agent_conn, target_conn
+    client: AsyncClient, agent_conn, target_conn, reader_conn
 ):
     """The wiring half of the test above: /connections/{id}/cache must open
     *that* connection's target, not whichever one is handy."""
@@ -133,19 +137,20 @@ async def test_the_cache_endpoint_asks_the_right_target(
     await target_conn.execute(f"CREATE TABLE {PROBE} (id bigint, created timestamptz)")
     await target_conn.execute(f"GRANT SELECT ON {PROBE} TO reader")
 
-    learned = entry("spec:probe shape", "the probe table", tables=[PROBE])
-    await store.fingerprint_entries(target_conn, [learned])
-    await store.write_entries(agent_conn, [learned], connection_id=A)
+    try:
+        learned = entry("spec:probe shape", "the probe table", tables=[PROBE])
+        await store.fingerprint_entries(reader_conn, [learned])
+        await store.write_entries(agent_conn, [learned], connection_id=A)
 
-    body = (await client.get(f"/v1/connections/{A}/cache")).json()
-    assert body["summary"]["stale"] == 0
-    assert [e["name"] for e in body["entries"]] == ["spec:probe shape"]
+        body = (await client.get(f"/v1/connections/{A}/cache")).json()
+        assert body["summary"]["stale"] == 0
+        assert [e["name"] for e in body["entries"]] == ["spec:probe shape"]
 
-    # B never learned it, so it is not merely fresh — it is absent.
-    other = (await client.get(f"/v1/connections/{B}/cache")).json()
-    assert other["entries"] == []
-
-    await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
+        # B never learned it, so it is not merely fresh — it is absent.
+        other = (await client.get(f"/v1/connections/{B}/cache")).json()
+        assert other["entries"] == []
+    finally:
+        await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
 
 
 async def test_a_turn_records_the_connection_it_ran_against(agent_conn):

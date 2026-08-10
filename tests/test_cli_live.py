@@ -17,6 +17,8 @@ Costs no tokens — nothing here asks a question.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 from httpx import AsyncClient
@@ -54,9 +56,13 @@ async def test_connections_ls_renders_the_registry(capsys):
 async def test_connections_get_renders_one_and_hides_the_password(capsys):
     await connections._get(CID)
     out = capsys.readouterr().out
-    assert "password  (set)" in out or "password  (unset)" in out
+    # Matched without the padding: the label column widens whenever a longer
+    # key is added, and a test that pins the spacing fails for the wrong reason.
+    assert re.search(r"password\s+\((set|unset)\)", out)
     assert "reader" in out  # the username is fine to show
     assert "the environment" in out  # origin='env'
+    assert "postgresql+psycopg" in out  # which engine it is
+    assert "read-only  enforced" in out  # and how far that goes
 
 
 async def test_connect_validates_before_it_writes(capsys):

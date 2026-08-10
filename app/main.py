@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
@@ -37,6 +38,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # An unauthenticated DELETE on a connection's cache wipes everything the
         # agent has learned about it, so this should never be a surprise.
         log.warning("API_TOKEN is unset — /v1 is open and unauthenticated")
+
+    if "STATEMENT_TIMEOUT" in os.environ:
+        # `Settings` has extra="ignore", so the old name is not an error — it is
+        # silently dropped and the default quietly applies. A timeout that
+        # stopped being the one you configured should say so.
+        log.warning(
+            "STATEMENT_TIMEOUT is set and no longer read — it is "
+            "STATEMENT_TIMEOUT_MS now, an integer count of milliseconds"
+        )
 
     if not settings().connection_secret:
         # The same bargain: an insecure default is fine when it is loud.

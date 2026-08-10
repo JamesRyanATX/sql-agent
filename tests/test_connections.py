@@ -75,7 +75,11 @@ async def test_create_returns_201_and_a_location_header(client, registered):
     assert body["id"] == "warehouse"
     assert body["origin"] == "api"
     assert body["has_password"] is True
-    assert body["dsn"] == f"postgresql://{p['username']}@{p['host']}:{p['port']}/{p['database']}"
+    # The driver is part of the address now, and the password never is.
+    assert body["driver"] == "postgresql+psycopg"
+    assert body["dsn"] == (
+        f"postgresql+psycopg://{p['username']}@{p['host']}:{p['port']}/{p['database']}"
+    )
     assert resp.json()["test"] is None  # probe=false
 
 
@@ -174,15 +178,15 @@ async def test_patch_changes_only_what_it_was_sent(client, registered, agent_con
     assert body["has_password"] is True
 
 
-async def test_patch_evicts_the_pool_so_the_next_turn_uses_the_new_address(
+async def test_patch_evicts_the_engine_so_the_next_turn_uses_the_new_address(
     client, registered
 ):
     await registered()
-    await db.target_pool("warehouse")
-    assert "warehouse" in db._target_pools
+    await db.target_engine("warehouse")
+    assert "warehouse" in db._target_engines
 
     await client.patch("/v1/connections/warehouse", json={"port": 5433})
-    assert "warehouse" not in db._target_pools
+    assert "warehouse" not in db._target_engines
 
 
 async def test_the_env_owned_default_cannot_be_patched_or_deleted(client):
@@ -304,7 +308,7 @@ async def test_test_warns_when_the_role_can_write(client, registered):
     body = (await client.post("/v1/connections/owner/test")).json()
     assert body["ok"] is True
     assert body["read_only"] is False
-    assert any("INSERT" in w for w in body["warnings"])
+    assert any("can write" in w for w in body["warnings"])
 
 
 async def test_probe_on_create_does_not_block_a_bad_address(client, agent_conn):
@@ -317,3 +321,129 @@ async def test_probe_on_create_does_not_block_a_bad_address(client, agent_conn):
         assert (await client.get("/v1/connections/offline")).status_code == 200
     finally:
         await agent_conn.execute("DELETE FROM connection WHERE id = 'offline'")
+
+
+# ------------------------------------------------------------------ the driver
+
+
+async def test_a_connection_records_which_engine_it_is(client, registered):
+    await registered()
+    body = (await client.get("/v1/connections/warehouse")).json()
+    assert body["driver"] == "postgresql+psycopg"
+
+
+async def test_the_driver_cannot_be_changed(client, registered):
+    """A cached recipe is SQL in a dialect. Repointing a connection at another
+    engine invalidates everything learned about it, and `schema_fp` would not
+    catch it — it hashes types and nullability, and both survive the move. So
+    the wrong state is made unrepresentable rather than detected."""
+    await registered()
+    resp = await client.patch(
+        "/v1/connections/warehouse", json={"driver": "sqlite+aiosqlite"}
+    )
+    assert resp.status_code == 409
+    assert "cannot be changed" in resp.json()["detail"]
+    assert "Delete it and register it again" in resp.json()["detail"]
+
+
+async def test_naming_the_same_driver_is_not_a_change(client, registered):
+    """A client that round-trips a GET into a PATCH should not be punished."""
+    await registered()
+    resp = await client.patch(
+        "/v1/connections/warehouse",
+        json={"driver": "postgresql+psycopg", "port": 5433},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["port"] == 5433
+
+
+@pytest.mark.parametrize("driver", ["oracle+cx", "postgresql+psycopg2", "snowflake"])
+async def test_an_unsupported_driver_is_refused_at_registration(client, driver):
+    """Not on the first turn, inside an SSE stream, where it reads as the agent
+    breaking rather than the address being wrong."""
+    assert (await client.post(
+        "/v1/connections", json=payload("nope", driver=driver)
+    )).status_code == 422
+
+
+async def test_sqlite_needs_a_path_and_nothing_else(client, agent_conn, tmp_path):
+    db_file = tmp_path / "shop.db"
+    db_file.touch()
+    resp = await client.post(
+        "/v1/connections",
+        params={"probe": "false"},
+        json={"id": "books", "driver": "sqlite+aiosqlite", "database": str(db_file)},
+    )
+    try:
+        assert resp.status_code == 201, resp.text
+        body = resp.json()["connection"]
+        assert body["dsn"] == f"sqlite+aiosqlite:///{db_file}"
+        assert body["host"] is None and body["port"] is None
+        assert body["has_password"] is False
+    finally:
+        await agent_conn.execute("DELETE FROM connection WHERE id = 'books'")
+
+
+@pytest.mark.parametrize("field", ["host", "username", "password"])
+async def test_sqlite_refuses_an_address_it_cannot_use(client, field, tmp_path):
+    """Rejected rather than ignored: a user who passed a password believes it is
+    doing something."""
+    resp = await client.post(
+        "/v1/connections",
+        json={"id": "books", "driver": "sqlite+aiosqlite",
+              "database": str(tmp_path / "x.db"), field: "something"},
+    )
+    assert resp.status_code == 422
+    assert "sqlite has no" in resp.text
+
+
+@pytest.mark.parametrize("missing", ["host", "username"])
+async def test_a_server_driver_still_demands_an_address(client, missing):
+    body = payload("warehouse")
+    del body[missing]
+    resp = await client.post("/v1/connections", json=body)
+    assert resp.status_code == 422
+    assert f"{missing} is required" in resp.text
+
+
+async def test_the_port_defaults_per_driver(client, agent_conn):
+    body = payload("nodefault")
+    del body["port"]
+    resp = await client.post("/v1/connections", params={"probe": "false"}, json=body)
+    try:
+        assert resp.json()["connection"]["port"] == 5432
+    finally:
+        await agent_conn.execute("DELETE FROM connection WHERE id = 'nodefault'")
+
+
+def test_a_url_round_trips_through_the_registry_row():
+    """conftest and the lifespan share this parser deliberately — if they had
+    one each they could disagree about what a URL means, and the disagreement
+    would show up as a test passing against a database nobody intended."""
+    row = store.connection_from_url(
+        "postgresql://reader:p%40ss@db.internal:5433/analytics?sslmode=require",
+        id="x",
+    )
+    assert row.driver == "postgresql+psycopg"
+    assert (row.host, row.port, row.database) == ("db.internal", 5433, "analytics")
+    assert row.password == "p@ss"  # decoded, not the percent-escape
+    assert row.sslmode == "require"
+    assert row.safe_dsn() == "postgresql+psycopg://reader@db.internal:5433/analytics"
+
+
+def test_a_password_with_url_syntax_in_it_survives_the_round_trip():
+    """The reason this was never an f-string, in either spelling of the DSN."""
+    row = store.Connection(
+        id="x", host="h", port=5432, database="b", username="u",
+        password="p@ss/w%rd:80",
+    )
+    parsed = store.connection_from_url(
+        row.url().render_as_string(hide_password=False), id="x"
+    )
+    assert parsed.password == "p@ss/w%rd:80"
+    assert "p@ss" not in row.safe_dsn()
+
+
+def test_an_unknown_driver_says_what_is_supported():
+    with pytest.raises(ValueError, match="postgresql\\+psycopg"):
+        store.normalise_driver("oracle")

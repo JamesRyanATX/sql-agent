@@ -12,8 +12,9 @@ Requires `make up && make migrate && make seed`.
 """
 
 import pytest
-from psycopg import AsyncConnection
-from psycopg.errors import UndefinedColumn
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 
 @pytest.fixture
@@ -23,10 +24,8 @@ def conn(reader_conn):
 
 
 async def scalar(conn: AsyncConnection, sql: str):
-    cur = await conn.execute(sql)
-    row = await cur.fetchone()
-    assert row is not None
-    return next(iter(row.values()))
+    """`text()` is fine here — unlike the model's SQL, these strings are ours."""
+    return (await conn.execute(text(sql))).scalar_one()
 
 
 # ---------------------------------------------------------------- trap 1
@@ -171,18 +170,29 @@ async def test_the_price_trap_fires_within_the_last_quarter(conn):
 
 async def test_orders_has_created_not_created_at(conn):
     """Every model reaches for `created_at` first. It isn't there."""
-    cur = await conn.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = 'orders'"
-    )
-    columns = {r["column_name"] for r in await cur.fetchall()}
+    # Through reflection, which is what `app/tools.py` uses — so this asserts
+    # what the agent would actually be told, not what a catalog query says.
+    columns = {
+        c["name"]
+        for c in await conn.run_sync(
+            lambda sync: inspect(sync).get_columns("orders")
+        )
+    }
     assert "created" in columns
     assert "created_at" not in columns
 
     # The failure is a hard error, so the fix node has something to react to.
-    with pytest.raises(UndefinedColumn):
-        async with conn.transaction():  # savepoint, so `conn` stays usable
-            await conn.execute("SELECT max(created_at) FROM orders")
+    # ProgrammingError is SQLAlchemy's wrapper; the driver's own class is on
+    # `.orig`, and `graph.driver_message` unwraps to it for exactly this reason.
+    # No savepoint needed any more: the target engine runs AUTOCOMMIT, so each
+    # statement is its own transaction and a failed one leaves `conn` usable.
+    # That is the same property the psycopg pool had, kept deliberately —
+    # `explore` must not hold a transaction open across a model round trip.
+    with pytest.raises(ProgrammingError) as e:
+        await conn.execute(text("SELECT max(created_at) FROM orders"))
+    assert type(e.value.orig).__name__ == "UndefinedColumn"
+
+    assert await scalar(conn, "SELECT 1"), "the connection survived the error"
 
     assert await scalar(conn, "SELECT count(*) FROM orders WHERE created IS NOT NULL")
 

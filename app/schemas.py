@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 Kind = Literal["schema_fact", "recipe"]
 
@@ -19,6 +19,10 @@ Kind = Literal["schema_fact", "recipe"]
 # and the name a user types on every command, so it is a slug, not free text.
 ConnectionId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")]
 SslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
+
+# Async-capable drivers only — see app/store.py's DRIVERS, and the CHECK in
+# migrations/003 that says the same thing where a hand-edited row can hear it.
+Driver = Literal["postgresql+psycopg", "mysql+asyncmy", "sqlite+aiosqlite"]
 
 
 class AskBody(BaseModel):
@@ -80,20 +84,56 @@ class ConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: ConnectionId
+    driver: Driver = "postgresql+psycopg"
     label: str | None = None
-    host: str = Field(..., min_length=1)
-    port: int = Field(default=5432, ge=1, le=65535)
-    database: str = Field(..., min_length=1)
-    username: str = Field(..., min_length=1)
+    # host, port and username lost their `min_length` and their defaults
+    # because SQLite has none of them — `database` is the whole address there.
+    # The requirement did not go away; it moved into the validator below, which
+    # is where a rule that depends on another field has to live.
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    database: str = Field(..., min_length=1)  # the file path, for sqlite
+    username: str | None = None
     password: str | None = None
     sslmode: SslMode = "prefer"
+    # Driver kwargs the address columns cannot express. Filtered against a
+    # per-driver allowlist in app/db.py before anything is dialled.
+    options: dict[str, str | int | bool] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _address_is_complete(self) -> ConnectionCreate:
+        if self.driver.startswith("sqlite"):
+            for f in ("host", "port", "username", "password"):
+                if getattr(self, f) is not None:
+                    raise ValueError(
+                        f"sqlite has no {f} — `database` is the file path"
+                    )
+        else:
+            for f in ("host", "username"):
+                if not (getattr(self, f) or "").strip():
+                    raise ValueError(f"{f} is required for {self.driver}")
+            if self.port is None:
+                self.port = 5432 if self.driver.startswith("postgresql") else 3306
+        return self
 
 
 class ConnectionPatch(BaseModel):
-    """Change some fields. An absent field is left alone."""
+    """Change some fields. An absent field is left alone.
+
+    **No `driver`.** A cached recipe is SQL in a dialect, so repointing a
+    connection at another engine silently invalidates everything learned about
+    it — and `schema_fp` would not catch it, because it hashes types and
+    nullability and both survive the move. `PATCH` refuses one with a 409, the
+    same way it refuses editing the env-owned row: the wrong state is made
+    unrepresentable rather than detected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    # Accepted only so the refusal can explain itself. `extra="forbid"` would
+    # reject it as an unknown field with a 422 that says nothing about why, and
+    # "why" is the whole content of this rule.
+    driver: Driver | None = None
     label: str | None = None
     host: str | None = Field(default=None, min_length=1)
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -101,6 +141,7 @@ class ConnectionPatch(BaseModel):
     username: str | None = Field(default=None, min_length=1)
     password: str | None = None
     sslmode: SslMode | None = None
+    options: dict[str, str | int | bool] | None = None
 
 
 class ConnectionOut(BaseModel):
@@ -117,6 +158,7 @@ class ConnectionOut(BaseModel):
     # 'env' is the built-in connection, whose address is TARGET_DATABASE_URL.
     # It cannot be changed or deleted over HTTP — the environment owns it.
     origin: Literal["api", "env"]
+    driver: str
     host: str | None
     port: int | None
     database: str | None
@@ -124,6 +166,9 @@ class ConnectionOut(BaseModel):
     sslmode: str
     has_password: bool
     dsn: str
+    # How far read-only can be pushed on this engine. Derived from `driver`,
+    # so it costs no I/O. See app/dialects.py.
+    readonly_tier: Literal["enforced", "partial"]
     cache_entries: int
     turns: int
     created_at: datetime | None = None
@@ -139,15 +184,23 @@ class ConnectionTestOut(BaseModel):
 
     `read_only` and `warnings` are advisory and never gate: a legitimate
     warehouse role holding INSERT on one unrelated staging table is common, and
-    refusing it would mean the feature does not work. The guarantee is the
-    read-only session every target pool opens with (app/db.py), not this.
+    refusing it would mean the feature does not work. The enforcement is
+    `readonly_tier`, and how strong that is depends on the dialect — see
+    app/dialects.py.
     """
 
     ok: bool
+    driver: str | None = None
+    readonly_tier: Literal["enforced", "partial"] | None = None
     latency_ms: int | None = None
     server_version: str | None = None
     username: str | None = None
+    # Which schema the agent will explore. Reflected, not assumed.
+    # `schema` shadows a BaseModel attribute, hence the alias.
+    default_schema: str | None = None
     tables: int | None = None
+    # None means "we could not find out", which on SQLite is the truth: there
+    # are no credentials to judge.
     read_only: bool | None = None
     warnings: list[str] = Field(default_factory=list)
     # Sanitised. Never echoes the DSN, which carries the password.

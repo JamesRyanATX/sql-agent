@@ -7,14 +7,19 @@ demo exercises is the code path a user gets.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import secrets
 import time
 
 import psycopg
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 
-from app import db, store
+from app import db, dialects, store
 from app.events import sse
 from app.graph import stream_turn
 from app.schemas import (
@@ -95,6 +100,7 @@ def _out(registered: store.Connection, stats: dict[str, int] | None = None) -> C
         id=registered.id,
         label=registered.label,
         origin=registered.origin,
+        driver=registered.driver,
         host=registered.host,
         port=registered.port,
         database=registered.database,
@@ -102,6 +108,7 @@ def _out(registered: store.Connection, stats: dict[str, int] | None = None) -> C
         sslmode=registered.sslmode,
         has_password=registered.password is not None,
         dsn=registered.safe_dsn(),
+        readonly_tier=dialects.for_dialect(registered.dialect).tier,
         cache_entries=stats["cache_entries"],
         turns=stats["turns"],
         created_at=registered.created_at,
@@ -112,72 +119,137 @@ def _out(registered: store.Connection, stats: dict[str, int] | None = None) -> C
 async def _probe(registered: store.Connection) -> ConnectionTestOut:
     """Connect, and report what we found. Never raises.
 
-    Deliberately does not go through `db.target_pool` — a probe of a connection
-    that may not work should not leave a cached pool behind, and a probe run
-    right after a PATCH has to dial the new address rather than a pooled old
-    one.
+    Deliberately does not go through `db.target_engine` — a probe of a
+    connection that may not work should not leave a cached engine behind, and a
+    probe run right after a PATCH has to dial the new address rather than a
+    pooled old one. `NullPool` for the same reason.
+
+    **No read-only hooks on this engine.** The probe's question is "what could
+    these credentials do?", and connecting in a read-only session would make
+    every warehouse look read-only.
     """
     started = time.monotonic()
+    cap = dialects.for_dialect(registered.dialect)
+    engine = create_async_engine(registered.url(), poolclass=NullPool)
     try:
-        conn = await psycopg.AsyncConnection.connect(
-            registered.conninfo(),
-            connect_timeout=int(settings().target_connect_timeout),
-            row_factory=psycopg.rows.dict_row,
-            autocommit=True,
-        )
-    except Exception as e:
-        # The exception's message can quote the conninfo, and the conninfo
-        # carries the password. Type and nothing else.
-        return ConnectionTestOut(ok=False, error=_sanitise(e, registered))
-    try:
-        cur = await conn.execute(
-            """
-            SELECT current_user AS username,
-                   version() AS server_version,
-                   current_setting('is_superuser') = 'on' AS superuser,
-                   (SELECT count(*) FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_type = 'BASE TABLE')
-                       AS tables,
-                   (SELECT count(*) FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE n.nspname = 'public' AND c.relkind = 'r'
-                      AND has_table_privilege(c.oid, 'INSERT')) AS writable
-            """
-        )
-        row = await cur.fetchone()
-    except Exception as e:
-        return ConnectionTestOut(ok=False, error=_sanitise(e, registered))
-    finally:
-        await conn.close()
+        async with asyncio.timeout(settings().target_connect_timeout):
+            async with engine.connect() as conn:
 
-    assert row is not None
-    warnings = []
-    if row["superuser"]:
+                def reflect(sync_conn):
+                    inspector = sa_inspect(sync_conn)
+                    return (
+                        len(inspector.get_table_names()),
+                        inspector.default_schema_name,
+                        sync_conn.dialect.server_version_info,
+                    )
+
+                tables, schema, version = await conn.run_sync(reflect)
+                username, writable, superuser = await _PRIVILEGE[registered.dialect](
+                    conn, registered
+                )
+    except Exception as e:
+        return ConnectionTestOut(
+            ok=False, driver=registered.driver, error=_sanitise(e, registered)
+        )
+    finally:
+        await engine.dispose()
+
+    warnings = list(cap.gaps)
+    if superuser:
         warnings.append("connects as a superuser")
-    if row["writable"]:
-        warnings.append(f"can INSERT into {row['writable']} table(s)")
-    if warnings:
+    if writable:
+        warnings.append("these credentials can write to this database")
+    if superuser or writable:
         warnings.append(
-            "the agent only ever reads, and the session it opens is read-only — "
-            "but a role holding SELECT and nothing else is the better answer"
+            "the agent only ever reads, and the session it opens is read-only "
+            f"as far as {registered.dialect} allows — but a role holding SELECT "
+            "and nothing else is the better answer"
         )
     return ConnectionTestOut(
         ok=True,
+        driver=registered.driver,
+        readonly_tier=cap.tier,
         latency_ms=int((time.monotonic() - started) * 1000),
-        server_version=row["server_version"].split(" on ")[0],
-        username=row["username"],
-        tables=row["tables"],
-        read_only=not row["superuser"] and not row["writable"],
+        server_version=_version(registered.dialect, version),
+        username=username,
+        default_schema=schema,
+        tables=tables,
+        # None where there is nothing to judge. On SQLite that is the honest
+        # answer — there are no credentials — and reporting True would be a lie
+        # a user would act on.
+        read_only=None if writable is None else not (writable or superuser),
         warnings=warnings,
     )
 
 
+def _version(dialect: str, info: tuple | None) -> str:
+    label = {"postgresql": "PostgreSQL", "mysql": "MySQL", "sqlite": "SQLite"}[dialect]
+    return f"{label} {'.'.join(str(p) for p in info)}" if info else label
+
+
+async def _pg_privileges(conn, registered) -> tuple[str | None, bool | None, bool]:
+    row = (
+        await conn.exec_driver_sql(
+            """
+            SELECT current_user AS username,
+                   current_setting('is_superuser') = 'on' AS superuser,
+                   (SELECT count(*) FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = current_schema() AND c.relkind = 'r'
+                      AND has_table_privilege(c.oid, 'INSERT')) AS writable
+            """
+        )
+    ).mappings().one()
+    return row["username"], bool(row["writable"]), bool(row["superuser"])
+
+
+async def _mysql_privileges(conn, registered) -> tuple[str | None, bool | None, bool]:
+    """`SHOW GRANTS`, deliberately — not `information_schema.table_privileges`.
+
+    That view lists table-level grants only, so a user with `GRANT ALL ON db.*`
+    shows up as holding none: a false "read-only: true", which is the direction
+    that matters.
+    """
+    username = (await conn.exec_driver_sql("SELECT CURRENT_USER()")).scalar_one()
+    try:
+        grants = (await conn.exec_driver_sql("SHOW GRANTS FOR CURRENT_USER()")).all()
+    except Exception:
+        # Refused. "We could not find out" is a real answer and has a value.
+        return username, None, False
+    text = " ".join(str(g[0]).upper() for g in grants)
+    writable = any(
+        word in text
+        for word in ("INSERT", "UPDATE", "DELETE", "ALL PRIVILEGES", "CREATE", "DROP")
+    )
+    return username, writable, "SUPER" in text or "ALL PRIVILEGES ON *.*" in text
+
+
+async def _sqlite_privileges(conn, registered) -> tuple[str | None, bool | None, bool]:
+    """A file has no users, so the only question is whether it is writable."""
+    path = registered.database or ""
+    return None, os.access(path, os.W_OK), False
+
+
+_PRIVILEGE = {
+    "postgresql": _pg_privileges,
+    "mysql": _mysql_privileges,
+    "sqlite": _sqlite_privileges,
+}
+
+
 def _sanitise(e: Exception, registered: store.Connection) -> str:
-    """A connection failure a caller can act on, with no credentials in it."""
-    detail = str(e).strip().splitlines()[0] if str(e).strip() else ""
+    """A connection failure a caller can act on, with no credentials in it.
+
+    Unwrapped through `.orig` first: SQLAlchemy's wrapper is `OperationalError`
+    for everything and says nothing, and its `str()` appends the statement and a
+    https://sqlalche.me/e/ link. The password check stays as the backstop —
+    a driver's connection error quotes the address it failed on.
+    """
+    orig = getattr(e, "orig", None) or e
+    detail = str(orig).strip().splitlines()[0] if str(orig).strip() else ""
     if registered.password and registered.password in detail:
         detail = ""
-    return f"{type(e).__name__}: {detail}" if detail else type(e).__name__
+    return f"{type(orig).__name__}: {detail}" if detail else type(orig).__name__
 
 
 # ------------------------------------------------------------------- registry
@@ -219,6 +291,7 @@ async def create_connection(
     registered = store.Connection(
         id=body.id,
         origin="api",
+        driver=body.driver,
         label=body.label,
         host=body.host,
         port=body.port,
@@ -226,6 +299,7 @@ async def create_connection(
         username=body.username,
         password=body.password,
         sslmode=body.sslmode,
+        options=dict(body.options),
     )
     try:
         async with db.agent() as conn:
@@ -264,6 +338,19 @@ async def patch_connection(
     """
     _refuse_env(registered)
     fields = body.model_dump(exclude_unset=True)
+    if "driver" in fields:
+        driver = fields.pop("driver")
+        if driver != registered.driver:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    f"{registered.id!r} is registered as {registered.driver} — a "
+                    "connection's driver cannot be changed, because every recipe "
+                    "cached against it is SQL in that dialect. Delete it and "
+                    "register it again; that forgets what was learned, which is "
+                    "the point."
+                ),
+            )
     async with db.agent() as conn:
         updated = await store.update_connection(conn, registered.id, **fields)
         stats = await store.connection_stats(conn)
@@ -347,7 +434,7 @@ async def ask(
         )
 
     try:
-        await db.target_pool(registered.id)
+        await db.target_engine(registered.id)
     except db.TargetUnreachable as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from None
 

@@ -13,6 +13,7 @@ Requires `make up && make migrate && make seed`.
 import json
 
 import pytest
+from sqlalchemy import text
 
 from app.tools import (
     ToolError,
@@ -46,8 +47,9 @@ async def test_identifiers_are_allowlisted_not_interpolated(conn):
         await sample_column(conn, "customer", "name; DROP TABLE customer")
 
     # The table survived every one of those.
-    cur = await conn.execute("SELECT count(*) AS n FROM customer")
-    assert (await cur.fetchone())["n"] == 2_000
+    assert (
+        await conn.execute(text("SELECT count(*) FROM customer"))
+    ).scalar_one() == 2_000
 
 
 async def test_tool_errors_come_back_as_results_not_exceptions(conn):

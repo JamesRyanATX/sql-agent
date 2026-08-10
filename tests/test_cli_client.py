@@ -187,3 +187,20 @@ async def test_an_error_before_the_stream_starts_is_raised_not_streamed(monkeypa
     with pytest.raises(_client.ApiError, match="500"):
         async for _ in _client.stream_events("/ask", {"question": "x"}):
             pass
+
+
+async def test_a_server_that_dies_mid_request_is_a_message_too(monkeypatch):
+    """The non-streaming twin of the test above. Found the hard way: a container
+    crashing on startup accepts the connection and then closes it, and every
+    `sql-agent connections ls` printed forty lines of httpx traceback."""
+
+    def die(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("server disconnected", request=request)
+
+    monkeypatch.setattr(
+        _client, "_client", lambda timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(die), base_url="http://test"
+        )
+    )
+    with pytest.raises(_client.ApiError, match="accepted the connection and then closed"):
+        await _client.get("/connections")

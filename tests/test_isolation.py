@@ -21,7 +21,9 @@ Requires `make up && make migrate && make seed`.
 import psycopg
 import pytest
 from psycopg import AsyncConnection
-from psycopg.errors import InsufficientPrivilege
+from psycopg.errors import InsufficientPrivilege  # noqa: F401 — pg-only tests below
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 
 from app import store
 from app.settings import settings
@@ -138,8 +140,12 @@ async def test_the_reader_role_cannot_write(reader_conn, statement):
     is not what is being tested. If someone deleted that guard tomorrow, these
     would still pass, and that is the property worth having.
     """
-    with pytest.raises(InsufficientPrivilege):
-        await reader_conn.execute(statement)
+    # ProgrammingError is SQLAlchemy's wrapper — the driver's own class is on
+    # `.orig`, and asserting on that is what keeps this about the *role* rather
+    # than about whichever exception hierarchy is in the middle.
+    with pytest.raises(ProgrammingError) as e:
+        await reader_conn.execute(text(statement))
+    assert type(e.value.orig).__name__ == "InsufficientPrivilege"
 
 
 async def test_the_reader_role_can_still_read_everything_it_needs(reader_conn):
@@ -189,53 +195,70 @@ async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
     """Register credentials that genuinely *can* write, and watch them not.
 
     `demo/demo.sql` builds a SELECT-only role, so for the built-in connection
-    the transaction guard was a second line of defence. A registered connection
-    has no such promise behind it — this test is what would fail if somebody
-    removed the `configure=` callback in app/db.py, which is otherwise five
-    lines with nothing pointing at them.
+    the session guard was a second line of defence. A registered connection has
+    no such promise behind it — the credentials are whatever the user handed us.
+    This is the test that would fail if somebody removed the `dialects.install`
+    call in app/db.py, which is otherwise five lines with nothing pointing at
+    them.
+
+    Postgres claims the `enforced` tier, so both halves are asserted here. What
+    a weaker dialect claims, and whether it says so, is
+    tests/test_capabilities.py.
     """
-    from psycopg.conninfo import conninfo_to_dict
+    from sqlalchemy.engine import make_url
 
-    from app import db
+    from app import db, dialects
 
-    owner = conninfo_to_dict(settings().target_admin_url)
+    owner = make_url(
+        store.connection_from_url(settings().target_admin_url, id="_owner")
+        .url()
+        .render_as_string(hide_password=False)
+    )
     resp = await client.post(
         "/v1/connections",
         params={"probe": "false"},
         json={
             "id": "owner",
-            "host": owner["host"],
-            "port": int(owner.get("port") or 5432),
-            "database": owner["dbname"],
-            "username": owner["user"],
-            "password": owner["password"],
+            "host": owner.host,
+            "port": owner.port,
+            "database": owner.database,
+            "username": owner.username,
+            "password": owner.password,
         },
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 201, resp.text
 
+    cap = dialects.for_dialect("postgresql")
+    assert cap.tier == "enforced"
     try:
-        # These credentials are the database's owner. Prove it, so the two
-        # assertions below are about the guard and not about a role that could
-        # never have written anyway.
+        # These credentials own the database. Prove it, so the assertions below
+        # are about the guard and not about a role that could never have written.
         probe = (await client.post("/v1/connections/owner/test")).json()
         assert probe["read_only"] is False
 
-        # Where generated SQL runs.
-        async with db.target_readonly("owner") as conn:
-            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-                await conn.execute("DELETE FROM customer")
-
-        # And the plain connection, which `explore`, `infer_tables` and
-        # `extract`'s fingerprinting use and which has no transaction of its own.
+        # The plain connection — what `explore`, `infer_tables` and `extract`
+        # use, and the one with no transaction of its own to guard.
         async with db.target("owner") as conn:
-            cur = await conn.execute("SHOW default_transaction_read_only")
-            assert (await cur.fetchone())["default_transaction_read_only"] == "on"
-            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-                await conn.execute("DELETE FROM customer")
+            statement, expected = cap.probe
+            assert (await conn.exec_driver_sql(statement)).scalar_one() == expected
+            with pytest.raises(Exception) as e:
+                await conn.exec_driver_sql("DELETE FROM customer")
+            assert dialects.is_read_only_error(e.value)
 
-        # And nothing was deleted by any of that.
-        cur = await conn.execute("SELECT count(*) AS n FROM customer")
-        assert (await cur.fetchone())["n"] == 2000
+        # And where the generated SQL runs.
+        async with db.target_readonly("owner") as conn:
+            with pytest.raises(Exception) as e:
+                await conn.exec_driver_sql("DELETE FROM customer")
+            assert dialects.is_read_only_error(e.value)
+
+        # Nothing was deleted by any of that. On a fresh connection, not on one
+        # already handed back to the pool — the previous version of this test
+        # read from a closed one and worked by luck.
+        async with db.target("owner") as conn:
+            n = (
+                await conn.exec_driver_sql("SELECT count(*) FROM customer")
+            ).scalar_one()
+        assert n == 2000
     finally:
         await agent_conn.execute("DELETE FROM connection WHERE id = 'owner'")
         await db.evict("owner")

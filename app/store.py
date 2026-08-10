@@ -4,11 +4,14 @@ The cache is the product (PLAN.md §6.2), so this layer holds the two rules that
 protect it: a human's correction is never silently overwritten, and every entry
 records a fingerprint of the schema it was learned against.
 
-**Two servers, and the functions here are not interchangeable about which.**
-Everything takes an agent connection except `schema_fingerprint`,
-`fingerprint_entries` and `stale_ids`, which read the *target*'s
-`information_schema` — an entry is agent state describing target shape, and
-those three are the only places the two meet.
+**Two servers, and the functions here are not interchangeable about which** —
+and now they are not even the same *type*. Everything takes a
+`psycopg.AsyncConnection` against the agent's own database except
+`reflect_columns`, `schema_fingerprint`, `fingerprint_entries` and `stale_ids`,
+which take a **SQLAlchemy** connection to a target. An entry is agent state
+describing target shape, and those are the only places the two meet. Handing one
+kind where the other belongs used to be a quiet bug; it is now an
+`AttributeError` on the first line.
 
 **And now N targets.** Everything that reads or writes what the agent has
 learned is scoped to one `connection_id`, and **none of these functions has a
@@ -29,7 +32,9 @@ from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types.json import Jsonb
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
 
 from app.secrets import seal, unseal
 
@@ -39,8 +44,8 @@ _COLUMNS = """
 """
 
 _CONNECTION_COLUMNS = """
-    id, label, origin, host, port, database, username, password, sslmode,
-    created_at, updated_at
+    id, label, origin, driver, host, port, database, username, password,
+    sslmode, options, created_at, updated_at
 """
 
 
@@ -75,20 +80,51 @@ class CacheEntry:
 # `connection_id: str` or `registered: store.Connection`, always.
 
 
+# The drivers a connection may name. Async-capable only: a sync driver would
+# need every target call to cross into a thread pool, and a thread pool under an
+# asyncio graph is how a demo hangs on stage. Mirrored by a CHECK in
+# migrations/003 — a row edited by hand at psql never sees a validator.
+DRIVERS = ("postgresql+psycopg", "mysql+asyncmy", "sqlite+aiosqlite")
+
+# What a user may reasonably type, and what it means. `postgresql://` on its own
+# resolves to psycopg2 in SQLAlchemy, which is not installed and not wanted.
+_ALIASES = {
+    "postgres": "postgresql+psycopg",
+    "postgresql": "postgresql+psycopg",
+    "mysql": "mysql+asyncmy",
+    "mariadb": "mysql+asyncmy",
+    "mariadb+asyncmy": "mysql+asyncmy",
+    "sqlite": "sqlite+aiosqlite",
+}
+_DEFAULT_PORT = {"postgresql": 5432, "mysql": 3306}
+
+
+def normalise_driver(name: str) -> str:
+    """Resolve a driver name, or say what the choices are."""
+    resolved = _ALIASES.get(name, name)
+    if resolved not in DRIVERS:
+        raise ValueError(
+            f"unsupported driver {name!r} — this agent speaks {', '.join(DRIVERS)}"
+        )
+    return resolved
+
+
 @dataclass(slots=True)
 class Connection:
     id: str
     origin: str = "api"  # api | env — who owns the address
+    driver: str = "postgresql+psycopg"
     label: str | None = None
     host: str | None = None
     port: int | None = None
-    database: str | None = None
+    database: str | None = None  # the file path, when the driver is sqlite
     username: str | None = None
-    # **Plaintext**, unsealed on read. It exists to be handed to psycopg and
+    # **Plaintext**, unsealed on read. It exists to be handed to a driver and
     # nothing else; the wire model in app/schemas.py has no password field at
     # all, so this can never be leaked by serialising the wrong object.
     password: str | None = None
-    sslmode: str = "prefer"
+    sslmode: str = "prefer"  # postgres only; ignored elsewhere
+    options: dict[str, Any] = field(default_factory=dict)
     created_at: Any = None
     updated_at: Any = None
 
@@ -97,53 +133,115 @@ class Connection:
         return cls(**{**{k: row[k] for k in row if k in cls.__slots__},
                       "password": unseal(row.get("password"))})
 
-    def conninfo(self) -> str:
-        """The DSN psycopg connects with.
+    @property
+    def dialect(self) -> str:
+        """`postgresql` | `mysql` | `sqlite` — the half of `driver` that changes
+        the SQL. The other half only changes who dials the socket, and nothing
+        above app/db.py should care which."""
+        return self.driver.split("+", 1)[0]
 
-        `make_conninfo`, never an f-string URL: a password containing `@`, `/`
-        or `%` produces a wrong-and-confusing DSN under string formatting, and
-        the resulting authentication failure points at the password rather than
-        at the quoting.
+    def _url(self, *, password: str | None, query: bool = True) -> URL:
+        """The address as SQLAlchemy sees it.
+
+        `URL.create`, never an f-string — the same reason this was never an
+        f-string when it built a libpq DSN: a password containing `@`, `/` or
+        `%` produces a wrong-and-confusing URL under string formatting, and the
+        resulting authentication failure points at the password rather than at
+        the quoting. `URL.create` takes the parts as objects and percent-encodes
+        on render, so there is nothing to get wrong.
         """
-        return make_conninfo(
+        if self.dialect == "sqlite":
+            # host/port/username are NULL for sqlite by construction (the CHECK
+            # in 003). Passing them anyway renders a URL whose authority section
+            # aiosqlite quietly treats as part of the path.
+            return URL.create(self.driver, database=self.database)
+        return URL.create(
+            self.driver,
+            username=self.username,
+            password=password,
             host=self.host,
             port=self.port,
-            dbname=self.database,
-            user=self.username,
-            password=self.password,
-            sslmode=self.sslmode,
+            database=self.database,
+            query=self._query() if query else {},
         )
+
+    def _query(self) -> dict[str, str]:
+        if self.dialect == "postgresql":
+            return {"sslmode": self.sslmode}
+        if self.dialect == "mysql":
+            # asyncmy negotiates latin1_swedish_ci by default, and that is not
+            # cosmetic: a CAST or a comparison then runs under the *connection's*
+            # collation rather than the column's, which is case-insensitive and
+            # folds `west`/`West`/`WEST` together. utf8mb4 makes the connection
+            # agree with any server built this decade.
+            return {"charset": "utf8mb4"}
+        return {}
+
+    def url(self) -> URL:
+        """What create_async_engine is handed. Carries the password."""
+        return self._url(password=self.password)
+
+    def conninfo(self) -> str:
+        """A libpq URL, for the psycopg call sites that have not moved yet.
+
+        Temporary: `app/db.py`'s target pools and `app/api.py::_probe` still
+        dial with psycopg, and they are replaced together in the phase that
+        makes `db.target()` return a SQLAlchemy connection. Deleted with them.
+        """
+        assert self.dialect == "postgresql", (
+            f"{self.id!r} is {self.driver} — psycopg cannot dial it. "
+            "This path exists only until db.target() moves to SQLAlchemy."
+        )
+        return self._url(password=self.password).set(
+            drivername="postgresql"
+        ).render_as_string(hide_password=False)
 
     def safe_dsn(self) -> str:
         """The address, renderable. Never carries the password.
 
-        What `GET /v1/connections` shows and what an error message may quote.
+        Rendered from a URL built *without* one rather than from a real URL with
+        `hide_password=True`. SQLAlchemy 2.0's masking is sound — `__repr__` and
+        `__str__` both hide it — but masking is the weaker promise: it is one
+        flipped keyword from leaking, and this string goes to the API, the CLI
+        and error messages. A password that was never put in the object cannot
+        come out of it.
+
+        The query string is dropped too — `sslmode` has its own line in
+        `sql-agent connections get`, and an address a human reads should not
+        repeat it.
+
+        What `GET /v1/connections` shows.
         """
-        host = self.host or ""
-        port = f":{self.port}" if self.port else ""
-        user = f"{self.username}@" if self.username else ""
-        return f"postgresql://{user}{host}{port}/{self.database or ''}"
+        return self._url(password=None, query=False).render_as_string(
+            hide_password=False
+        )
 
 
 def connection_from_url(url: str, *, id: str, origin: str = "api") -> Connection:
-    """Parse a DSN into a registry row.
+    """Parse a URL into a registry row.
 
     Used for the env-owned `default` row, whose address is TARGET_DATABASE_URL,
     and by the test harness — which has to agree with the lifespan about how a
     URL becomes a row, or the two disagree in exactly the way that is hardest
     to see.
+
+    Note this reads URLs only. It used to go through `psycopg.conninfo`, which
+    also accepted libpq keyword form (`host=x dbname=y`); a TARGET_DATABASE_URL
+    in that spelling now fails at startup rather than being silently reparsed.
     """
-    d = conninfo_to_dict(url)
-    port = d.get("port")
+    parsed = make_url(url)
+    driver = normalise_driver(parsed.drivername)
+    dialect = driver.split("+", 1)[0]
     return Connection(
         id=id,
         origin=origin,
-        host=d.get("host") or "localhost",
-        port=int(port) if port else 5432,
-        database=d.get("dbname"),
-        username=d.get("user"),
-        password=d.get("password"),
-        sslmode=d.get("sslmode") or "prefer",
+        driver=driver,
+        host=parsed.host or (None if dialect == "sqlite" else "localhost"),
+        port=parsed.port or _DEFAULT_PORT.get(dialect),
+        database=parsed.database,
+        username=parsed.username,
+        password=parsed.password,
+        sslmode=parsed.query.get("sslmode") or "prefer",
     )
 
 
@@ -190,21 +288,24 @@ async def create_connection(conn: AsyncConnection, row: Connection) -> Connectio
     cur = await conn.execute(
         f"""
         INSERT INTO connection (
-            id, label, origin, host, port, database, username, password, sslmode
+            id, label, origin, driver, host, port, database, username,
+            password, sslmode, options
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING {_CONNECTION_COLUMNS}
         """,
         (
             row.id,
             row.label,
             row.origin,
+            row.driver,
             row.host,
             row.port,
             row.database,
             row.username,
             seal(row.password),
             row.sslmode,
+            Jsonb(row.options or {}),
         ),
     )
     written = await cur.fetchone()
@@ -221,7 +322,11 @@ async def update_connection(
     untouched, and a field absent from `fields` is never confused with a field
     set to NULL. `password` is sealed on the way in.
     """
-    allowed = ("label", "host", "port", "database", "username", "password", "sslmode")
+    # `driver` is deliberately absent — see the 409 in app/api.py. A cached
+    # recipe is SQL in a dialect, so changing the driver under one silently
+    # invalidates every entry, and schema_fp would not catch it.
+    allowed = ("label", "host", "port", "database", "username", "password",
+               "sslmode", "options")
     unknown = set(fields) - set(allowed)
     assert not unknown, f"not a connection field: {sorted(unknown)}"
     if not fields:
@@ -259,35 +364,75 @@ async def delete_connection(conn: AsyncConnection, connection_id: str) -> dict[s
 # ---------------------------------------------------------------- fingerprint
 
 
-async def schema_fingerprint(conn: AsyncConnection, tables: Sequence[str]) -> str:
+async def reflect_columns(
+    conn: TargetConnection, tables: Sequence[str]
+) -> dict[str, Any]:
+    """One reflection pass over `tables`. **Takes a target connection.**
+
+    Batched deliberately. This used to be one `information_schema` query per
+    entry, which was merely wasteful; through reflection it would be one whole
+    table reflection per entry, on somebody else's warehouse, per page load of
+    `GET /connections/{id}/cache`.
+    """
+    from sqlalchemy import inspect
+
+    def work(sync_conn: Any) -> dict[str, Any]:
+        inspector = inspect(sync_conn)
+        wanted = sorted({t for t in tables})
+        present = set(inspector.get_table_names())
+        multi = inspector.get_multi_columns(
+            filter_names=[t for t in wanted if t in present]
+        )
+        shapes: dict[str, Any] = {
+            key[1]: [
+                (c["name"], str(c["type"]), bool(c["nullable"])) for c in cols
+            ]
+            for key, cols in multi.items()
+        }
+        shapes["__dialect__"] = sync_conn.dialect.name
+        return shapes
+
+    return await conn.run_sync(work)
+
+
+def fingerprint(shapes: dict[str, Any], tables: Sequence[str]) -> str:
+    """Hash `tables`' shape out of an already-reflected map. Pure."""
+    lines = [
+        # The dialect leads, so an entry fingerprinted against Postgres cannot
+        # compare equal to the same table on MySQL. The PATCH that refuses a
+        # driver change is what actually closes that door; this catches the case
+        # it cannot see — the address stayed the same and the database behind it
+        # did not.
+        f"dialect:{shapes.get('__dialect__', '')}"
+    ]
+    for t in sorted(tables):
+        for name, type_name, nullable in shapes.get(t, []):
+            lines.append(f"{t}.{name}:{type_name}:{nullable}")
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+async def schema_fingerprint(
+    conn: TargetConnection, tables: Sequence[str]
+) -> str:
     """Hash the live shape of `tables`. **Takes a target connection.**
 
     Stored on an entry at write time; recomputed on load. A mismatch means the
     schema moved under a recipe that was learned against the old shape, so the
-    entry can no longer be trusted (§5, wired up in phase 6).
+    entry can no longer be trusted (§5).
 
     Catches renames, drops, additions and type changes. Does not catch a column
     keeping its name and changing its meaning — that one is in §10 for a reason.
+
+    The type strings come from the dialect's own reflection, so a fingerprint is
+    comparable only within one connection. That was always true and is now
+    visibly so; `migrations/003` NULLs every fingerprint written before the port
+    for exactly this reason.
     """
-    cur = await conn.execute(
-        """
-        SELECT table_name, column_name, data_type, is_nullable
-        FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = ANY(%s)
-        ORDER BY table_name, ordinal_position
-        """,
-        (list(tables),),
-    )
-    rows = await cur.fetchall()
-    payload = "\n".join(
-        f"{r['table_name']}.{r['column_name']}:{r['data_type']}:{r['is_nullable']}"
-        for r in rows
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return fingerprint(await reflect_columns(conn, tables), tables)
 
 
 async def fingerprint_entries(
-    conn: AsyncConnection, entries: Sequence[CacheEntry]
+    conn: TargetConnection, entries: Sequence[CacheEntry]
 ) -> None:
     """Stamp each entry with the shape of the tables it describes, in place.
 
@@ -300,9 +445,12 @@ async def fingerprint_entries(
     nothing to hash — and `stale_ids` reads a missing fingerprint as "unknown"
     rather than "fine".
     """
-    for e in entries:
-        if e.schema_fp is None and e.tables:
-            e.schema_fp = await schema_fingerprint(conn, e.tables)
+    pending = [e for e in entries if e.schema_fp is None and e.tables]
+    if not pending:
+        return
+    shapes = await reflect_columns(conn, [t for e in pending for t in e.tables])
+    for e in pending:
+        e.schema_fp = fingerprint(shapes, e.tables)
 
 
 # --------------------------------------------------------------------- cache
@@ -346,26 +494,30 @@ async def count_disabled(conn: AsyncConnection, *, connection_id: str) -> int:
 
 
 async def stale_ids(
-    conn: AsyncConnection, entries: Sequence[CacheEntry]
+    conn: TargetConnection, entries: Sequence[CacheEntry]
 ) -> set[int]:
     """Which entries were learned against a schema that has since moved?
 
-    **Takes a target connection**, though the entries came from the agent DB.
+    **Takes a target connection**, and it must be *this entry's* connection's
+    target — asking a different one reports every entry stale, or worse,
+    coincidentally not stale.
 
-    Recomputes `schema_fp` per entry and compares. An entry with no fingerprint
-    or no tables can't be checked, so it is never reported stale — silence here
-    means "unknown", not "fine", which is why `infer_tables` in the graph works
-    so hard to keep `tables` populated.
+    An entry with no fingerprint or no tables can't be checked, so it is never
+    reported stale — silence here means "unknown", not "fine", which is why
+    `infer_tables` in the graph works so hard to keep `tables` populated.
 
     Reporting only, for now. §5's invalidation is phase 6 and will use this.
     """
-    stale: set[int] = set()
-    for e in entries:
-        if e.id is None or not e.schema_fp or not e.tables:
-            continue
-        if await schema_fingerprint(conn, e.tables) != e.schema_fp:
-            stale.add(e.id)
-    return stale
+    checkable = [e for e in entries if e.id is not None and e.schema_fp and e.tables]
+    if not checkable:
+        return set()
+    shapes = await reflect_columns(conn, [t for e in checkable for t in e.tables])
+    return {
+        e.id
+        for e in checkable
+        if fingerprint(shapes, e.tables) != e.schema_fp
+        if e.id is not None
+    }
 
 
 async def write_entries(

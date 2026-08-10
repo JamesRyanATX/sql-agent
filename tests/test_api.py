@@ -198,7 +198,7 @@ async def test_kind_filters_the_entries_but_not_the_summary(client: AsyncClient,
 
 
 async def test_a_renamed_column_marks_its_entry_stale(
-    client: AsyncClient, conn, target_conn
+    client: AsyncClient, conn, target_conn, reader_conn
 ):
     """The §5 drift check, as the listing shows it, and the clearest case of the
     endpoint spanning both servers: the entry is on one, the schema it describes
@@ -210,7 +210,9 @@ async def test_a_renamed_column_marks_its_entry_stale(
         claim="the probe table has a created column",
         tables=[PROBE],
     )
-    await store.fingerprint_entries(target_conn, [entry])
+    # Fingerprinted as the reader, on SQLAlchemy — which is what `extract`
+    # does. `target_conn` is the owner, and only ever runs DDL here.
+    await store.fingerprint_entries(reader_conn, [entry])
     await store.write_entries(conn, [entry], connection_id=CID)
 
     body = (await client.get(CACHE)).json()

@@ -1,48 +1,56 @@
-"""One pool for the agent's memory, and one per registered target.
+"""One pool for the agent's memory, and one engine per registered target.
 
 The agent's memory (`cache_entry`, `turn`, the checkpoints) and the data it
-answers questions about live on separate Postgres servers. They can't see each
-other because they aren't in the same place — not because application code
-remembers to filter.
+answers questions about live on separate servers. They can't see each other
+because they aren't in the same place — not because application code remembers
+to filter.
 
-The connections to the business data are named for the role they play, `target`,
-rather than for the demo fixture that fills one of them locally. The container is
-called `demo-db` because that is what it is; this is what it does.
+**The two halves speak different libraries, and that is the point.**
 
-**The target is no longer a single address.** `target(cid)` and
-`target_readonly(cid)` take a required connection id and resolve it through the
-registry in `app.store`. There is no default: a default is how a mis-scoped node
-queries the demo warehouse, looks correct on stage, and answers a customer's
-question against somebody else's data.
+    db.agent()        -> psycopg.AsyncConnection
+    db.target(cid)    -> sqlalchemy.ext.asyncio.AsyncConnection
 
-**The read-only guarantee had to move.** It used to rest on the credentials —
-`demo/demo.sql` builds a role holding SELECT and nothing else, so the transaction
-guard was a second line of defence. With registered connections the credentials
-are whatever the user handed us, and that sentence stopped being true. So every
-connection out of every target pool is now put into a read-only session by
-`_readonly_session` below, and `target_readonly()`'s explicit transaction sits on
-top of it carrying the statement timeout. `transaction_read_only` is a property
-of the transaction, not a privilege, so it holds for any role — including a
-superuser.
+They share no method that matters: `execute()` returns an `AsyncCursor` on one
+and a `CursorResult` on the other, and `fetchone()` is awaitable on one and not
+the other. Handing an agent connection to `store.schema_fingerprint` used to be
+a quiet bug — a fingerprint of the wrong schema, stamped onto an entry that
+would be permanently stale. It is now an `AttributeError` on the first line.
+
+The agent's own database is psycopg and Postgres and stays that way: LangGraph's
+`AsyncPostgresSaver` uses psycopg3 pipeline mode and has no SQLAlchemy seam, and
+`migrations/` leans on `text[]`, partial unique indexes and a conditional
+`ON CONFLICT` that implements the pinned-entry rule. Targets are SQLAlchemy
+because targets are somebody else's database and may not be Postgres at all.
+
+**The read-only guarantee moved twice.** It used to rest on the credentials —
+`demo/demo.sql` builds a role holding SELECT and nothing else. Registered
+connections made that false, so it moved into a session-level setting applied on
+every connection. Supporting three dialects made *that* only partly true, so it
+is now a capability: see `app/dialects.py` for what each engine can actually
+promise, and `ConnectionTestOut.warnings` for how a user is told.
 """
 
 import asyncio
+import pathlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 # `store` for the registry lookup. This is a layering inversion — db is the
 # lower layer — but it is acyclic (store imports psycopg and app.secrets, never
 # app.db) and checked by the import. An injected resolver would buy nothing but
 # a place for the lookup to hide.
-from app import store
+from app import dialects, store
 from app.settings import settings
 
 _agent_pool: AsyncConnectionPool | None = None
-_target_pools: dict[str, AsyncConnectionPool] = {}
+_target_engines: dict[str, AsyncEngine] = {}
 _registry_lock = asyncio.Lock()
 
 DEFAULT_CONNECTION = "default"
@@ -65,7 +73,22 @@ class TargetUnreachable(RuntimeError):
         self.connection_id = connection_id
 
 
+def cause_of(e: BaseException) -> str:
+    """The exception type, and only the type.
+
+    Two layers now quote things they should not. A driver's connection error
+    quotes the address it failed on, which carries the password — that is why
+    this exists. SQLAlchemy adds a second: it wraps the driver's exception, so
+    the outer `type(e).__name__` is `OperationalError` for everything and says
+    nothing, while `str()` on a `StatementError` appends the whole SQL and a
+    https://sqlalche.me/e/ link. Unwrap for the name, stop before the message.
+    """
+    orig = getattr(e, "orig", None)
+    return type(orig if orig is not None else e).__name__
+
+
 def _make_pool(url: str, **kw) -> AsyncConnectionPool:
+    """The agent pool. Targets are SQLAlchemy engines — see `target_engine`."""
     return AsyncConnectionPool(
         url,
         open=False,
@@ -80,24 +103,10 @@ def _make_pool(url: str, **kw) -> AsyncConnectionPool:
     )
 
 
-async def _readonly_session(conn: AsyncConnection) -> None:
-    """Put a freshly-opened target connection into a read-only session.
-
-    Runs on every connection from every target pool, which is the point: the
-    agent reaches a registered warehouse with credentials it did not choose, and
-    `db.target()` — used by `explore`, `infer_tables` and `extract`'s
-    fingerprinting — has no transaction of its own to guard.
-
-    SET SESSION CHARACTERISTICS rather than `options=-c ...` in the conninfo,
-    because pgbouncer in transaction mode rejects the latter.
-    """
-    await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-
-
 async def open_pools() -> AsyncConnectionPool:
     """Open the agent pool. Called once on app startup.
 
-    Target pools are opened on first use, not here: at startup we do not yet
+    Target engines are built on first use, not here: at startup we do not yet
     know which of the registered warehouses anyone will ask about, and dialing
     all of them would make a customer's database being down into a failure to
     boot.
@@ -111,12 +120,13 @@ async def open_pools() -> AsyncConnectionPool:
 
 async def close_pools() -> None:
     global _agent_pool
-    pools = [_agent_pool, *_target_pools.values()]
-    _target_pools.clear()
-    _agent_pool = None
-    for pool in pools:
-        if pool is not None:
-            await pool.close()
+    engines = list(_target_engines.values())
+    pool, _agent_pool = _agent_pool, None
+    _target_engines.clear()
+    if pool is not None:
+        await pool.close()
+    for engine in engines:
+        await engine.dispose()
 
 
 def agent_pool() -> AsyncConnectionPool:
@@ -171,60 +181,111 @@ async def ensure_default_connection() -> None:
         )
 
 
-async def target_pool(connection_id: str) -> AsyncConnectionPool:
-    """The pool for one registered target, opened on first use.
+def _engine_kwargs(dialect: str) -> dict[str, Any]:
+    """Pool sizing, translated rather than copied.
 
-    Double-checked under a lock so a burst of concurrent turns against a
-    cold connection opens one pool between them rather than one each.
+    The psycopg pool was `min_size=0, max_idle=300` — hold nothing at rest, hold
+    up to five during a burst, let them go after five minutes. **SQLAlchemy's
+    QueuePool has no `max_idle`**: `pool_recycle` only replaces a connection on
+    checkout if it is too old, and never proactively closes an idle one. So the
+    obvious mapping (`pool_size=5, pool_recycle=300`) silently inverts the
+    invariant, and ten registered warehouses each asked one question hold fifty
+    idle sockets open on ten customers' databases forever.
+
+    `pool_size=1` plus overflow is the closest QueuePool has: a connection
+    returned when the pool is already at `pool_size` is **closed**, not kept, so
+    a burst opens up to five and drops back to one. `pool_size=0` would mean
+    *unlimited*, which is the opposite of what it looks like.
     """
-    pool = _target_pools.get(connection_id)
-    if pool is not None:
-        return pool
+    s = settings()
+    if dialect == "sqlite":
+        # A file database is one process's file. Pool sizing is a socket concept
+        # and there is no socket — and SQLAlchemy swaps the pool class for
+        # :memory:, where passing pool_size is a TypeError at construction.
+        return {"connect_args": {"timeout": s.target_connect_timeout}}
+    return {
+        "pool_size": 1,
+        "max_overflow": max(0, s.target_pool_max - 1),
+        # The last socket does survive at rest. pool_recycle bounds how stale it
+        # can get, and pool_pre_ping is what turns a warehouse restart into a
+        # reconnect rather than a mid-turn error.
+        "pool_recycle": int(s.target_pool_max_idle),
+        "pool_pre_ping": True,
+    }
+
+
+def _guard_sqlite_path(registered: store.Connection) -> None:
+    """A typo'd SQLite path is not an error — sqlite3 creates the file.
+
+    Registering `/data/shop.dp` would succeed, probe green, and hand the agent
+    an empty database it would explore, learn nothing from, and cache the
+    nothing. Refuse a path that does not already exist; we are a reader.
+    """
+    if registered.dialect != "sqlite":
+        return
+    if not registered.database or not pathlib.Path(registered.database).is_file():
+        raise TargetUnreachable(registered.id, "FileNotFoundError")
+
+
+async def target_engine(connection_id: str) -> AsyncEngine:
+    """The engine for one registered target, built on first use.
+
+    Double-checked under a lock so a burst of concurrent turns against a cold
+    connection builds one engine between them rather than one each.
+    """
+    engine = _target_engines.get(connection_id)
+    if engine is not None:
+        return engine
 
     async with _registry_lock:
-        if (pool := _target_pools.get(connection_id)) is not None:
-            return pool
+        if (engine := _target_engines.get(connection_id)) is not None:
+            return engine
         registered = await resolve(connection_id)
-        pool = _make_pool(
-            registered.conninfo(),
-            # min_size=0, unlike the agent pool: a registry of ten warehouses
-            # must not hold ten idle sockets open against ten customers'
-            # databases because somebody once asked a question. max_idle lets
-            # it shrink back to nothing between turns.
-            min_size=0,
-            max_size=settings().target_pool_max,
-            max_idle=settings().target_pool_max_idle,
-            configure=_readonly_session,
+        _guard_sqlite_path(registered)
+        engine = create_async_engine(
+            registered.url(),
+            # AUTOCOMMIT, matching the psycopg pool's autocommit=True. Not a
+            # style choice: `explore` holds one connection across up to 24 tool
+            # calls with model round trips between them, and a SQLAlchemy
+            # connection begins a transaction implicitly on its first
+            # statement. Without this a T1 turn holds a snapshot open on a
+            # customer's production database for minutes while a model thinks —
+            # pinning the xmin horizon and blocking autovacuum. Nothing fails.
+            # Their DBA notices. `target_readonly` opts back in; it is the one
+            # place that wants a transaction.
+            isolation_level="AUTOCOMMIT",
+            **_engine_kwargs(registered.dialect),
         )
+        dialects.install(engine, registered.dialect, settings().statement_timeout_ms)
         try:
-            await pool.open()
-            # Actually take a connection, rather than trusting `open(wait=True)`.
-            # `wait` waits for `min_size` connections to be ready, and min_size
-            # is 0 here — so opening a pool against a warehouse that is not
-            # listening succeeds, and the failure surfaces later as an error
+            # Take a connection. The reason changed with the port but the
+            # conclusion did not: `create_async_engine` never dials anything —
+            # it is a factory, and it succeeds against a host that is not
+            # listening. Without this the failure surfaces later as an error
             # event inside a 200 SSE response instead of the 502 it is.
-            async with pool.connection(timeout=settings().target_connect_timeout):
-                pass
+            async with asyncio.timeout(settings().target_connect_timeout):
+                async with engine.connect():
+                    pass
         except Exception as e:
-            await pool.close()
-            raise TargetUnreachable(connection_id, type(e).__name__) from e
-        _target_pools[connection_id] = pool
-        return pool
+            await engine.dispose()
+            raise TargetUnreachable(connection_id, cause_of(e)) from e
+        _target_engines[connection_id] = engine
+        return engine
 
 
 async def evict(connection_id: str) -> None:
-    """Drop a target pool, so the next turn re-resolves its address.
+    """Drop a target engine, so the next turn re-resolves its address.
 
     Called after a connection is updated or deleted. Honest about what it is
-    not: `close()` does not wait for checked-out connections, so a PATCH landing
-    mid-turn is last-writer-wins for that turn — `explore` may have run against
-    the old address and `execute` against the new. The registry is not
-    transactional with respect to a running turn and cannot be, because
-    TurnState is checkpointed and cannot hold a pool.
+    not, unchanged from the pool version: `dispose()` closes what is idle and
+    leaves what is checked out running, so a PATCH landing mid-turn is
+    last-writer-wins for that turn. The registry is not transactional with
+    respect to a running turn and cannot be, because TurnState is checkpointed
+    and cannot hold an engine.
     """
-    pool = _target_pools.pop(connection_id, None)
-    if pool is not None:
-        await pool.close()
+    engine = _target_engines.pop(connection_id, None)
+    if engine is not None:
+        await engine.dispose()
 
 
 @asynccontextmanager
@@ -235,46 +296,48 @@ async def agent() -> AsyncIterator[AsyncConnection]:
 
 
 @asynccontextmanager
-async def target(connection_id: str) -> AsyncIterator[AsyncConnection]:
+async def target(connection_id: str) -> AsyncIterator[TargetConnection]:
     """A registered target, for introspection and fingerprinting.
 
-    Read-only because `_readonly_session` put the session into that state when
+    Read-only because `dialects.install` put the session into that state when
     the connection was opened — not because of the credentials, which we did not
-    choose.
+    choose, and to whatever extent the dialect can promise it.
+
+    The engine runs AUTOCOMMIT, so this holds no transaction open across the
+    explore loop's model round trips.
     """
-    pool = await target_pool(connection_id)
-    async with pool.connection() as conn:
+    engine = await target_engine(connection_id)
+    async with engine.connect() as conn:
         yield conn
 
 
 @asynccontextmanager
-async def target_readonly(connection_id: str) -> AsyncIterator[AsyncConnection]:
-    """A transaction the agent's generated SQL runs inside.
+async def target_readonly(connection_id: str) -> AsyncIterator[TargetConnection]:
+    """The transaction the agent's generated SQL runs inside.
 
-    Two guards, both of which have to be inside an explicit transaction for
-    SET LOCAL to mean anything: the transaction can't write, and a runaway query
-    dies rather than hanging the demo.
+    The one place that wants a real transaction: the engine is AUTOCOMMIT so
+    `explore` does not pin a snapshot, and a transaction-scoped setting means
+    nothing without a transaction to scope it to.
 
-    The read-only half is now redundant with the session-level setting above,
-    and stays anyway: defence that only exists in one place is one edit from not
-    existing, and the statement timeout has no session-level equivalent to hang
-    off.
+    What runs here is per-dialect and may be empty — Postgres re-applies
+    `transaction_read_only` and `statement_timeout` (redundant with the session
+    settings, and kept because defence that exists in one place is one edit from
+    not existing); MySQL and SQLite have no transaction-scoped equivalent of
+    either, and that emptiness is `app/dialects.py` doing its job rather than a
+    gap. See `Capability.gaps` for what a user is told about it.
     """
-    pool = await target_pool(connection_id)
-    async with pool.connection() as conn:
-        await conn.set_autocommit(False)
-        try:
-            async with conn.transaction():
-                # set_config(..., is_local => true) rather than SET LOCAL:
-                # SET takes no bind parameters, so the timeout would have to be
-                # string-interpolated. Both are transaction-scoped either way.
-                await conn.execute(
-                    "SELECT set_config('transaction_read_only', 'on', true)"
-                )
-                await conn.execute(
-                    "SELECT set_config('statement_timeout', %s, true)",
-                    (settings().statement_timeout,),
-                )
-                yield conn
-        finally:
-            await conn.set_autocommit(True)
+    engine = await target_engine(connection_id)
+    dialect = engine.sync_engine.dialect
+    cap = dialects.for_dialect(dialect.name)
+    async with engine.connect() as conn:
+        # Back out of the engine-level AUTOCOMMIT, to whatever this dialect's
+        # own default is — `READ COMMITTED` on Postgres, `SERIALIZABLE` on
+        # SQLite, which rejects the former outright. Asking the dialect beats
+        # a per-dialect constant: there is nothing here to keep in step.
+        conn = await conn.execution_options(
+            isolation_level=dialect.default_isolation_level
+        )
+        async with conn.begin():
+            for statement in cap.transaction(dialect, settings().statement_timeout_ms):
+                await conn.exec_driver_sql(statement)
+            yield conn

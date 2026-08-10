@@ -246,10 +246,16 @@ async def test_the_readonly_transaction_applies_both_guards(pool):
     parameters, so the timeout silently never applied — every generated query
     could have hung the demo for as long as it liked."""
     async with db.target_readonly(DEFAULT_CONNECTION) as conn:
-        cur = await conn.execute("SHOW statement_timeout")
-        assert (await cur.fetchone())["statement_timeout"] == settings().statement_timeout
-        cur = await conn.execute("SHOW transaction_read_only")
-        assert (await cur.fetchone())["transaction_read_only"] == "on"
+        # Postgres pretty-prints 5000 back as '5s', so this is the setting's
+        # value in the server's own spelling rather than the setting itself.
+        # The number is milliseconds now — it has to be, because MySQL cannot
+        # be told "5s". See app/dialects.py.
+        timeout = (await conn.exec_driver_sql("SHOW statement_timeout")).scalar_one()
+        assert timeout == "5s"
+        read_only = (
+            await conn.exec_driver_sql("SHOW transaction_read_only")
+        ).scalar_one()
+        assert read_only == "on"
 
 
 async def test_execute_is_read_only(pool, monkeypatch):
@@ -805,3 +811,45 @@ def test_a_populated_cache_renders_as_prose():
     assert "customer WHERE deleted_at IS NULL" in rendered
     # A tombstone is a negative constraint and has to read as one.
     assert "NOT TRUE: revenue excludes cancelled orders" in rendered
+
+
+# ------------------------------------------------------- the verification gate
+
+
+def test_the_gate_folds_identifiers_but_not_literals():
+    """Trap 2, and the reason `_tokens` stopped lower-casing everything.
+
+    `customer.region` holds `west`, `West` and `WEST`. A recipe claiming
+    `region = 'west'` must NOT be marked verified against SQL that filtered on
+    `'WEST'` — the gate exists to catch a recipe saying something the query did
+    not, and a fold that erases the difference the demo is built on is the gate
+    lying.
+    """
+    ran = "SELECT count(*) FROM customer WHERE region = 'WEST'"
+    assert not graph.grounded_in("region = 'west'", ran)
+    assert graph.grounded_in("region = 'WEST'", ran)
+
+    # Identifiers and keywords still fold, because SQL folds them.
+    assert graph.grounded_in(
+        "FROM CUSTOMER WHERE Region", "select * from customer where region = 'x'"
+    )
+
+
+def test_a_literal_containing_a_keyword_is_not_mistaken_for_one():
+    """The tokenizer has to see `'from customer'` as one token, not three."""
+    assert graph._tokens("WHERE note = 'from customer'") == [
+        "where", "note", "=", "'from customer'",
+    ]
+
+
+@pytest.mark.parametrize(
+    "dialect,expected",
+    [("postgresql", "PostgreSQL."), ("mysql", "backticks"), ("sqlite", "no native date")],
+)
+def test_the_dialect_note_says_what_the_model_gets_wrong(dialect, expected):
+    """Every line here is paid for on every turn, so it is a short list of real
+    mistakes rather than a reference manual."""
+    note = graph.dialect_note(dialect)
+    assert expected in note
+    # Postgres is the default and carries no extra guidance.
+    assert (len(note) < 40) == (dialect == "postgresql")

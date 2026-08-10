@@ -21,6 +21,7 @@ import time
 from typing import Annotated, Any, TypedDict
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from sqlalchemy import inspect
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
@@ -44,6 +45,12 @@ class TurnState(TypedDict, total=False):
     # also domain data (it scopes load_cache and lands in turn.connection_id),
     # where thread_id is infrastructure.
     connection_id: str
+    # Which SQL the model should write. Set by `load_cache` from the registry
+    # row — no target connection is needed, because `driver` is a column. In
+    # state for the same reason connection_id is: a value derived outside the
+    # checkpoint lets a resumed thread plan in one dialect and execute in
+    # another.
+    dialect: str
 
     turn_id: int
     started_at: float
@@ -70,8 +77,37 @@ class TurnState(TypedDict, total=False):
 
 # --------------------------------------------------------------------- prompts
 
+# A label, not the driver name: "postgresql+psycopg" is which library dials the
+# socket, and the model needs to know which SQL to write.
+DIALECT_LABEL = {"postgresql": "PostgreSQL", "mysql": "MySQL", "sqlite": "SQLite"}
+
+# Appended to the system prompt of every node that reads or writes SQL. Only
+# what the model gets wrong often enough to be worth the tokens — this is not a
+# reference manual, and every line is paid for on every turn.
+DIALECT_NOTES = {
+    "postgresql": "",
+    "mysql": (
+        "MySQL: no FILTER clause and no `::` casts — use CAST(x AS CHAR). "
+        "Identifiers quote with backticks. String comparison is "
+        "case-insensitive under the default collation, so a GROUP BY folds "
+        "casing variants together that PostgreSQL would keep apart."
+    ),
+    "sqlite": (
+        "SQLite: no native date or boolean type — dates are text or integers, "
+        "so compare them as such. No RIGHT or FULL OUTER JOIN before 3.39."
+    ),
+}
+
+
+def dialect_note(dialect: str) -> str:
+    """The dialect line for a system prompt, or nothing for the default."""
+    note = DIALECT_NOTES.get(dialect, "")
+    label = DIALECT_LABEL.get(dialect, dialect)
+    return f"\n\nTarget dialect: {label}." + (f" {note}" if note else "")
+
+
 EXPLORE_SYSTEM = """\
-You are answering a business question against a Postgres database you have \
+You are answering a business question against a SQL database you have \
 never seen. Use the introspection tools to find out what you need.
 
 The schema is wide and mostly irrelevant — expect to discard most tables. \
@@ -104,7 +140,7 @@ recipe for, and do not broaden it — a cached recipe for a related question is 
 reason to say what is missing, not to answer a different question."""
 
 SQL_SYSTEM = """\
-Write one Postgres SELECT that answers the question, using the findings given.
+Write one SELECT that answers the question, using the findings given.
 
 Return the SQL and the assumptions you made — an assumption is anything a \
 reader would need to know to agree the answer is correct, such as which rows \
@@ -191,7 +227,7 @@ PLAN_SCHEMA = {
 SQL_SCHEMA = {
     "type": "object",
     "properties": {
-        "sql": {"type": "string", "description": "a single Postgres SELECT"},
+        "sql": {"type": "string", "description": "a single SELECT statement"},
         "assumptions": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["sql", "assumptions"],
@@ -269,6 +305,9 @@ async def load_cache(state: TurnState) -> TurnState:
             question=state["question"],
         )
         entries = await store.load_cache(conn, connection_id=state["connection_id"])
+        # From the registry row, not from a target connection — `driver` is a
+        # column, so the dialect is known before anything is dialled.
+        registered = await store.get_connection(conn, state["connection_id"])
 
     cache = [
         {
@@ -284,6 +323,7 @@ async def load_cache(state: TurnState) -> TurnState:
         "turn_id": turn_id,
         "started_at": time.monotonic(),
         "cache": cache,
+        "dialect": registered.dialect if registered else "postgresql",
         "fix_attempts": 0,
         "tool_calls": 0,
     }
@@ -308,7 +348,17 @@ async def plan(state: TurnState) -> TurnState:
         return {"sufficient": False}
 
     result = await llm.complete(
-        system=f"{PLAN_SYSTEM}\n\n{render_cache(cache)}",
+        # The dialect goes in the *cached* system block, between the durable
+        # instruction and the cache text. That costs nothing: prompt caching
+        # keys on an exact prefix and the cache text is already per-connection,
+        # so the number of live entries is unchanged. The rule for anything
+        # added here — it must be a function of `connection_id` alone. The cache
+        # text is; the dialect is; the question is not, which is why the
+        # question stays in the user message.
+        system=(
+            f"{PLAN_SYSTEM}{dialect_note(state['dialect'])}\n\n"
+            f"{render_cache(cache)}"
+        ),
         messages=[{"role": "user", "content": f"Question: {state['question']}"}],
         effort=settings().effort_plan,
         schema=PLAN_SCHEMA,
@@ -355,7 +405,11 @@ async def explore(state: TurnState) -> TurnState:
     """
     emit = get_stream_writer()
     known = render_cache(state.get("cache", []))
-    system = EXPLORE_SYSTEM + (f"\n\n{known}" if known else "")
+    system = (
+        EXPLORE_SYSTEM
+        + dialect_note(state["dialect"])
+        + (f"\n\n{known}" if known else "")
+    )
 
     # Whatever `plan` could not resolve is exactly what this loop is for, so
     # say so — an incremental turn should not re-derive what is already cached.
@@ -440,7 +494,7 @@ async def explore(state: TurnState) -> TurnState:
 async def generate_sql(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     result = await llm.complete(
-        system=SQL_SYSTEM,
+        system=SQL_SYSTEM + dialect_note(state["dialect"]),
         messages=[
             {
                 "role": "user",
@@ -463,20 +517,56 @@ async def generate_sql(state: TurnState) -> TurnState:
     }
 
 
+def driver_message(e: BaseException) -> str:
+    """The error text the model is shown in `fix`, and the text a user sees in
+    `answer` when the turn gives up.
+
+    SQLAlchemy wraps the driver's exception: `str()` prepends
+    `(psycopg.errors.UndefinedColumn)`, appends `[SQL: <the whole query>]` and a
+    docs link. `fix` already re-sends the SQL itself, so the echo is the same
+    context twice, and "Background on this error at: https://sqlalche.me/..." is
+    the last thing a user should read when their question failed. `.orig` is the
+    one sentence a database user would recognise, and it is exactly what this
+    node produced before the port.
+    """
+    orig = getattr(e, "orig", None)
+    return str(orig if orig is not None else e).strip()
+
+
 async def execute(state: TurnState) -> TurnState:
     """Run the generated SQL under a read-only transaction with a timeout."""
     emit = get_stream_writer()
     try:
         async with db.target_readonly(state["connection_id"]) as conn:
-            cur = await conn.execute(state["sql"])
-            fetched = await cur.fetchmany(settings().max_rows)
+            # exec_driver_sql, never text(). `text()` reads `:name` as a bind
+            # parameter, and this string is whatever the model wrote — a literal
+            # like `WHERE status = ':pending'` would become a missing-parameter
+            # error instead of the SQL error the fix node knows how to react to.
+            # Postgres `::` casts happen to survive text()'s regex, which makes
+            # the failure rare enough to ship and confusing enough to lose a day
+            # to. exec_driver_sql hands the string to the driver untouched,
+            # exactly as psycopg did.
+            result = await conn.exec_driver_sql(state["sql"])
+            # A statement that returned no result set — the model occasionally
+            # writes an EXPLAIN — has already closed its cursor, and .mappings()
+            # on a closed one raises ResourceClosedError, which reads to `fix`
+            # as a driver fault rather than as "that isn't a SELECT".
+            #
+            # Drained inside the `async with`: the connection returns to the
+            # pool on exit and the result closes with it. dict(m) because
+            # RowMapping is dict-*like* and json.dumps will not serialise it.
+            fetched = (
+                [dict(m) for m in result.mappings().fetchmany(settings().max_rows)]
+                if result.returns_rows
+                else []
+            )
         rows = json.loads(json.dumps(fetched, default=str))
         emit({"type": "rows", "count": len(rows), "rows": rows[:5]})
         return {"rows": rows, "error": ""}
     except Exception as e:
         # Including programming errors: a bad column name is exactly what the
         # fix node exists to react to.
-        message = str(e).strip()
+        message = driver_message(e)
         emit({"type": "error", "message": message})
         return {"error": message, "rows": []}
 
@@ -494,7 +584,7 @@ async def fix(state: TurnState) -> TurnState:
                     f"Question: {state['question']}\n\n"
                     f"Findings:\n{state.get('findings', '')}\n\n"
                     f"SQL that failed:\n{state['sql']}\n\n"
-                    f"Postgres error:\n{state['error']}"
+                    f"{DIALECT_LABEL[state['dialect']]} error:\n{state['error']}"
                 ),
             }
         ],
@@ -519,11 +609,27 @@ async def fix(state: TurnState) -> TurnState:
     }
 
 
-_TOKEN = re.compile(r"[a-z_][a-z0-9_.]*|\d+|[^\s\w]")
+_TOKEN = re.compile(r"'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*|\d+|[^\s\w]")
 
 
 def _tokens(sql: str) -> list[str]:
-    return _TOKEN.findall((sql or "").lower())
+    """Tokens for the subsequence gate, with string literals kept verbatim.
+
+    Everything used to be lower-cased. That is right for identifiers and
+    keywords, which SQL folds, and it is wrong for literals — which is trap 2:
+    `customer.region` holds `west`, `West` and `WEST`, so a recipe claiming
+    `region = 'west'` would be marked *verified* against SQL that filtered on
+    `'WEST'`. The gate exists to catch a recipe saying something the query did
+    not; a fold that erases the difference the demo is built on is the gate
+    lying.
+
+    `casefold()` rather than `lower()` for the rest: `İ` folds to `i̇`, and a
+    Turkish column name is not this function's problem to get wrong.
+    """
+    return [
+        t if t.startswith("'") else t.casefold()
+        for t in _TOKEN.findall(sql or "")
+    ]
 
 
 def grounded_in(fragment: str | None, sql: str) -> bool:
@@ -569,13 +675,19 @@ async def infer_tables(sql: str, connection_id: str) -> list[str]:
     to the schema it depends on.
     """
     async with db.target(connection_id) as conn:
-        cur = await conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+        known = await conn.run_sync(
+            lambda sync_conn: set(inspect(sync_conn).get_table_names())
         )
-        known = {r["table_name"] for r in await cur.fetchall()}
-    seen = set(_tokens(sql))
-    return sorted(known & seen)
+    # Folded on both sides, and the *stored* spelling is what comes back.
+    # Postgres folds unquoted identifiers to lower case, so lower-casing both
+    # sides was right there and wrong everywhere else: MySQL on a
+    # case-sensitive filesystem stores `Orders` as `Orders`, and the old
+    # intersection returned [] for it. That does not fail — it quietly switches
+    # off drift detection for every entry the turn writes, which is exactly what
+    # this function exists to prevent.
+    by_fold = {n.casefold(): n for n in known}
+    seen = {t.casefold() for t in _tokens(sql)}
+    return sorted(by_fold[k] for k in by_fold.keys() & seen)
 
 
 async def extract(state: TurnState) -> TurnState:

@@ -20,6 +20,7 @@ docstrings throughout the code. Read the relevant section before changing a node
 make up && make migrate && make seed   # two databases + API, then the demo data
 make test                              # pytest, excludes live model calls
 make test-live                         # includes tests that spend real tokens
+docker compose --profile mysql up -d   # opt-in; the dialect tests skip without it
 make customer-count                    # ask the cold-path question
 make connections                       # every database the agent can be pointed at
 make cache                             # print the cache as the model sees it
@@ -62,22 +63,39 @@ DDL) and `reader_conn` (the SELECT-only role the agent actually uses). Reach for
 
 ## One memory, N targets
 
-**The agent's memory and the data it queries are on separate Postgres servers.**
-This is the single most important thing to know before changing anything in
-`app/`.
+**The agent's memory is on its own Postgres server, and it is psycopg. Targets
+are SQLAlchemy and may be any of three engines.** This is the single most
+important thing to know before changing anything in `app/`.
 
-| | agent-db :5433 | a target, e.g. demo-db :5432 |
+| | agent-db :5433 | a target |
 |---|---|---|
-| holds | `connection`, `cache_entry`, `turn`, checkpoints | `customer`, `orders`, 38 decoys |
-| built by | `migrations/*.sql` | `demo/demo.sql`, locally |
+| holds | `connection`, `cache_entry`, `turn`, checkpoints | the business data |
+| built by | `migrations/*.sql` | not by us |
+| engine | Postgres, always | PostgreSQL, MySQL/MariaDB or SQLite |
 | reached via | `db.agent()` | `db.target(cid)` / `db.target_readonly(cid)` |
+| hands back | `psycopg.AsyncConnection` | `sqlalchemy.ext.asyncio.AsyncConnection` |
 | how many | one | however many are registered |
 
-There is a registry now. `TARGET_DATABASE_URL` is the address of exactly one row
-in it — `default`, marked `origin='env'`, immutable over HTTP because the
-environment owns it. Everything else is registered at runtime through
-`POST /v1/connections` and lives in the `connection` table with its password
-sealed by [app/secrets.py](app/secrets.py).
+**The two are physically incompatible, and that is the design.** They share no
+method that matters: `execute()` returns an `AsyncCursor` on one and a
+`CursorResult` on the other, `fetchone()` is awaitable on one and not the other,
+and only the target has `run_sync`. Handing an agent connection to
+`store.schema_fingerprint` used to be a quiet bug — a fingerprint of the wrong
+schema, stamped onto an entry that was then permanently stale. It is now an
+`AttributeError` on the first line. The rule below used to be a thing to
+remember; it is now a thing that raises.
+
+Agent-db stays psycopg and stays Postgres because LangGraph's
+`AsyncPostgresSaver` uses psycopg3 pipeline mode and has no SQLAlchemy seam, and
+because `migrations/` leans on `text[]`, a partial unique index and a conditional
+`ON CONFLICT` that implements the pinned-entry rule. There is also no user value
+in porting it: you run one agent-db and nobody chooses it.
+
+`TARGET_DATABASE_URL` is the address of exactly one registry row — `default`,
+marked `origin='env'`, immutable over HTTP because the environment owns it.
+Everything else is registered at runtime through `POST /v1/connections` and lives
+in the `connection` table with its password sealed by
+[app/secrets.py](app/secrets.py) and its engine named by `driver`.
 
 **Two rules, and both fail quietly when broken.**
 
@@ -87,19 +105,21 @@ mis-scoped node queries the demo warehouse, looks correct on stage, and answers
 a customer's question against somebody else's data.
 
 *Every function in [app/store.py](app/store.py) belongs to one server or the
-other.* `schema_fingerprint`, `fingerprint_entries` and `stale_ids` take a
-*target* connection; everything else takes an *agent* one, and everything that
-touches learned state also takes a required keyword-only `connection_id`. The
-only operation spanning both is `extract` ([app/graph.py](app/graph.py)), which
-fingerprints on the target and then writes on the agent — in that order, because
-no single connection reaches both.
+other.* `reflect_columns`, `schema_fingerprint`, `fingerprint_entries` and
+`stale_ids` take a *target* connection; everything else takes an *agent* one, and
+everything touching learned state also takes a required keyword-only
+`connection_id`. The only operation spanning both is `extract`
+([app/graph.py](app/graph.py)), which fingerprints on the target and then writes
+on the agent — in that order, because no single connection reaches both.
 
-The fingerprint functions kept their signatures but gained an obligation: the
-target connection must be *the entry's own* connection's target. Crossing them
-reports every entry stale, or worse, coincidentally not stale.
+The fingerprint functions gained an obligation: the target connection must be
+*the entry's own* connection's target. Crossing them reports every entry stale,
+or worse, coincidentally not stale. The type strings come from the dialect's own
+reflection, so a fingerprint is comparable only within one connection — which is
+why `migrations/003` NULLs every one written before the port.
 
 One naming trap. `app/db.py` uses the word "connection" ~20 times to mean a
-psycopg connection, and it now also means a registry row. **Never bind a bare
+driver connection, and it now also means a registry row. **Never bind a bare
 `connection` variable to a registry row** — it is `connection_id: str` or
 `registered: store.Connection`, always.
 
@@ -159,15 +179,20 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
   formats disagree about tool results.
 - **[app/store.py](app/store.py)** — the connection registry, cache and turn-log
   reads/writes, plus `stale_ids`, `count_disabled`, `read_turns` and the two
-  resets. See the note above for which server and which target each takes.
+  resets. See the note above for which server and which target each takes, and
+  note the four that take a *SQLAlchemy* connection.
+- **[app/dialects.py](app/dialects.py)** — the capability table: how far
+  read-only can be pushed on each engine, what statements do it, and what a user
+  must be warned about. **Nothing outside it branches on a dialect name** — if
+  you are writing `if dialect == "mysql"` elsewhere, the fact belongs here.
 - **[app/secrets.py](app/secrets.py)** — `seal`/`unseal` for a registered
   warehouse password. Tagged values (`plain:` / `fernet:`), so turning
   encryption on is config rather than a migration.
 - **[app/tools.py](app/tools.py)** — the four read-only introspection tools the
-  explore loop calls, on a target connection.
-- **[app/db.py](app/db.py)** — the agent pool, and a registry of target pools
-  keyed by connection id: `agent()`, `target(cid)`, `target_readonly(cid)`,
-  `resolve(cid)`, `evict(cid)`.
+  explore loop calls, on a target connection, through SQLAlchemy's `Inspector`.
+- **[app/db.py](app/db.py)** — the agent's psycopg pool, and a registry of
+  SQLAlchemy engines keyed by connection id: `agent()`, `target(cid)`,
+  `target_readonly(cid)`, `target_engine(cid)`, `resolve(cid)`, `evict(cid)`.
 - **[app/api.py](app/api.py)** / **[app/schemas.py](app/schemas.py)** — the v1
   router, the auth dependency, and the wire models. `CacheEntry` is deliberately
   not the wire format: `schema_fp` and the turn pointers stay off it.
@@ -223,31 +248,95 @@ the demo rather than failing a test.
   used to be a name filter in `tools.py`; it was deleted, because a filter that
   matches on names also hides a *business* table that happens to be called
   `cache_entry`, and it only works while every call site remembers it.
-- **Identifiers are allowlisted against `information_schema`, then quoted with
-  `psycopg.sql.Identifier`** — table/column names can't be bound as parameters.
-- **`describe_table` reads constraints from `pg_catalog`, not
-  `information_schema`.** `information_schema.table_constraints` only shows
-  constraints to a caller with a **non-SELECT** privilege, so the read-only role
-  sees none — every table would look keyless and the agent would guess joins
-  from column names.
-- **Read-only is enforced by the session, not by the credentials.** This flipped
-  when connections became registrable: `demo/demo.sql` builds a SELECT-only role,
-  but a *registered* connection's credentials are whatever the user handed us, so
-  "the role can't write either" stopped being true. Every target pool now carries
-  a `configure=` callback running `SET SESSION CHARACTERISTICS AS TRANSACTION
-  READ ONLY`, which binds any role including a superuser — and covers
-  `db.target()`, which `explore`, `infer_tables` and `extract` use and which has
-  no transaction of its own. `db.target_readonly()` keeps its
-  `transaction_read_only` + `statement_timeout` on top; the timeout has no
-  session-level equivalent, and defence that exists in one place is one edit from
-  not existing. `tests/test_isolation.py::test_a_user_supplied_dsn_still_cannot_write`
-  registers credentials that genuinely can write and is what fails if the
-  callback goes.
+- **Identifiers are allowlisted against the dialect's own reflection, then
+  carried as `quoted_name(..., quote=True)`** — table/column names can't be bound
+  as parameters, so only a name the database just told us exists may reach a
+  statement. `quoted_name` travels with the expression tree, so quoting happens
+  at compile time against whichever dialect runs it. "Exists" is no longer
+  case-blind: exact match wins, a unique case-insensitive match is accepted, and
+  two is an error naming both — guessing there is how the agent silently reads
+  the wrong table.
+- **Constraints come from SQLAlchemy's reflection, and the reason the old
+  hand-written `pg_catalog` query existed still holds.**
+  `information_schema.table_constraints` only shows constraints to a caller with
+  a **non-SELECT** privilege, so the read-only role sees none — every table would
+  look keyless and the agent would guess joins from column names. SQLAlchemy's
+  PostgreSQL dialect reads `pg_catalog` for that exact reason, and every other
+  dialect has its own answer to its own version of the problem. The invariant did
+  not go away; it stopped being ours to maintain.
+- **Read-only is enforced as far as the dialect allows, and reported.** This has
+  flipped twice now. It rested on the credentials — `demo/demo.sql` builds a
+  SELECT-only role — until connections became registrable and the credentials
+  became whatever the user handed us. It then rested on a session-level setting,
+  until a second and third engine made *that* only partly true. So it is a
+  capability, and [app/dialects.py](app/dialects.py) is the only place that knows
+  the difference:
+
+  | | blocks DML | blocks DDL | statement timeout | tier |
+  |---|---|---|---|---|
+  | postgresql | ✓ | ✓ | `statement_timeout` | `enforced` |
+  | mysql | ✓ | ✓ | `max_execution_time` | `enforced` |
+  | sqlite | ✓ | ✓ | **none** | `partial` |
+
+  Those statements run on **every** connection from every target engine, which is
+  the point: `db.target()` — `explore`, `infer_tables`, `extract` — has no
+  transaction of its own to guard. `db.target_readonly()` layers Postgres's
+  transaction-scoped versions on top, redundantly, because defence that exists in
+  one place is one edit from not existing; MySQL and SQLite have no
+  transaction-scoped equivalent and their list is empty, which is the model
+  working rather than a gap.
+
+  **Registration is never refused over this.** A dialect that cannot promise
+  everything says so in `ConnectionTestOut.warnings` and carries its tier on
+  `ConnectionOut`. An undisclosed gap and an undisclosed hole are the same bug.
+
+  [tests/test_capabilities.py](tests/test_capabilities.py) asserts every claim
+  against the database **in both directions** — a dialect claiming enforcement it
+  lacks is a hole; one claiming none while quietly enforcing means users are
+  warned for nothing. Not hypothetical: `blocks_ddl=False` for MySQL was written
+  from received wisdom and the test caught it, because MySQL 8.4 *does* refuse
+  DDL in a read-only transaction. Never `pytest.skip` on the claim — a skip keyed
+  on the table is how a wrong table starts agreeing with itself.
+  `tests/test_isolation.py::test_a_user_supplied_dsn_still_cannot_write`
+  registers credentials that genuinely can write, and is what fails if
+  `dialects.install` goes.
+- **Generated SQL reaches the driver through `exec_driver_sql`, never `text()`.**
+  `text()` reads `:name` as a bind parameter, and this string is whatever the
+  model wrote — `WHERE status = ':pending'` becomes a missing-parameter error
+  instead of the SQL error the fix node knows how to react to. Postgres `::`
+  casts happen to survive `text()`'s regex, which makes the failure rare enough
+  to ship and confusing enough to lose a day to.
+- **Every message shown to the model or the user is unwrapped through `.orig`.**
+  SQLAlchemy wraps driver errors, so `str()` prepends `(psycopg.errors.X)`,
+  appends `[SQL: <the whole query>]` and a docs link. `fix` already re-sends the
+  SQL, and a `sqlalche.me` URL is the last thing a user should read when their
+  question failed.
+- **Target engines run `isolation_level="AUTOCOMMIT"`.** Not a style choice:
+  `explore` holds one connection across up to 24 tool calls with model round
+  trips between them, and a SQLAlchemy connection begins a transaction implicitly
+  on its first statement. Without it a T1 turn holds a snapshot open on a
+  customer's production database for minutes. Nothing fails; their DBA notices.
+  `target_readonly` opts back in, to `dialect.default_isolation_level` rather
+  than a constant — SQLite rejects `READ COMMITTED` outright.
+- **Never GROUP BY or DISTINCT on a `CAST`.** On MySQL the cast drops the
+  column's collation for the connection's, which is case-insensitive by default:
+  `GROUP BY CAST(region AS CHAR)` returns `west: 12` where `GROUP BY region`
+  returns `west: 4, West: 4, WEST: 4`. That is trap 2 silently disappearing on
+  another engine. Group on the column and stringify in Python.
 - **A warehouse's password never leaves the server.** `ConnectionOut` has no
   `password` field at all — not `None`, not masked — because a field that does
-  not exist cannot be leaked by a future `**row`. DSNs are built with
-  `psycopg.conninfo.make_conninfo`, never an f-string, and connection errors are
-  reported by exception type rather than message, which quotes the conninfo.
+  not exist cannot be leaked by a future `**row`. URLs are built with
+  `sqlalchemy.URL.create`, never an f-string, and `safe_dsn()` renders one built
+  *without* a password rather than relying on `hide_password=True`: masking is
+  the weaker promise, one flipped keyword from leaking. Connection errors are
+  reported by exception type rather than message — and unwrapped through `.orig`
+  first, because SQLAlchemy's own type name is `OperationalError` for everything
+  and says nothing.
+- **A connection's `driver` cannot be changed.** `PATCH` refuses one with a 409.
+  A cached recipe is SQL in a dialect, and `schema_fp` would not catch a
+  repointing — it hashes types and nullability, and both survive the move. To
+  move a connection to another engine, delete and re-register: that cascades the
+  cache, which is the correct outcome, because none of it transfers.
 - **`stream_turn` never raises.** A model timeout closes the open turn row via
   `store.fail_open_turn` and yields a fatal error event; the next question works.
 - Tool errors come back as `is_error` tool results, not exceptions — the model
@@ -270,6 +359,16 @@ what T1's cost buys:
 report `SELECT` at the bottom of `demo.sql` prints the counts on every `make
 seed`. If you change the demo data, those two are the contract.
 
+**`demo/demo.sql` stays PostgreSQL, and that is a decision rather than a
+backlog item.** It is 573 lines of `generate_series`, `::interval`,
+`ARRAY[...][i]`, `DO $$` role creation and `ALTER DEFAULT PRIVILEGES`, producing
+eight numbers that six test files assert on; SQLite has no role system at all, so
+parts of it are unrepresentable rather than merely different, and a translation
+that quietly shifted a count would be found on stage. The dialect tests use a
+much smaller portable fixture instead —
+[tests/fixtures/portable.py](tests/fixtures/portable.py), built from a
+SQLAlchemy `MetaData` so it is portable by construction.
+
 Note `demo.sql` must stay free of psql meta-commands (`\echo`, `\i`) —
 [tests/conftest.py](tests/conftest.py) applies it through psycopg, which can't
 parse them.
@@ -284,6 +383,11 @@ API of §6.2, and the browser UI of Phase 8.
 ## Conventions
 
 - `uv` for everything (`uv run …`); dependencies in [pyproject.toml](pyproject.toml).
+- `sqlalchemy` is import-legal in `app/db.py`, `app/tools.py`, `app/dialects.py`,
+  `app/api.py` and `app/store.py`'s four target functions, and nowhere else — in
+  particular not in `app/graph.py` beyond what `db.` hands back, and never in
+  `sql_agent_cli/`, which [tests/test_cli_isolation.py](tests/test_cli_isolation.py)
+  asserts.
 - Migrations are `migrations/*.sql`, applied in filename order on every `make
   migrate`, so every statement must be `IF NOT EXISTS`-idempotent. They are a
   **desired-state script, not an append-only ledger** — editing an earlier file

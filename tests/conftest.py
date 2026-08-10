@@ -31,6 +31,8 @@ Rebuilt once per session, so they are also always consistent with the current
 import asyncio
 import os
 import pathlib
+from dataclasses import dataclass
+from typing import Any
 from collections.abc import AsyncIterator
 
 import psycopg
@@ -39,7 +41,10 @@ from httpx import ASGITransport, AsyncClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from app import store
 from app.main import app
 from app.secrets import seal
 from app.settings import Settings, settings
@@ -47,6 +52,9 @@ from app.settings import Settings, settings
 AGENT_TEST = "agent_test"
 DEMO_TEST = "business_test"
 DEMO_TEST_B = "business_test_b"
+# The portable fixture's Postgres home. Separate from the demo databases, which
+# carry the trap-count contract.
+PORTABLE_PG = "portable_test"
 
 # The registry ids the suite runs against. `default` is env-owned, exactly as it
 # is in a real deployment, so tests exercise the same resolution path.
@@ -100,8 +108,6 @@ def _register(conn, cid: str, url: str, *, origin: str) -> None:
     means, and the disagreement would show up as a test that passes against a
     database nobody intended.
     """
-    from app import store
-
     row = store.connection_from_url(url, id=cid, origin=origin)
     conn.execute(
         """
@@ -138,6 +144,7 @@ def test_databases() -> str:
     _recreate(dev.agent_database_url, AGENT_TEST)
     _recreate(dev.target_admin_url, DEMO_TEST)
     _recreate(dev.target_admin_url, DEMO_TEST_B)
+    _recreate(dev.target_admin_url, PORTABLE_PG)
 
     # The agent's own schema, then LangGraph's checkpoint tables — which the
     # app creates in its lifespan, not in a migration. Without this the agent
@@ -222,10 +229,34 @@ async def target_conn() -> AsyncIterator[AsyncConnection]:
         yield conn
 
 
+async def _target_connect(url: str) -> AsyncIterator[TargetConnection]:
+    """A SQLAlchemy connection to a target, as `app/` gets one.
+
+    **No read-only hooks.** `app.dialects.install` is deliberately not applied:
+    `test_the_reader_role_cannot_write` is about the *role*, and a connection
+    that refused writes at the session level would fail with
+    ReadOnlySqlTransaction instead of InsufficientPrivilege and quietly stop
+    testing what its docstring says it tests.
+    """
+    engine = create_async_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        async with engine.connect() as conn:
+            yield conn
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture
-async def reader_conn() -> AsyncIterator[AsyncConnection]:
-    """The business data as the *agent* sees it: SELECT and nothing else."""
-    async for conn in _connect(settings().target_database_url):
+async def reader_conn() -> AsyncIterator[TargetConnection]:
+    """The business data as the *agent* sees it: SELECT and nothing else.
+
+    A SQLAlchemy connection now, like the one `app/tools.py` is handed — the
+    port's whole point is that this is not interchangeable with `agent_conn`.
+    """
+    url = store.connection_from_url(
+        settings().target_database_url, id="_fixture"
+    ).url()
+    async for conn in _target_connect(url):
         yield conn
 
 
@@ -237,10 +268,118 @@ async def target_conn_b() -> AsyncIterator[AsyncConnection]:
 
 
 @pytest.fixture
-async def reader_conn_b() -> AsyncIterator[AsyncConnection]:
+async def reader_conn_b() -> AsyncIterator[TargetConnection]:
     """The second business database as the agent sees it."""
-    async for conn in _connect(_swap_db(settings().target_database_url, DEMO_TEST_B)):
+    url = store.connection_from_url(
+        _swap_db(settings().target_database_url, DEMO_TEST_B), id="_fixture"
+    ).url()
+    async for conn in _target_connect(url):
         yield conn
+
+
+# --------------------------------------------------------------- the dialects
+#
+# The dialect axis is **additive**: `default` and `other` stay exactly what they
+# were — Postgres, same role, same shapes, same numbers — so every existing
+# assertion keeps working as a regression test for the port itself, and a MySQL
+# container being down cannot break the demo path.
+
+
+# SQLite is free: a tempfile is a whole warehouse, no container and no role.
+# MySQL needs one, so it is behind a marker the same way `live` is — see
+# pyproject's addopts.
+DIALECTS = ["postgresql", "sqlite", "mysql"]
+
+
+def portable_url(dialect: str, tmp: pathlib.Path) -> str:
+    """Always through `store.connection_from_url`, never a raw string.
+
+    A bare `postgresql://` resolves to psycopg2 in SQLAlchemy, which is neither
+    installed nor wanted — the normaliser is what maps it to
+    `postgresql+psycopg`, and the harness using a different one from the app is
+    exactly the disagreement `_register`'s docstring warns about.
+    """
+    if dialect == "sqlite":
+        raw = f"sqlite:///{tmp / 'portable.db'}"
+    elif dialect == "mysql":
+        raw = os.environ.get(
+            "MYSQL_TEST_URL", "mysql://root:root@localhost:3307/portable"
+        )
+    else:
+        raw = _swap_db(Settings().target_admin_url, PORTABLE_PG)
+    return (
+        store.connection_from_url(raw, id="_portable")
+        .url()
+        .render_as_string(hide_password=False)
+    )
+
+
+@dataclass
+class Portable:
+    """One dialect's copy of the portable fixture, registered and connectable."""
+
+    dialect: str
+    cid: str
+    url: str
+    engine: Any  # a plain engine: no read-only hooks, so DDL still works
+
+
+@pytest.fixture
+async def portable(
+    dialect, tmp_path_factory, agent_conn, client
+) -> AsyncIterator[Portable]:
+    """The portable fixture on `dialect`, plus a registry row pointing at it.
+
+    Depends on `client` for its side effect: the lifespan is what opens the
+    agent pool, and `db.target()` resolves the registry through it. One owner
+    of the pool's lifetime beats each test opening and closing its own.
+
+    Session-scoped would be faster, but a per-test build is what lets the
+    capability tests attempt writes without leaving the next test a wrecked
+    database.
+    """
+    from tests.fixtures import portable as fixture
+
+    tmp = tmp_path_factory.mktemp(f"portable-{dialect}")
+    url = portable_url(dialect, tmp)
+    try:
+        engine = create_async_engine(url)
+        await fixture.build(engine)
+    except Exception as e:  # noqa: BLE001
+        # MySQL is opt-in: the driver is an optional extra and the container is
+        # behind a compose profile, so "not available" is a skip rather than a
+        # failure. Every other dialect not building is a real failure.
+        if dialect == "mysql":
+            pytest.skip(f"no MySQL available ({type(e).__name__}: {e})")
+        raise
+    try:
+
+        cid = f"portable-{dialect}"
+        row = store.connection_from_url(url, id=cid, origin="api")
+        await agent_conn.execute("DELETE FROM connection WHERE id = %s", (cid,))
+        await store.create_connection(agent_conn, row)
+        try:
+            yield Portable(dialect=dialect, cid=cid, url=url, engine=engine)
+        finally:
+            from app import db as _db
+
+            await _db.evict(cid)
+            await agent_conn.execute("DELETE FROM connection WHERE id = %s", (cid,))
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture(params=DIALECTS)
+def dialect(request) -> str:
+    """Parametrises a test over every supported engine.
+
+    A test using this runs three times. MySQL skips itself unless the container
+    is up; SQLite always runs, which is the point of choosing it first.
+    """
+    name = request.param
+    if name == "mysql":
+        request.node.add_marker(pytest.mark.mysql)
+    return name
 
 
 @pytest.fixture(autouse=True)

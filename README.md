@@ -2,6 +2,8 @@
 
 A self-optimizing SQL agent that gets cheaper with every question.
 
+Point it at PostgreSQL, MySQL/MariaDB or SQLite.
+
 ![The agent answering three questions against a database it has never seen](demo/demo.gif)
 
 ## Overview
@@ -59,6 +61,10 @@ SQL_AGENT_API_KEY=...                    # only if the server has API_TOKEN set
 # Point it at a database. `default` is TARGET_DATABASE_URL, already registered.
 sql-agent connections create warehouse \
     --hostname db.internal --database analytics --username reader
+sql-agent connections create reporting --driver mysql+asyncmy \
+    --hostname mysql.internal --database reporting --username reader
+sql-agent connections create books --driver sqlite+aiosqlite \
+    --database /data/books.db          # sqlite is a path and nothing else
 sql-agent connections ls
 sql-agent connect warehouse
 
@@ -140,22 +146,38 @@ needs `make build`.
 The agent's memory is on its **own Postgres server**, separate from every
 database it answers questions about.
 
-| | `agent-db` :5433 | a target, e.g. `demo-db` :5432 |
+| | `agent-db` :5433 | a target |
 |---|---|---|
-| holds | the registry, and what the agent has learned | `customer`, `orders`, 38 decoys |
-| built by | `migrations/*.sql` | `demo/demo.sql`, locally |
+| holds | the registry, and what the agent has learned | the business data |
+| engine | Postgres, always | PostgreSQL, MySQL/MariaDB or SQLite |
 | how many | one | however many are registered |
 
 So the agent can't explore its own cache and cache facts about caching. That
 doesn't rest on application code remembering to check: `sql-agent reset` cannot
 touch the business data because that connection cannot see it.
 
+The two halves speak different libraries — the agent's memory is psycopg, targets
+are SQLAlchemy — and they are physically incompatible, so passing one where the
+other belongs is a type error rather than a subtle bug.
+
 Generated SQL can't write either, and this one is worth being precise about.
 `demo/demo.sql` builds a `reader` role holding SELECT and nothing else — but a
 *registered* connection's credentials are whatever you gave us, so the guarantee
-cannot live there. Every connection the agent opens to a target is put into a
-read-only session, which binds any role including a superuser, and generated SQL
-additionally runs in a read-only transaction with a statement timeout.
+cannot live there. Every connection the agent opens is put into a read-only
+session, which binds any role including a superuser.
+
+**How far that goes depends on the engine, and the agent tells you which.**
+
+| | writes blocked | runaway query killed | |
+|---|---|---|---|
+| PostgreSQL | ✓ | ✓ | `enforced` |
+| MySQL / MariaDB | ✓ | ✓ | `enforced` |
+| SQLite | ✓ | ✗ — it has no statement timeout | `partial` |
+
+Registration is never refused over this. A connection that cannot promise
+everything says so when you create it and carries its tier in
+`sql-agent connections get`. An undisclosed gap and an undisclosed hole are the
+same bug.
 
 `demo/demo.sql` is not the product — it's a booby-trapped fixture so the agent
 has something to explore, which is why it sits next to the tape that records it.

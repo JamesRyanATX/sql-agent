@@ -47,6 +47,34 @@ services:
       timeout: 3s
       retries: 30
 
+  # Opt-in, behind a profile: `docker compose --profile mysql up -d`. Not part
+  # of `make up`, because the demo is Postgres and a second engine is only
+  # needed to run the dialect tests — which skip themselves when it is absent.
+  #
+  # The collation is the point. MySQL's default is case-*insensitive*, which
+  # folds `west`, `West` and `WEST` into one group — the exact trap the demo is
+  # built on, silently disappearing. A case-sensitive collation is what makes
+  # the fixture mean the same thing on all three engines.
+  mysql-db:
+    image: mysql:8.4
+    container_name: sql-agent-mysql-db
+    profiles: ["mysql"]
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_0900_as_cs
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: portable
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
   api:
     build: .
     container_name: sql-agent-api
@@ -86,5 +114,6 @@ services:
       start_period: 10s
 
 volumes:
+  mysql-data:
   agent-pgdata:
   demo-pgdata:

@@ -134,6 +134,17 @@ async def request(method: str, path: str, **kw) -> Any:
             resp = await c.request(method, path, **kw)
     except httpx.ConnectError as e:
         raise ApiError(_unreachable(e)) from e
+    except httpx.TransportError as e:
+        # The same clause `stream_events` has, and for the same reason: a server
+        # that accepts the connection and then dies — a container restarting, a
+        # crash on startup — is not a bug in this client, and a traceback out of
+        # httpx says nothing anyone can act on. Ordered after ConnectError,
+        # which is itself a TransportError.
+        raise ApiError(
+            f"no reply from {_config().base_url()} — the server accepted the "
+            f"connection and then closed it ({type(e).__name__}). "
+            "Check its logs: 'make logs-api'"
+        ) from e
     _raise_for_status(resp)
     return resp.json()
 
