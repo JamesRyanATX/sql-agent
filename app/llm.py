@@ -62,6 +62,14 @@ class ToolUse:
     input: dict[str, Any]
 
 
+class LlmError(Exception):
+    """A model server said no, with the reason it gave.
+
+    `stream_turn` renders this as one fatal error event, so whatever is in the
+    message is what a user sees — which is why the server's own body goes in it.
+    """
+
+
 @dataclass(slots=True)
 class Result:
     text: str = ""
@@ -292,7 +300,17 @@ async def _complete_openai(
                 },
             }
         ]
-        body["tool_choice"] = {"type": "function", "function": {"name": _EMIT}}
+        # `"required"` — the string — rather than OpenAI's named-function form
+        # `{"type": "function", "function": {"name": ...}}`. The two mean the
+        # same thing here, because the tools list above holds exactly one entry:
+        # "call some tool" and "call `emit`" are the same instruction. The named
+        # form is not universally implemented — LM Studio answers it with
+        #   400 {"error":"Invalid tool_choice type: 'object'.
+        #        Supported string values: none, auto, required"}
+        # — while `"required"` is accepted by every OpenAI-shaped server tried,
+        # including OpenAI itself. Prefer the spelling that is equivalent and
+        # portable over the one that is more specific and not.
+        body["tool_choice"] = "required"
     elif tools:
         body["tools"] = [
             {
@@ -307,7 +325,16 @@ async def _complete_openai(
         ]
 
     resp = await _http_client().post("/chat/completions", json=body)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # Not `raise_for_status()`. It reports the status and the URL and throws
+        # the body away — and the body is the entire diagnosis. A local server
+        # rejecting one field answers "400 Bad Request for url ..." plus a link
+        # to MDN, which sends you looking at the network instead of at the one
+        # key it did not like.
+        raise LlmError(
+            f"{resp.status_code} from {settings().openai_base_url}"
+            f"/chat/completions: {resp.text[:500]}"
+        )
     data = resp.json()
 
     choice = data["choices"][0]
