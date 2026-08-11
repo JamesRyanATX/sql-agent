@@ -138,9 +138,15 @@ cache:  ## show what the agent has learned, as the model sees it
 turns:  ## tokens per turn — the demo chart, as a table
 	@uv run sql-agent turns -c $(CONN)
 
-demo: health reset  ## record the terminal demo — live, 17-25 min of real model time
+demo: health reset  ## record the terminal demo — live, 20-30 min of real model time
 	$(VHS) demo/demo.tape
 
+# T1-T3 are gated on the numbers because demo.sql derives them from modular
+# arithmetic and 1,840 is a fact. T4 and T5 are gated on *shape* only, and that
+# is not laziness: `orders.created` is anchored to now(), so which quarters exist
+# and how many orders each holds slide with the recording date. A gate on "2024
+# Q3 — 408" would pass today and fail in November, which is the worst kind of
+# check — one that reports a bad take when nothing is wrong.
 demo-verify:  ## did the last take earn its place? read it from the turn table
 	@echo "=== turns ==="
 	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
@@ -154,8 +160,8 @@ demo-verify:  ## did the last take earn its place? read it from the turn table
 	            tokens_in + tokens_out AS tok, answer \
 	     FROM turn WHERE answer IS NOT NULL AND connection_id = '$(CONN)') \
 	   SELECT CASE WHEN ok THEN 'PASS  ' ELSE 'FAIL  ' END || label FROM ( \
-	     SELECT 1 AS i, (SELECT count(*) FROM t) = 3 AS ok, \
-	            'three turns recorded' AS label \
+	     SELECT 1 AS i, (SELECT count(*) FROM t) = 5 AS ok, \
+	            'five turns recorded' AS label \
 	     UNION ALL SELECT 2, coalesce((SELECT explored AND answer ~ '1,?840' \
 	            FROM t WHERE n = 1), false), 'T1 explored, and answered 1,840' \
 	     UNION ALL SELECT 3, coalesce((SELECT NOT explored AND answer ~ '1,?840' \
@@ -164,6 +170,12 @@ demo-verify:  ## did the last take earn its place? read it from the turn table
 	            < (SELECT tok FROM t WHERE n = 1)), false), 'T2 cost less than T1' \
 	     UNION ALL SELECT 5, coalesce((SELECT answer ~ '460' FROM t WHERE n = 3), \
 	            false), 'T3 answered 460' \
+	     UNION ALL SELECT 6, coalesce((SELECT explored FROM t WHERE n = 4), false), \
+	            'T4 explored — orders is a new area of the schema' \
+	     UNION ALL SELECT 7, coalesce((SELECT NOT explored FROM t WHERE n = 5), \
+	            false), 'T5 projected without exploring' \
+	     UNION ALL SELECT 8, coalesce(((SELECT tok FROM t WHERE n = 5) \
+	            < (SELECT tok FROM t WHERE n = 4)), false), 'T5 cost less than T4' \
 	   ) x ORDER BY i"); \
 	echo "$$out"; \
 	if echo "$$out" | grep -q '^FAIL'; then \

@@ -8,7 +8,11 @@ A LangGraph agent that answers business questions against a Postgres database it
 has never seen, and gets cheaper each turn by writing down what it learned as
 plain-English cache entries. The demo is a token counter going down: T1 explores
 (~11.5k tokens), T2 answers the same question from cache (~371), T3 answers a
-*new* question by composing cached recipes (~475).
+*new* question by composing cached recipes (~475). Then it goes back up and down
+again on purpose — T4 asks about `orders`, a part of the schema T1–T3 never
+touched, and pays ~14.3k for it; T5 turns what T4 learned into a `regr_slope`
+projection for ~1.4k without exploring. The counter is not monotonic, and a demo
+that implied it was would be selling something else.
 
 [PLAN.md](PLAN.md) is the design document and build plan — its section numbers
 (§4 the graph, §5 cache hygiene, §7.1 model request shape) are referenced from

@@ -1,6 +1,14 @@
-# The terminal demo — §9 steps 1-4, recorded live.
+# The terminal demo — PLAN.md §9 steps 1, 3-5 and 8, recorded live.
 #
-#   make demo          record it (17-25 min of real model time)
+# §9's step 5 ("revenue by region last quarter — curve bumps, doesn't reset") is
+# the one this tape went without for a long time, and it is the claim's honest
+# half: the agent gets cheaper at what it has seen, not at everything. It lands
+# here as two beats rather than one, because the bump and the payoff are
+# separate things to watch — step 5 pays for `orders`, step 6 spends what it
+# bought. `orders` rather than §9's `order_item` only because a quarterly count
+# is a table you can read at a glance.
+#
+#   make demo          record it (20-30 min of real model time)
 #   make demo-verify   check the take was a good one, from the turn table
 #
 # Nothing here is re-enacted: every token count and latency on screen comes
@@ -23,16 +31,18 @@
 # on screen. At 1200x700 and 16pt that screenful is roughly 34 lines, and every
 # step here clears first, so the budget is per step rather than cumulative.
 #
-# A default turn is ~11 lines: the question, a psql-shaped result table with its
-# `(N rows)` footer, the answer, and the token line the `Wait` below matches. The
-# three questions on this tape all return a single cell, so the table is four
-# rows deep and the budget is not close.
+# A turn prints the question, a psql-shaped result table with its `(N rows)`
+# footer, the answer paragraph, and the token line the `Wait` below matches.
+# Steps 1, 3 and 4 return a single cell, so they run ~11 lines. Step 5 is the
+# long one: two years of `orders` is 9 or 10 quarters, which puts it around 22.
 #
-# **The ceiling is real for other questions.** `sql-agent` will print up to
-# `max_rows` (50) rows, which is 55 lines and would scroll `tokens (` clean out
-# of view. Width is bounded — `render.CELL` truncates a long value — but height
-# is not. A step that asked something list-shaped would need to clear and
-# re-print a short tail card rather than waiting on the turn's own output.
+# **The ceiling is real.** `sql-agent` will print up to `max_rows` (50) rows,
+# which is 55 lines and would scroll `tokens (` clean out of view. Width is
+# bounded — `render.CELL` truncates a long value — but height is not. A step
+# asking for something genuinely list-shaped (every product, every customer)
+# would have to clear and re-print a short tail card rather than waiting on the
+# turn's own output. Step 5 gets away with it because a quarter is a coarse
+# bucket, and that is luck rather than design.
 #
 # The bounded default is a contract, not a coincidence: `sql-agent -v` shows
 # planning, exploration and what was learned, and any of it printed by default
@@ -106,6 +116,46 @@ Enter
 Type 'sql-agent "How many customers are in the west region?"'
 Enter
 Wait+Screen@40m /tokens \(/
+Sleep 20s
+
+# ---------------------------------------------------------------- step 5 ----
+# A different area of the schema, and the price goes back up. Steps 1-4 are all
+# about `customer`; nothing the cache holds says anything about `orders`, so
+# this explores again — which is the honest shape of the claim. The agent does
+# not get cheaper at everything, it gets cheaper at what it has seen.
+#
+# It also walks into two of the five traps on the way: the date column is
+# `created`, not `created_at`, and `status` includes cancelled rows.
+
+Ctrl+L
+Type "# A new area of the schema costs again:"
+Enter
+Type 'sql-agent "list the number of orders per quarter, sorted by date ascending"'
+Enter
+Wait+Screen@40m /\[explored\]/
+Sleep 20s
+
+# ---------------------------------------------------------------- step 6 ----
+# The payoff, and the reason step 5 earns its place. Nothing cached is a
+# forecast — what step 5 filed away is that orders are dated by `created`, that
+# status includes cancellations, and how to bucket them into quarters. From
+# those three facts the agent writes a least-squares fit with `regr_slope` and
+# projects two quarters forward, without touching the schema.
+#
+# "the next two quarters", not named ones: demo.sql anchors `orders.created` to
+# now(), so the data slides with the recording date and a named quarter would
+# quietly become a question about the past.
+#
+# Measured: 1,416 tokens in 10s against step 5's 14,254 in 48s. The first run of
+# this question tripped the fix loop on `interval '1 quarter'`; the cache
+# absorbed that, which is the demo happening off-camera.
+
+Ctrl+L
+Type "# Composition, not lookup — nothing cached is a forecast:"
+Enter
+Type 'sql-agent "based on previous quarters, what is the projected order count for the next two quarters?"'
+Enter
+Wait+Screen@40m /\[no exploration\]/
 Sleep 20s
 
 # ------------------------------------------------------------------ close ----

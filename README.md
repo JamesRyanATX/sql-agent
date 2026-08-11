@@ -4,7 +4,7 @@ A self-optimizing SQL agent that gets cheaper with every question.
 
 Point it at PostgreSQL, MySQL/MariaDB or SQLite.
 
-![The agent answering three questions against a database it has never seen](demo/demo.gif)
+![The agent answering five questions against a database it has never seen](demo/demo.gif)
 
 ## Overview
 
@@ -15,12 +15,24 @@ End to end on `claude-opus-5`, from a cold cache:
 | T1 — how many customers do we have? | 5 tool calls | **11,505** | 34s | 1,840 ✓ |
 | T2 — the same question again | **none** | **371** | 8s | 1,840 ✓ |
 | T3 — how many in the west region? | **none** | 475 | 6s | 460 ✓ |
+| T4 — orders per quarter? | 3 tool calls | **14,254** | 48s | 9 quarters ✓ |
+| T5 — project the next two quarters | **none** | **1,416** | 10s | a least-squares fit ✓ |
 
 **T1** primes the agent's memory.
 
 **T2** is the same question and the same answer, but cheaper now. 
 
 **T3** had never been asked, but costs about the same as T2.
+
+**T4** goes up again, and that is the honest shape of the claim: T1–T3 are all
+about `customer`, and `orders` is a part of the schema the agent has never seen.
+It does not get cheaper at everything — it gets cheaper at what it has seen.
+
+**T5** is the one worth watching. Nothing in the cache is a forecast. What T4
+filed away is that orders are dated by `created` rather than `created_at`, that
+`status` includes cancellations, and how to bucket them into quarters — and from
+those three facts the agent writes a least-squares fit with `regr_slope` and
+projects two quarters forward, without opening the schema again.
 
 ## Quickstart
 
