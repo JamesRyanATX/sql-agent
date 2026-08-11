@@ -1,10 +1,13 @@
 """Rendering the turn stream.
 
-**The default output is byte-identical to what `scripts/ask.py` printed**, and
-that is an invariant rather than a preference. `demo/demo.tape` waits on
-`[explored]`, `[no exploration]` and `tokens (`; VHS can only see one screenful,
-so an extra line printed by default scrolls the awaited one out of view and
-every recording after that times out at forty minutes.
+**Default output has to fit one VHS screenful**, and that is an invariant rather
+than a preference. `demo/demo.tape` waits on `[explored]`, `[no exploration]` and
+`tokens (`; VHS can only see the first screenful, so an awaited line that scrolls
+out of view times the recording out at forty minutes. That used to be stated as
+"byte-identical to what `scripts/ask.py` printed", which was the wrong statement
+of it — what the tape needs is output that is *bounded*, not output that is
+frozen. `render.CELL` bounds the width; the row count is bounded only by
+`max_rows`, so see the tape's own comment for where that ceiling actually bites.
 
 So: `rows`, `error` and `answer` by default. Everything else is behind -v.
 """
@@ -16,7 +19,7 @@ from typing import Any
 
 import click
 
-from sql_agent_cli.render import fmt_rows
+from sql_agent_cli import render
 
 
 def cost(ev: dict[str, Any]) -> str:
@@ -33,11 +36,21 @@ def cost(ev: dict[str, Any]) -> str:
 def show(ev: dict[str, Any], *, verbose: bool = False) -> None:
     kind = ev.get("type")
     if kind == "rows":
-        click.secho(f"=> {fmt_rows(ev['rows'])}", fg="bright_white", bold=True)
+        render.result(ev["rows"], capped=ev.get("capped", False))
     elif kind == "error":
         # A silent failure with no explanation is worse than the noise it costs.
         click.secho(f"error: {ev['message']}", fg="red")
     elif kind == "answer":
+        # Below the table rather than above it, and that is forced rather than
+        # chosen: `rows` comes from `execute` and this comes from `answer`, with
+        # `extract` — a model call — in between. Printing the sentence first
+        # would mean holding the result until extract returned, which is several
+        # seconds of blank screen at the end of a turn the user already waited
+        # 45 seconds for. It reads better this way regardless: the data, then
+        # what the agent concluded from it, then what that cost.
+        if text := ev.get("text"):
+            click.echo()
+            click.echo(text)
         click.echo()
         click.secho(cost(ev), dim=True)
     elif verbose:

@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from sql_agent_cli import events
+from sql_agent_cli import render as render_mod
 
 ANSWER = {
     "type": "answer",
@@ -83,9 +84,91 @@ def test_nothing_but_rows_errors_and_answers_prints_by_default(ev):
     assert render(ev) == ""
 
 
-def test_a_default_turn_is_two_lines():
-    out = render({"type": "rows", "count": 1, "rows": [{"n": 1840}]}, ANSWER)
-    assert out == "=> [(1840)]\n\n405 tokens (215 in / 190 out) in 6.6s  [no exploration]\n"
+def test_a_default_turn_is_a_table_then_the_answer_then_the_cost():
+    """The whole default view, as a golden string.
+
+    A one-cell result gets the full table anyway, because psql does not
+    special-case one and neither should this — and because a `=>` shorthand for
+    the scalar case is a second output format to keep working.
+    """
+    out = render({"type": "rows", "count": 1, "rows": [{"customer_count": 1840}]}, ANSWER)
+    assert out == (
+        "\n"
+        "customer_count\n"
+        "--------------\n"
+        "          1840\n"
+        "\n"
+        "(1 row)\n"
+        "\n"
+        "1,840 active customers.\n"
+        "\n"
+        "405 tokens (215 in / 190 out) in 6.6s  [no exploration]\n"
+    )
+
+
+def test_columns_align_by_what_is_in_them_not_by_their_name():
+    """`table`'s `right=` allowlist is by header name, which cannot work here:
+    the columns are whatever SQL the model just wrote. The Decimal is the case
+    that matters — app/graph.py's JSON round trip hands it over as a string, so
+    an isinstance check alone would leave it left-aligned beside its own kind."""
+    out = render(
+        {
+            "type": "rows",
+            "count": 2,
+            "rows": [
+                {"region": "west", "orders": 408, "revenue": "1234.50"},
+                {"region": "east", "orders": 736, "revenue": "98.75"},
+            ],
+        }
+    )
+    assert "region | orders | revenue" in out
+    assert "west   |    408 | 1234.50" in out
+    assert "east   |    736 |   98.75" in out
+
+
+def test_a_null_is_blank_not_the_word_none():
+    out = render({"type": "rows", "count": 1, "rows": [{"a": 1, "b": None}]})
+    assert "None" not in out
+    assert "\n1 |\n" in out
+
+
+def test_a_long_value_is_truncated_rather_than_wrapped():
+    """One long cell must not destroy the alignment of every row below it, or
+    push the tape's awaited line off the one screenful VHS can see. `--json` is
+    the untruncated view."""
+    long = "x" * 200
+    out = render({"type": "rows", "count": 1, "rows": [{"note": long}]})
+    assert long not in out
+    assert "…" in out
+    assert max(len(line) for line in out.splitlines()) <= render_mod.CELL
+
+
+def test_a_full_page_says_more_may_exist_rather_than_a_total_it_lacks():
+    """`execute` uses fetchmany(max_rows), so a full page and a result that
+    happened to be exactly that long are the same thing on the wire."""
+    rows = [{"n": i} for i in range(50)]
+    assert "(50 rows — more matched)" in render(
+        {"type": "rows", "count": 50, "rows": rows, "capped": True}
+    )
+    assert "more matched" not in render(
+        {"type": "rows", "count": 50, "rows": rows, "capped": False}
+    )
+
+
+def test_an_empty_result_prints_a_footer_and_no_header():
+    """No row means no keys, so there is no header available to print."""
+    assert render({"type": "rows", "count": 0, "rows": []}) == "(0 rows)\n"
+
+
+def test_the_answer_text_prints():
+    """It used not to, in any mode but --json: `show` rendered the cost line and
+    dropped `text`. The table is the data; this is what the agent concluded."""
+    assert "1,840 active customers." in render(ANSWER)
+
+
+def test_a_turn_with_no_answer_text_still_prints_its_cost():
+    out = render({**ANSWER, "text": ""})
+    assert out == "\n405 tokens (215 in / 190 out) in 6.6s  [no exploration]\n"
 
 
 def test_verbose_shows_the_work():

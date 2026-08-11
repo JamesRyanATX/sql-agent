@@ -209,7 +209,17 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
   timeout** — a T1 turn takes minutes and httpx's 5s default would kill every
   one); `config.py` holds the two `SQL_AGENT_*` variables and the connection
   precedence; `main.py` holds `AskOrCommand`, which decides whether argv is a
-  question or a subcommand; the rest render.
+  question or a subcommand; the rest render. `render.table` is the one aligned
+  formatter — `turns`, `connections ls` and query results all go through it, so
+  a psql-shaped `(N rows)` footer is a thing the tape can wait on. Query results
+  come through `render.result`, which differs in three ways that are each a
+  decision: alignment is decided **by what is in a column, not by its name**
+  (`table`'s `right=` allowlist cannot work for SQL the model just wrote, and a
+  Postgres numeric arrives as the string `"1234.50"`); cells truncate at
+  `render.CELL` so one long value cannot unalign every row or overrun the tape's
+  screenful, with `--json` as the untruncated view; and a result that filled
+  `max_rows` prints `— more matched` rather than a total, because `fetchmany`
+  never counted one.
 
 ### Observability
 

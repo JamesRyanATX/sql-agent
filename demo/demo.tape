@@ -20,15 +20,23 @@
 #
 # VHS 0.11.0 can only see the FIRST SCREENFUL — once output scrolls past it,
 # `Wait` freezes on stale content and times out regardless of what's actually
-# on screen. Every step here stays short (`sql-agent` prints 4 lines by
-# default; `sql-agent turns` is waited on by its psql-shaped `(N rows)`
-# footer, which prints last), so this doesn't currently bite — but a step that
-# printed pages of output would need to clear and re-print a short tail card
-# instead of waiting directly.
+# on screen. At 1200x700 and 16pt that screenful is roughly 34 lines, and every
+# step here clears first, so the budget is per step rather than cumulative.
 #
-# The four-line default is a contract, not a coincidence: `sql-agent -v` shows
+# A default turn is ~11 lines: the question, a psql-shaped result table with its
+# `(N rows)` footer, the answer, and the token line the `Wait` below matches. The
+# three questions on this tape all return a single cell, so the table is four
+# rows deep and the budget is not close.
+#
+# **The ceiling is real for other questions.** `sql-agent` will print up to
+# `max_rows` (50) rows, which is 55 lines and would scroll `tokens (` clean out
+# of view. Width is bounded — `render.CELL` truncates a long value — but height
+# is not. A step that asked something list-shaped would need to clear and
+# re-print a short tail card rather than waiting on the turn's own output.
+#
+# The bounded default is a contract, not a coincidence: `sql-agent -v` shows
 # planning, exploration and what was learned, and any of it printed by default
-# would scroll the awaited line out of the screenful VHS can see.
+# would eat the margin the rows have.
 
 Output demo/demo.gif
 Output demo/demo.mp4

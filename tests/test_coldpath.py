@@ -199,6 +199,51 @@ async def test_the_fix_loop_is_bounded(pool, monkeypatch):
 # ------------------------------------------------------------------ bounds
 
 
+async def test_every_row_the_model_saw_reaches_the_client(pool, monkeypatch):
+    """The `rows` event used to carry `rows[:5]` — a hardcoded five, unrelated to
+    `max_rows`. A twenty-row answer arrived as five with nothing on the wire
+    saying so, and the CLI could not have told you even if it wanted to."""
+    model = ScriptedModel(
+        text_result("generate_series is enough to make twelve rows"),
+        json_result(
+            {"sql": "SELECT generate_series AS n FROM generate_series(1, 12)",
+             "assumptions": []},
+        ),
+        no_entries(),
+        text_result("twelve rows"),
+    )
+    monkeypatch.setattr(llm, "complete", model)
+
+    events, _ = await run()
+    rows = next(e for e in events if e["type"] == "rows")
+    assert rows["count"] == 12
+    assert [r["n"] for r in rows["rows"]] == list(range(1, 13))
+    # Twelve is nowhere near max_rows, so nothing was cut short.
+    assert rows["capped"] is False
+
+
+async def test_a_result_that_fills_the_page_says_so(pool, monkeypatch):
+    """`fetchmany(max_rows)` cannot tell a full page from a result that happened
+    to be exactly that long, so `capped` is the only honest thing to send: the
+    client can say "more matched" but never a total nobody counted."""
+    monkeypatch.setattr(settings(), "max_rows", 4)
+    model = ScriptedModel(
+        text_result("generate_series again, this time past the cap"),
+        json_result(
+            {"sql": "SELECT generate_series AS n FROM generate_series(1, 50)",
+             "assumptions": []},
+        ),
+        no_entries(),
+        text_result("a page of rows"),
+    )
+    monkeypatch.setattr(llm, "complete", model)
+
+    events, _ = await run()
+    rows = next(e for e in events if e["type"] == "rows")
+    assert rows["count"] == 4
+    assert rows["capped"] is True
+
+
 async def test_exploration_is_capped(pool, monkeypatch):
     """T1 has to be expensive, but it also has to end."""
     monkeypatch.setattr(settings(), "max_tool_calls", 3)

@@ -201,12 +201,25 @@ whose deleted_at is null", not "I filtered on deleted_at".
 Record only what this query actually establishes. Nothing speculative, nothing \
 you did not verify, and nothing that merely restates the question."""
 
+# This used to say "for someone who did not see the query", and that reader
+# existed: the whole result was `=> [(1840)]` and the answer text was not printed
+# at all. Now the rows are a table directly above this, and a model told to "lead
+# with the number" reads a nine-row result as nine numbers and types the table
+# out again underneath itself.
+#
+# Measured on the quarters question: 353 output tokens before, 278 after, so the
+# saving is real but modest — most of that 353 was thinking, not the recitation.
+# The reason to change it is the duplication, not the tokens. What a table cannot
+# say is what was counted and what the shape means, and that is the whole job
+# left for prose.
 ANSWER_SYSTEM = """\
-State the answer in one or two sentences, for someone who did not see the query.
+State the answer in one or two sentences. The reader is looking at the result \
+rows already, so do not list them back.
 
-Lead with the number or finding. Put the load-bearing assumptions inline in the \
-prose — a reader must not be able to mistake what was counted. Do not restate \
-the SQL, and do not add caveats that change nothing."""
+Say what the numbers mean and what was counted: the load-bearing assumptions \
+inline in the prose, and anything about the shape of the result a reader would \
+otherwise misread. Where the result is a single value, lead with that value. \
+Do not restate the SQL, and do not add caveats that change nothing."""
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -583,8 +596,23 @@ async def execute(state: TurnState) -> TurnState:
                     else []
                 )
             rows = json.loads(json.dumps(fetched, default=str))
+            # The span keeps a preview; a trace does not need fifty rows to be
+            # legible, and the client is the thing that has to show the result.
             sp.update(output={"count": len(rows), "rows": rows[:5]})
-        emit({"type": "rows", "count": len(rows), "rows": rows[:5]})
+        emit(
+            {
+                "type": "rows",
+                "count": len(rows),
+                # Every row the model saw, not a hardcoded five. Five was
+                # silently a different number from `max_rows`, so a 20-row answer
+                # rendered as 5 with nothing on the wire saying so.
+                "rows": rows,
+                # `fetchmany(max_rows)` cannot tell a full page from a result
+                # that happened to be exactly that long, so the honest thing a
+                # client can say is "more may exist" — never a total we never had.
+                "capped": len(rows) == settings().max_rows,
+            }
+        )
         return {"rows": rows, "error": ""}
     except Exception as e:
         # Including programming errors: a bad column name is exactly what the
