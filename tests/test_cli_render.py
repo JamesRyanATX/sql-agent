@@ -84,8 +84,9 @@ def test_nothing_but_rows_errors_and_answers_prints_by_default(ev):
     assert render(ev) == ""
 
 
-def test_a_default_turn_is_a_table_then_the_answer_then_the_cost():
-    """The whole default view, as a golden string.
+def test_a_default_turn_is_a_table_and_a_cost_line():
+    """The whole default view, as a golden string: what was asked for, and what
+    it cost. Nothing that explains either.
 
     A one-cell result gets the full table anyway, because psql does not
     special-case one and neither should this — and because a `=>` shorthand for
@@ -99,8 +100,6 @@ def test_a_default_turn_is_a_table_then_the_answer_then_the_cost():
         "          1840\n"
         "\n"
         "(1 row)\n"
-        "\n"
-        "1,840 active customers.\n"
         "\n"
         "405 tokens (215 in / 190 out) in 6.6s  [no exploration]\n"
     )
@@ -160,10 +159,15 @@ def test_an_empty_result_prints_a_footer_and_no_header():
     assert render({"type": "rows", "count": 0, "rows": []}) == "(0 rows)\n"
 
 
-def test_the_answer_text_prints():
-    """It used not to, in any mode but --json: `show` rendered the cost line and
-    dropped `text`. The table is the data; this is what the agent concluded."""
-    assert "1,840 active customers." in render(ANSWER)
+def test_the_answer_text_is_verbose_only():
+    """Asserted in both directions, because this has now moved twice.
+
+    The prose explains a result the reader is already looking at, so it sits with
+    the other explanations behind -v — but it must still be reachable, and the
+    cost line must not follow it there."""
+    assert "1,840 active customers." not in render(ANSWER)
+    assert "1,840 active customers." in render(ANSWER, verbose=True)
+    assert "405 tokens" in render(ANSWER)
 
 
 def test_a_turn_with_no_answer_text_still_prints_its_cost():

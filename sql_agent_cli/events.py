@@ -9,7 +9,10 @@ of it — what the tape needs is output that is *bounded*, not output that is
 frozen. `render.CELL` bounds the width; the row count is bounded only by
 `max_rows`, so see the tape's own comment for where that ceiling actually bites.
 
-So: `rows`, `error` and `answer` by default. Everything else is behind -v.
+So by default: the rows, an error if there was one, and the token line. What was
+asked for and what it cost, and nothing that explains either — the SQL, the plan
+decision, the exploration trace and the answer's own prose are all -v, because
+they are all the same kind of thing.
 """
 
 from __future__ import annotations
@@ -41,14 +44,19 @@ def show(ev: dict[str, Any], *, verbose: bool = False) -> None:
         # A silent failure with no explanation is worse than the noise it costs.
         click.secho(f"error: {ev['message']}", fg="red")
     elif kind == "answer":
+        # One event, split across both views, because it carries two different
+        # kinds of thing. The cost line *is* the turn and is always printed. The
+        # prose explains a result the reader is already looking at — the table is
+        # right there — so it belongs with the SQL, the plan decision and the
+        # exploration trace, which is to say behind -v.
+        #
         # Below the table rather than above it, and that is forced rather than
         # chosen: `rows` comes from `execute` and this comes from `answer`, with
         # `extract` — a model call — in between. Printing the sentence first
         # would mean holding the result until extract returned, which is several
         # seconds of blank screen at the end of a turn the user already waited
-        # 45 seconds for. It reads better this way regardless: the data, then
-        # what the agent concluded from it, then what that cost.
-        if text := ev.get("text"):
+        # 45 seconds for.
+        if verbose and (text := ev.get("text")):
             click.echo()
             click.echo(text)
         click.echo()

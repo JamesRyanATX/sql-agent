@@ -32,17 +32,21 @@
 # step here clears first, so the budget is per step rather than cumulative.
 #
 # A turn prints the question, a psql-shaped result table with its `(N rows)`
-# footer, the answer paragraph, and the token line the `Wait` below matches.
-# Steps 1, 3 and 4 return a single cell, so they run ~11 lines. Step 5 is the
-# long one: two years of `orders` is 9 or 10 quarters, which puts it around 22.
+# footer, and the token line the `Wait` below matches. Steps 1, 3 and 4 return a
+# single cell, so they run ~8 lines. Step 5 is the long one: two years of
+# `orders` is 9 or 10 quarters, which puts it around 19.
 #
-# **The ceiling is real.** `sql-agent` will print up to `max_rows` (50) rows,
-# which is 55 lines and would scroll `tokens (` clean out of view. Width is
-# bounded — `render.CELL` truncates a long value — but height is not. A step
-# asking for something genuinely list-shaped (every product, every customer)
-# would have to clear and re-print a short tail card rather than waiting on the
-# turn's own output. Step 5 gets away with it because a quarter is a coarse
-# bucket, and that is luck rather than design.
+# Width is not a risk at all any more. The answer paragraph used to print here
+# too, and a paragraph wraps to however many lines the terminal decides to give
+# it; now it is behind -v, and `render.CELL` truncates a long cell, so every line
+# the default view emits has a length this file can predict.
+#
+# **Height still is.** `sql-agent` will print up to `max_rows` (50) rows, which
+# is 55 lines and would scroll `tokens (` clean out of view. A step asking for
+# something genuinely list-shaped (every product, every customer) would have to
+# clear and re-print a short tail card rather than waiting on the turn's own
+# output. Step 5 gets away with it because a quarter is a coarse bucket, and
+# that is luck rather than design.
 #
 # The bounded default is a contract, not a coincidence: `sql-agent -v` shows
 # planning, exploration and what was learned, and any of it printed by default
