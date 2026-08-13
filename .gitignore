@@ -11,3 +11,9 @@ __pycache__/
 # demo/demo.gif is committed — the README embeds it. The mp4 is a by-product of
 # the same take and would double the repo's weight for nothing.
 demo/*.mp4
+# The harvested prompt corpus. Gitignored not for tidiness: a case holds the
+# recorded prompt, and a trace holds whatever the registered warehouse holds,
+# so committing a harvest commits customer data by construction. The *authored*
+# probes in tests/probes/ are the opposite — those are contract, like
+# tests/test_traps.py.
+optim/out/

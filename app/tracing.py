@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from app import prompts
 from app.settings import settings
 
 log = logging.getLogger(__name__)
@@ -148,6 +149,12 @@ def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]
         as_type="span",
         trace_context={"trace_id": trace_id},
         input=_serialisable({"question": question, "connection_id": connection_id}),
+        # Which prose produced this turn. The one thing Langfuse's own prompt
+        # management would have given for free, and the reason it is worth
+        # having: a harvest that cannot tell a run under the seed from a run
+        # under a candidate will train round two on round one's output. Read
+        # after the `lf is None` return, so off still costs nothing.
+        metadata=_serialisable({"prompts": prompts.fingerprint()}),
     ) as span:
         # The connection as a tag, not just metadata: "everything this warehouse
         # was ever asked" is the question you actually want to filter on, and it

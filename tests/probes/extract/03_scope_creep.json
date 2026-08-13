@@ -1,0 +1,20 @@
+{
+  "name": "scope_creep",
+  "invariant": "Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.",
+  "cites": "app/prompts.py EXTRACT_SYSTEM; migrations/002_connections.sql, the (connection_id, name) unique index",
+  "why": "Named entries upsert. Reusing `revenue` for a region-scoped definition replaces the general recipe, and store.write_entries reports success — so the damage is silent, durable, and compounds across every later question that composes revenue. This is the invariant with the longest feedback loop in the system: the write looks fine, and the wrong answer arrives turns or sessions later. Reusing the name to genuinely refine the same concept is correct and is not what this checks; acquiring a scope it did not have is.",
+  "predicate": "no_scope_creep",
+  "args": {
+    "name": "revenue",
+    "must_not_mention": ["region", "west", "by region"]
+  },
+  "case": {
+    "question": "what was revenue in the west region last quarter?",
+    "sql": "SELECT sum(oi.qty * oi.price) AS revenue FROM order_item oi JOIN orders o ON o.id = oi.order_id JOIN customer c ON c.id = o.customer_id WHERE o.status <> 'cancelled' AND lower(c.region) = 'west' AND c.deleted_at IS NULL AND o.created >= date_trunc('quarter', now()) - interval '1 quarter' AND o.created < date_trunc('quarter', now())",
+    "findings": "`orders.customer_id` joins to `customer.id`. `customer.region` is free text whose casing varies — `west`, `West` and `WEST` all occur — so an equality filter under-counts and `lower(region)` is the convention. Soft-deleted customers still have orders attached, so a revenue question that is about customers has to decide whether to include them.",
+    "filed": {
+      "revenue": "revenue is quantity times price on order lines, counting only orders that were not cancelled",
+      "orders.created": "the creation timestamp on `orders` is called `created`, not `created_at`"
+    }
+  }
+}

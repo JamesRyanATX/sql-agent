@@ -1,0 +1,16 @@
+{
+  "name": "near_collision",
+  "invariant": "Every entry needs a short, stable `name` — it is the key this is filed under, and reusing a name overwrites what is already there.",
+  "cites": "app/prompts.py EXTRACT_SYSTEM; app/graph.py extract(), the 'Already filed' block",
+  "why": "The observed failure the filed block was added for: a live run produced 'active customer count' on one turn and 'active customers count' on the next. The upsert keys on (connection_id, name), so those are two entries saying one thing — the second does not refine the first, it sits beside it, and both are loaded into every prompt from then on. load_cache sends the whole cache every turn, so a paraphrase is not a tidiness problem, it is a bill that recurs forever.",
+  "predicate": "no_near_collision",
+  "case": {
+    "question": "how many active customers are in the west region?",
+    "sql": "SELECT count(*) AS n FROM customer WHERE deleted_at IS NULL AND lower(region) = 'west'",
+    "findings": "`customer.region` is free text whose casing varies — `west`, `West` and `WEST` all occur — so equality under-counts and `lower(region)` is the convention. `customer.deleted_at` is the soft-delete flag.",
+    "filed": {
+      "active customer": "an active customer is one whose `deleted_at` is null",
+      "region": "`customer.region` is free text with inconsistent casing; compare it with lower()"
+    }
+  }
+}

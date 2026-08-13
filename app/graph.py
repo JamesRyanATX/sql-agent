@@ -26,7 +26,7 @@ from sqlalchemy import inspect
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from app import db, llm, store, tools, tracing
+from app import db, llm, prompts, store, tools, tracing
 from app.events import to_events
 from app.settings import settings
 
@@ -114,112 +114,10 @@ def dialect_note(dialect: str) -> str:
     return f"\n\nTarget dialect: {label}." + (f" {note}" if note else "")
 
 
-EXPLORE_SYSTEM = """\
-You are answering a business question against a SQL database you have \
-never seen. Use the introspection tools to find out what you need.
-
-The schema is wide and mostly irrelevant — expect to discard most tables. \
-Column names are frequently not what you would guess, and a column existing \
-tells you less than how its values are actually distributed.
-
-Work until you could write correct SQL, then stop calling tools and reply with \
-a short plain-English summary of what you found: the tables that matter, the \
-join keys, and any convention the data follows that a newcomer would miss. \
-Write it for someone who has not seen the tool output.
-
-Deliver what was asked, at the scope intended. Do not explore tables that \
-cannot affect this question."""
-
-PLAN_SYSTEM = """\
-You know some things about this database already. Decide whether they are \
-enough to answer the question, and if they are, write the SQL now.
-
-Enough means you can name every table and column the query needs and every \
-convention that changes the result. A recipe whose SQL is marked unverified has \
-never been run as written — it is a lead, not a fact.
-
-If it is enough, set sufficient to true and return the SQL, listing the entries \
-you relied on by name. Otherwise set it to false and say what you still need to \
-find out — be specific, since that list is what the next step goes looking for. \
-Guessing a column name is not sufficiency.
-
-Answer exactly the question asked. Do not narrow it to something you have a \
-recipe for, and do not broaden it — a cached recipe for a related question is a \
-reason to say what is missing, not to answer a different question."""
-
-SQL_SYSTEM = """\
-Write one SELECT that answers the question, using the findings given.
-
-Return the SQL and the assumptions you made — an assumption is anything a \
-reader would need to know to agree the answer is correct, such as which rows \
-you excluded and why. Read-only: no DDL, no writes, no CTEs that modify."""
-
-FIX_SYSTEM = """\
-The SQL failed. Given the error and the schema findings, return corrected SQL.
-
-Fix the specific cause. Do not restructure the query beyond what the error \
-requires."""
-
-EXTRACT_SYSTEM = """\
-A query just ran successfully. Write down what a newcomer to this database \
-would need to know to get it right first time.
-
-You are given the SQL that actually executed. **Everything you record must be \
-supported by that SQL or by the schema findings — not by what you meant to do.** \
-If the SQL excludes two statuses, the recipe covers two statuses, whatever the \
-intent was.
-
-Record two kinds of thing:
-
-- **schema_fact** — something durably true about the shape of the data: a \
-table's purpose, a column that isn't named what you'd guess, a join key, an \
-enum's real values.
-- **recipe** — how to express a business concept in SQL. Give it the name a \
-person would use ("revenue", "active customer") and a `sql_fragment` copied \
-from the query that ran.
-
-Neither kind is a census. A row count, a percentage, or a parenthetical like \
-"(currently 1,840)" is this query's answer, not a fact about the schema — it \
-goes stale the instant a row changes, and nothing ever revisits it to check. \
-"deleted_at is a nullable soft-delete flag" is a schema_fact; "160 of 2,000 \
-rows are soft-deleted" is not — write the rule, not the count it produced today.
-
-Every entry needs a short, stable `name` — it is the key this is filed under, \
-and reusing a name **overwrites** what is already there.
-
-Reuse a name only when this query taught you more about *that same concept*, so \
-the note is refined rather than duplicated. If what you learned is narrower, \
-broader, or merely related — "revenue" against "revenue by region", "active \
-customer" against "active customer in a region" — give it its own name. \
-Overwriting a general rule with a special case destroys the general rule, and \
-every later question that relied on it inherits the narrower one.
-
-Write claims as plain English a colleague could read aloud. State the \
-convention, not the query you happened to write: "an active customer is one \
-whose deleted_at is null", not "I filtered on deleted_at".
-
-Record only what this query actually establishes. Nothing speculative, nothing \
-you did not verify, and nothing that merely restates the question."""
-
-# This used to say "for someone who did not see the query", and that reader
-# existed: the whole result was `=> [(1840)]` and the answer text was not printed
-# at all. Now the rows are a table directly above this, and a model told to "lead
-# with the number" reads a nine-row result as nine numbers and types the table
-# out again underneath itself.
-#
-# Measured on the quarters question: 353 output tokens before, 278 after, so the
-# saving is real but modest — most of that 353 was thinking, not the recitation.
-# The reason to change it is the duplication, not the tokens. What a table cannot
-# say is what was counted and what the shape means, and that is the whole job
-# left for prose.
-ANSWER_SYSTEM = """\
-State the answer in one or two sentences. The reader is looking at the result \
-rows already, so do not list them back.
-
-Say what the numbers mean and what was counted: the load-bearing assumptions \
-inline in the prose, and anything about the shape of the result a reader would \
-otherwise misread. Where the result is a single value, lead with that value. \
-Do not restate the SQL, and do not add caveats that change nothing."""
+# The six instruction blocks moved to app/prompts.py, which is a seam an
+# optimiser can write a candidate through without editing source. The schemas
+# stay: they are the node's wire contract, not prose, and nothing rewrites them.
+# `dialect_note` and `render_cache` stay too — they compose per turn.
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -401,7 +299,7 @@ async def plan(state: TurnState) -> TurnState:
         # text is; the dialect is; the question is not, which is why the
         # question stays in the user message.
         system=(
-            f"{PLAN_SYSTEM}{dialect_note(state['dialect'])}\n\n"
+            f"{prompts.get('plan')}{dialect_note(state['dialect'])}\n\n"
             f"{render_cache(cache)}"
         ),
         messages=[{"role": "user", "content": f"Question: {state['question']}"}],
@@ -452,7 +350,7 @@ async def explore(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     known = render_cache(state.get("cache", []))
     system = (
-        EXPLORE_SYSTEM
+        prompts.get("explore")
         + dialect_note(state["dialect"])
         + (f"\n\n{known}" if known else "")
     )
@@ -550,7 +448,7 @@ async def explore(state: TurnState) -> TurnState:
 async def generate_sql(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     result = await llm.complete(
-        system=SQL_SYSTEM + dialect_note(state["dialect"]),
+        system=prompts.get("generate_sql") + dialect_note(state["dialect"]),
         messages=[
             {
                 "role": "user",
@@ -651,7 +549,7 @@ async def fix(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     attempt = state.get("fix_attempts", 0) + 1
     result = await llm.complete(
-        system=FIX_SYSTEM,
+        system=prompts.get("fix"),
         messages=[
             {
                 "role": "user",
@@ -766,6 +664,65 @@ async def infer_tables(sql: str, connection_id: str) -> list[str]:
     return sorted(by_fold[k] for k in by_fold.keys() & seen)
 
 
+# The two anchors `extract_message` writes and `optim/` splits back out. Named
+# rather than left inline because a harvested case is replayed *verbatim* — only
+# the SQL is parsed back out of it, for the verification gate — and a literal
+# duplicated across two packages is a literal that drifts. The drift would be
+# silent in the worst way: the metric would score a candidate's recipes against
+# the wrong query and report the grounding rate with a straight face.
+EXTRACT_SQL_ANCHOR = "SQL that ran:\n"
+EXTRACT_FILED_ANCHOR = "\n\nAlready filed."
+
+
+def extract_message(
+    *, question: str, sql: str, findings: str, cache: list[dict[str, Any]]
+) -> str:
+    """The user turn `extract` sends. Pure, so a probe case can build a real one.
+
+    Showing the model what is already filed is what stops it paraphrasing its
+    own keys — a live run produced "active customer count" on one turn and
+    "active customers count" on the next, which the upsert cannot merge.
+    """
+    known = "\n".join(
+        f"- {e['name']}: {e['claim']}" for e in cache if e.get("name")
+    )
+    filed = (
+        f"{EXTRACT_FILED_ANCHOR} Reuse a name only to refine that same concept — "
+        f"reusing it replaces what is shown here:\n{known}"
+        if known
+        else ""
+    )
+    return (
+        f"Question: {question}\n\n"
+        f"{EXTRACT_SQL_ANCHOR}{sql}\n\n"
+        f"Schema findings:\n{findings}"
+        f"{filed}"
+    )
+
+
+def entries_from(
+    parsed: list[dict[str, Any]], sql: str, fallback_tables: list[str]
+) -> list[store.CacheEntry]:
+    """Model output → cache entries, with the verification gate applied.
+
+    Lifted out of `extract` and kept pure so the optimiser scores what
+    production would actually write. A harness that re-implements this agrees
+    with it right up until someone edits one of the two, and then measures a
+    prompt against a rule the product does not apply.
+    """
+    return [
+        store.CacheEntry(
+            kind=e["kind"],
+            name=(e.get("name") or None),
+            claim=e["claim"],
+            sql_fragment=e.get("sql_fragment") or None,
+            tables=e.get("tables") or fallback_tables,
+            verified=grounded_in(e.get("sql_fragment"), sql),
+        )
+        for e in parsed
+    ]
+
+
 async def extract(state: TurnState) -> TurnState:
     """Write down what this turn learned, so the next one doesn't re-learn it."""
     emit = get_stream_writer()
@@ -781,37 +738,21 @@ async def extract(state: TurnState) -> TurnState:
         emit({"type": "learned", "count": 0, "skipped": 0, "entries": [], "cached": True})
         return {}
 
-    # Show it what is already filed, so a refinement updates the existing entry
-    # instead of landing beside it. Without this the model paraphrases its own
-    # names — a live run produced "active customer count" on one turn and
-    # "active customers count" on the next, which the upsert cannot merge.
-    known = "\n".join(
-        f"- {e['name']}: {e['claim']}"
-        for e in state.get("cache", [])
-        if e.get("name")
-    )
-    filed = (
-        f"\n\nAlready filed. Reuse a name only to refine that same concept — "
-        f"reusing it replaces what is shown here:\n{known}"
-        if known
-        else ""
-    )
-
     # Extraction is a bonus, not the deliverable. The question is already
     # answered by the time we get here, and throwing that away because the
     # model failed to *learn* from it would be a bad trade — the turn would
     # report failure to a user who has a correct answer sitting right there.
     try:
         result = await llm.complete(
-            system=EXTRACT_SYSTEM,
+            system=prompts.get("extract"),
             messages=[
                 {
                     "role": "user",
-                    "content": (
-                        f"Question: {state['question']}\n\n"
-                        f"SQL that ran:\n{state['sql']}\n\n"
-                        f"Schema findings:\n{state.get('findings', '(none)')}"
-                        f"{filed}"
+                    "content": extract_message(
+                        question=state["question"],
+                        sql=state["sql"],
+                        findings=state.get("findings", "(none)"),
+                        cache=state.get("cache", []),
                     ),
                 }
             ],
@@ -834,17 +775,7 @@ async def extract(state: TurnState) -> TurnState:
 
     sql = state["sql"]
     fallback_tables = await infer_tables(sql, state["connection_id"])
-    entries = [
-        store.CacheEntry(
-            kind=e["kind"],
-            name=(e.get("name") or None),
-            claim=e["claim"],
-            sql_fragment=e.get("sql_fragment") or None,
-            tables=e.get("tables") or fallback_tables,
-            verified=grounded_in(e.get("sql_fragment"), sql),
-        )
-        for e in parsed
-    ]
+    entries = entries_from(parsed, sql, fallback_tables)
 
     # The one operation that spans both databases, and the order is forced: the
     # fingerprint is a fact about the business schema, the entry it lands on is
@@ -890,7 +821,7 @@ async def answer(state: TurnState) -> TurnState:
         )
     else:
         result = await llm.complete(
-            system=ANSWER_SYSTEM,
+            system=prompts.get("answer"),
             messages=[
                 {
                     "role": "user",

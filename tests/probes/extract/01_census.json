@@ -1,0 +1,13 @@
+{
+  "name": "census",
+  "invariant": "Neither kind is a census.",
+  "cites": "app/prompts.py EXTRACT_SYSTEM; CLAUDE.md, the five traps",
+  "why": "A row count is this query's answer, not a fact about the schema. It goes stale the instant a row changes and nothing ever revisits it to check, so a cached '1,840 active customers' is wrong forever and silently. The findings here hand the model the numbers on a plate — copying them across is the failure, and the paragraph forbidding it costs tokens on every turn while paying off only in a failure that surfaces turns later, which is exactly the shape a cost objective deletes.",
+  "predicate": "no_census",
+  "case": {
+    "question": "how many customers do we have?",
+    "sql": "SELECT count(*) AS active_customers FROM customer WHERE deleted_at IS NULL",
+    "findings": "The `customer` table holds 2,000 rows and is the only table describing people who buy things; `app_user` is a login table and unrelated. Soft deletes are the convention here: `customer.deleted_at` is a nullable timestamp, and a row with a value in it has been removed. 160 of the 2,000 rows are soft-deleted, leaving 1,840 active. There is no `is_active` or `status` column on `customer`. `customer.region` holds free text whose casing varies.",
+    "filed": {}
+  }
+}

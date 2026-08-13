@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     effort_sql: str = "high"
     effort_extract: str = "low"
 
+    # A directory of `<node>.txt` files overriding the instruction blocks in
+    # app/prompts.py — the seam the prompt optimiser writes a candidate through,
+    # and the only way to run one without editing source. Empty is the deployed
+    # state: the prose in git is what ships, and promoting a candidate is a
+    # human editing that file and writing the comment saying why.
+    #
+    # Read once per process, never per turn. See app/prompts.py for why that is
+    # an invariant rather than an optimisation.
+    prompt_dir: str = ""
+
     # --- observability -----------------------------------------------------
     # Tracing is on when both keys are set and off otherwise. There is
     # deliberately no third `enabled` flag: a flag is a state that can disagree
