@@ -2,9 +2,16 @@
 
 Same rule [app/dialects.py](app/dialects.py) has for dialect names and
 [app/secrets.py](app/secrets.py) has for encryption: `import langfuse` appears
-here and nowhere else, so the rest of `app/` sees four context managers and a
-boolean. That is what makes "tracing off" cost nothing to prove — there is one
-`enabled()` to read rather than a scattering of `if` at every call site.
+here and nowhere else, so the rest of `app/` sees three context managers, a
+reader and a boolean. That is what makes "tracing off" cost nothing to prove —
+there is one `enabled()` to read rather than a scattering of `if` at every call
+site. (`turn`, `generation` and `span`; a tool observation is `span` with
+`as_type="tool"`, which is why the trace diagram in CLAUDE.md shows four kinds.)
+
+The reader is newer than the rest and inverts the module's old one-way
+character: `generations()` pulls recorded model calls back out, which is what
+lets `optim/` build a prompt corpus from what the agent has already done. It
+lives here rather than where it is wanted for exactly the reason above.
 
 **Off is the default, and off must be free.** With no keys set no client is ever
 constructed, `langfuse` is never even imported, and every helper yields the same
@@ -154,6 +161,11 @@ def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]
         # having: a harvest that cannot tell a run under the seed from a run
         # under a candidate will train round two on round one's output. Read
         # after the `lf is None` return, so off still costs nothing.
+        #
+        # Eight hex characters per node, which is 124 for the whole dict —
+        # under the 200 a metadata value is truncated at, so reading it back
+        # needs no `expand_metadata`. A longer hash would silently lose its tail
+        # and every fingerprint would start comparing equal.
         metadata=_serialisable({"prompts": prompts.fingerprint()}),
     ) as span:
         # The connection as a tag, not just metadata: "everything this warehouse
@@ -195,6 +207,80 @@ def generation(
             # control flow elsewhere; on the trace they have to read as failures.
             gen.update(level="ERROR", status_message=f"{type(e).__name__}: {e}")
             raise
+
+
+# --------------------------------------------------------------- the read half
+#
+# Everything above writes. This reads, and it lives here for the same reason the
+# writes do: `import langfuse` appears in this module and nowhere else, so a
+# second module wanting its own client is the failure the rule exists to
+# prevent. It is one function returning plain dicts — if it grows past that,
+# the signal is to split this file into write and read halves, not to relax the
+# rule. tests/test_cli_isolation.py now enforces it.
+
+
+def generations(
+    *,
+    node: str,
+    since: Any = None,
+    until: Any = None,
+    page: int = 100,
+) -> Iterator[dict[str, Any]]:
+    """Every model call recorded under one node label, oldest page first.
+
+    This is what makes an offline prompt corpus possible at all. Because
+    `llm.complete()` is the only place a generation is opened, and it records
+    `input={"system", "messages"}` under a `name=` that is the graph node,
+    Langfuse already holds a per-node dataset of exact inputs and outputs. The
+    architecture built the harvester by accident; this reads it back.
+
+    Yields `{}` nothing at all when tracing is off, which is the common case.
+    """
+    lf = client()
+    if lf is None:
+        return
+
+    cursor = None
+    while True:
+        # `fields` defaults to core,basic — input and output are *absent*
+        # without `io`, and the call succeeds, so the symptom is a corpus of
+        # empty prompts rather than an error. `parse_io_as_json` is deprecated
+        # and returns 400 if set at all: input arrives as a raw string, which
+        # is why `_as_json` below is required rather than defensive.
+        response = lf.api.observations.get_many(
+            name=node,
+            type="GENERATION",
+            from_start_time=since,
+            to_start_time=until,
+            fields="core,basic,io,metadata,usage",
+            limit=page,
+            cursor=cursor,
+        )
+        for observation in response.data:
+            yield {
+                "id": observation.id,
+                "trace_id": observation.trace_id,
+                "name": observation.name,
+                "start_time": observation.start_time,
+                "level": observation.level,
+                "input": _as_json(observation.input),
+                "output": _as_json(observation.output),
+                "metadata": _as_json(observation.metadata),
+                "usage": observation.usage_details or {},
+            }
+        cursor = response.meta.cursor
+        if not cursor:
+            return
+
+
+def _as_json(value: Any) -> Any:
+    """Input and output come back as raw strings. Decode, or hand back as-is."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
 
 
 @contextmanager

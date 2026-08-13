@@ -121,6 +121,29 @@ test:
 test-live:  ## includes tests that call the Anthropic API and cost tokens
 	uv run pytest -q -m live
 
+# --- prompts: evaluation and search -----------------------------------------
+#
+# `optim/` is a development tool, so `gepa` is a dependency group rather than a
+# dependency — `uv sync --no-dev` already excludes groups, which is the same
+# mechanism that keeps pytest out of the image. Nothing here runs in the
+# container and nothing here applies a prompt: promotion is a human editing
+# app/prompts.py and writing the comment that says why.
+
+NODE ?= extract
+OPTIM = uv run --group optim python -m optim.run
+
+optim-probe:  ## do the current prompts still honour their invariants? (costs tokens)
+	$(OPTIM) probe --node $(NODE)
+
+optim-harvest:  ## pull recorded extract calls out of Langfuse into optim/out/
+	$(OPTIM) harvest --conn $(CONN)
+
+optim-run:  ## GEPA over one node's prompt, gated on the probes (costs tokens)
+	$(OPTIM) optimize --node $(NODE)
+
+optim-diff:  ## what the winner changed, beside the invariant checklist
+	$(OPTIM) diff --node $(NODE)
+
 # --- demo: presentation & recording -----------------------------------------
 
 customer-count:  ## ask the cold-path question and print the token cost

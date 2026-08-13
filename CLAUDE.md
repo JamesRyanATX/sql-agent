@@ -26,6 +26,7 @@ make test                              # pytest, excludes live model calls
 make test-live                         # includes tests that spend real tokens
 docker compose --profile mysql up -d   # opt-in; the dialect tests skip without it
 make langfuse-up                       # opt-in; the trace stack, UI on :3000
+make optim-probe                       # do the prompts still honour their invariants?
 make customer-count                    # ask the cold-path question
 make connections                       # every database the agent can be pointed at
 make cache                             # print the cache as the model sees it
@@ -175,8 +176,20 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
                                              execute ⇄ fix (≤3 attempts)
 ```
 
-- **[app/graph.py](app/graph.py)** — nodes, prompts, JSON schemas, edges. All
-  system prompts and structured-output schemas live here as module constants.
+- **[app/graph.py](app/graph.py)** — nodes, JSON schemas, edges. The
+  structured-output schemas live here as module constants; the *prose* moved to
+  `app/prompts.py`, because a schema is the node's wire contract and a prompt is
+  the thing an optimiser rewrites.
+- **[app/prompts.py](app/prompts.py)** — the six durable instruction blocks, and
+  the seam. `get(name)` returns the constant or a `<node>.txt` override from
+  `PROMPT_DIR`, resolved **once per process** — memoised because `plan`'s system
+  block sits behind an Anthropic cache breakpoint on the promise it varies with
+  `connection_id` alone, and a prompt re-read per turn could change between two
+  turns of one server's life with no symptom but T2 quietly costing more. Keys
+  are the `node=` labels `llm.complete` uses as Langfuse generation names, so a
+  harvested trace and an override file name the same thing. Empty `PROMPT_DIR`
+  is the deployed state: the prose in git is what ships. `fingerprint()` goes on
+  the turn span so a harvest can tell which prose produced which trace.
 - **[app/llm.py](app/llm.py)** — the *only* module that talks to a model. Two
   backends behind one `complete()`: `anthropic` (demo) and `openai_compat`
   (Ollama/vLLM/LM Studio for local dev). Nodes never see the difference; build
@@ -450,14 +463,89 @@ API of §6.2, and the browser UI of Phase 8.
 Tracing (Observability above) is built and off by default. Not wired up: cost in
 currency — Langfuse prices a generation from its model name, and `claude-opus-5`
 is not in its table, so a custom model definition is what would turn the token
-counts into money. Nothing reads a trace back: scores, evals and datasets are all
-available and all unused.
+counts into money. Langfuse's own scores, evals and datasets are all still
+unused; the one thing that reads a trace back is `tracing.generations()`, below.
+
+### Prompt evaluation and search (`optim/`)
+
+The second flywheel, and the one PLAN.md §10 named as the road not taken: *"the
+prompt template never changes — only what's in it. DSPy optimizers like GEPA are
+the industrial version."* Built for `extract` only, manual, human-merged.
+
+The idea it is **not** built on is optimising in realtime from telemetry. GEPA
+scores by *running* candidates; a trace records what happened under prompt P and
+carries no information about P′. Traces feed the mutation step, never the
+scoring step. So: telemetry supplies the corpus, scoring is offline single-node
+replay, and an authored probe suite is a hard gate outside the objective.
+
+What makes it cheap is an accident of the architecture. Because `llm.complete()`
+is the only place a generation is opened, and it records
+`input={"system","messages"}` under a `name=` that is the graph node, Langfuse
+already holds a per-node dataset of exact inputs and outputs — `extract` is a
+function of three recorded strings, so one metric call is one `low`-effort model
+call and needs no database at all. The join back is `turn.trace_id`, a column
+`migrations/004_tracing.sql` added and nothing had ever read.
+
+```
+make optim-probe     do the current prompts still honour their invariants?
+make optim-harvest   recorded extract calls -> optim/out/extract.jsonl
+make optim-run       GEPA over one node's prompt, gated on the probes
+make optim-diff      what the winner changed, beside the invariant checklist
+```
+
+- **`optim/` reads the app; the app never reads `optim/`.** It is a development
+  tool in the category of pytest, so it imports `app` directly rather than going
+  through the API. The boundary that does hold: **node replay is in-process,
+  turn replay is HTTP** — re-driving `stream_turn` by hand is how a harness and
+  a product drift. `gepa` is a dependency group, so `uv sync --no-dev` excludes
+  it by the same mechanism that excludes pytest, and the two test modules that
+  import it `importorskip`.
+- **No DSPy**, and not on weight grounds. `app/llm.py` carries Anthropic's
+  `output_config` with effort and a JSON-schema format, adaptive thinking, the
+  server-side-fallback beta, `cache_control: ephemeral`. Optimising a prompt
+  under a different request shape than production uses tunes it for a
+  configuration you do not run — and DSPy's own field markers would make harness
+  tokens stop being production tokens, in a repo whose claim is a token count.
+  GEPA's `reflection_lm` is `llm.complete` at max effort, so there is still
+  exactly one module that talks to a model.
+- **The probes are the valset and they are not GEPA's valset.** GEPA sees a
+  train/val split of harvested cases; the probes run *after* it returns, against
+  every candidate in the pool, and any that regresses one the seed passed is
+  discarded whatever it scored. Weights cannot express "never" — a
+  mean-maximising search trades a rare catastrophic failure for a broad small
+  gain whenever the arithmetic allows. Feeding probes in as a valset would also
+  score them 0..1 with the metric, and a probe is a predicate.
+- **Every cheap metric here is self-defeating if taken alone**, which is why
+  `optim/metric_extract.py` has five weighted terms and two gates rather than
+  one number. `grounded_in` accepts a token subsequence, so `count(*)` verifies
+  against any query that counts — optimising the verified rate destroys the gate
+  it is derived from. `tests/test_optim_metric.py` is a list of the degenerate
+  prompts someone reasoned their way to; if one starts passing, the metric has a
+  hole. An empty extraction scored 0.6 before that file existed, because census,
+  names and cost are all vacuously perfect when nothing was recorded.
+- **There is deliberately no `optim-apply`.** Promotion is a human editing
+  `app/prompts.py` and writing the comment that says which failure the new
+  wording addresses. A machine-applied prompt arrives without one.
+- **`tokens_in` is not comparable during a run** — every candidate is a distinct
+  cache prefix, so `cache_system=True` never hits in the harness. The cost term
+  scores `tokens_out` only; "extract got cheaper" measured here would be a lie
+  about the number the demo sells.
+- Not built: `plan` (needs outcome labelling and SQL execution against a
+  deterministic warehouse, and has the most destructive degenerate optimum —
+  always say sufficient), and whole-turn A/B over HTTP as a final gate. Never
+  worth building for `explore` (a metric call is a whole turn) or `answer` (its
+  only cheap proxy is length, and the comment above `ANSWER_SYSTEM` records that
+  trade already being measured and decided the other way).
 
 ## Conventions
 
 - `uv` for everything (`uv run …`); dependencies in [pyproject.toml](pyproject.toml).
 - `langfuse` is import-legal in [app/tracing.py](app/tracing.py) and nowhere
-  else, `sqlalchemy`-style. Everything else takes a context manager from there.
+  else, `sqlalchemy`-style. Everything else takes a context manager from there —
+  or, now that traces are read back as well as written, `generations()`. That
+  rule was documentation until the optimiser gave a second module a reason to
+  want its own client; [tests/test_cli_isolation.py](tests/test_cli_isolation.py)
+  asserts it, along with "nothing that ships imports `optim`".
 - `sqlalchemy` is import-legal in `app/db.py`, `app/tools.py`, `app/dialects.py`,
   `app/api.py` and `app/store.py`'s four target functions, and nowhere else — in
   particular not in `app/graph.py` beyond what `db.` hands back, and never in

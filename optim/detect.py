@@ -127,6 +127,16 @@ def informative(fragment: str | None, tokens: list[str]) -> bool:
     """Does this fragment say enough to be worth verifying?
 
     `tokens` comes from `graph._tokens`, so the tokenisation is the gate's own.
+
+    What this catches: `customer`, `count(*)`, `SELECT count(*) FROM` — spans
+    made only of structure, which verify against anything of their shape.
+
+    What it does not, and cannot: a fragment that names real columns but drops
+    the predicate that makes the concept what it is. `sum(oi.qty * oi.price)`
+    clears this bar while omitting `WHERE status <> 'cancelled'`, which is the
+    entire trap. No token count separates those two, so the honest boundary is
+    here rather than in a cleverer threshold — the grounding probe and a human
+    reading the winning prompt are what cover the rest.
     """
     if not fragment:
         return False
