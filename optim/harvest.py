@@ -29,7 +29,7 @@ class Harvest:
     seen: int = 0
     no_sql: int = 0
     no_message: int = 0
-    wrong_connection: int = 0
+    unmatched: int = 0
     contaminated: int = 0
 
     def report(self) -> str:
@@ -40,11 +40,24 @@ class Harvest:
             for label, n in (
                 ("no user message", self.no_message),
                 ("SQL would not parse", self.no_sql),
-                ("another connection", self.wrong_connection),
+                ("no matching turn row", self.unmatched),
                 ("written by the harness itself", self.contaminated),
             ):
                 if n:
                     lines.append(f"    {n} {label}")
+        # The unmatched count is the one that surprises people, and the cause is
+        # almost never the connection filter. A trace outlives the turn row that
+        # points at it: `make reset` and `DELETE /cache` drop turns while
+        # Langfuse keeps everything, and the suite's own runs write traces whose
+        # turn rows live in `agent_test`. Say so rather than letting "dropped 10"
+        # read as a bug in the join.
+        if self.unmatched and self.unmatched > len(self.cases):
+            lines.append(
+                "  most generations have no turn row here. A trace outlives the "
+                "row that points at it — `make reset` drops turns, the test "
+                "suite writes its own to agent_test, and tracing may have been "
+                "off when these ran."
+            )
         return "\n".join(lines)
 
 
@@ -77,7 +90,7 @@ async def extract_cases(
 
         trace_id = observation.get("trace_id")
         if trace_id not in traces:
-            harvest.wrong_connection += 1
+            harvest.unmatched += 1
             continue
 
         message = _user_message(observation.get("input"))

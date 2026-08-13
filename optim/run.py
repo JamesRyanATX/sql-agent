@@ -51,7 +51,7 @@ def cli() -> None:
 @click.option("--days", default=30, show_default=True, help="how far back to look")
 def harvest(conn: str, days: int) -> None:
     """Pull recorded `extract` calls out of Langfuse into a corpus."""
-    from app import tracing
+    from app import db, tracing
     from optim.harvest import extract_cases
 
     if not tracing.enabled():
@@ -60,7 +60,16 @@ def harvest(conn: str, days: int) -> None:
             "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY, then run some turns"
         )
 
-    result = asyncio.run(extract_cases(connection_id=conn, days=days))
+    async def go():
+        # The API opens these in its lifespan and the tests in a fixture; a
+        # command-line tool is the third caller and has to do it itself.
+        await db.open_pools()
+        try:
+            return await extract_cases(connection_id=conn, days=days)
+        finally:
+            await db.close_pools()
+
+    result = asyncio.run(go())
     click.echo(result.report())
     if not result.cases:
         raise click.ClickException("no cases — has this connection run any turns?")
