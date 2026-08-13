@@ -135,8 +135,8 @@ You know some things about this database already. Decide whether they are \
 enough to answer the question, and if they are, write the SQL now.
 
 Enough means you can name every table and column the query needs and every \
-convention that changes the result. A recipe marked as verified has been run \
-successfully before; an unverified note is a lead, not a fact.
+convention that changes the result. A recipe whose SQL is marked unverified has \
+never been run as written — it is a lead, not a fact.
 
 If it is enough, set sufficient to true and return the SQL, listing the entries \
 you relied on by name. Otherwise set it to false and say what you still need to \
@@ -300,7 +300,26 @@ FIX_SCHEMA = {
 
 
 def render_cache(entries: list[dict[str, Any]]) -> str:
-    """The prose the model reads. Empty until phase 4 starts writing entries."""
+    """The prose the model reads. Empty until phase 4 starts writing entries.
+
+    `verified` is rendered on the SQL line, and only when it is *false*. Three
+    decisions in that sentence, each with a reason:
+
+    It is rendered at all because it used to not be, and PLAN_SYSTEM told the
+    model to weigh a marking that never reached it — `store.load_cache` selects
+    the column, `load_cache` dropped it building these dicts, and nothing
+    downstream could tell a run-successfully recipe from a guess.
+
+    On the SQL line, because the fragment is the thing `grounded_in` gates: a
+    schema_fact has no fragment and no verification concept, so marking one
+    would be noise on every entry that can never be anything else.
+
+    Only when false, because the extract prompt asks for a fragment copied from
+    the query that ran, so verified is the common case and the exception is what
+    carries information — the same bargain as the `NOT TRUE:` tombstone prefix.
+    A missing key reads as unverified: understating authority is the safe
+    direction for a gate whose whole job is to stop a guess being believed.
+    """
     if not entries:
         return ""
     lines = ["What you already know about this database:"]
@@ -309,7 +328,8 @@ def render_cache(entries: list[dict[str, Any]]) -> str:
         label = f"{e['name']}: " if e.get("name") else ""
         lines.append(f"- {prefix}{label}{e['claim']}")
         if e.get("sql_fragment"):
-            lines.append(f"  SQL: {e['sql_fragment']}")
+            mark = "" if e.get("verified") else " (unverified)"
+            lines.append(f"  SQL{mark}: {e['sql_fragment']}")
     return "\n".join(lines)
 
 
@@ -337,6 +357,10 @@ async def load_cache(state: TurnState) -> TurnState:
             "claim": e.claim,
             "sql_fragment": e.sql_fragment,
             "tombstone": e.tombstone,
+            # Carried because `render_cache` marks the unverified ones and
+            # PLAN_SYSTEM tells the model what that marking means. Dropping it
+            # here was a quiet bug for as long as the sentence existed.
+            "verified": e.verified,
         }
         for e in entries
     ]

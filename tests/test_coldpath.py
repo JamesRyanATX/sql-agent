@@ -847,7 +847,8 @@ def test_a_populated_cache_renders_as_prose():
     rendered = graph.render_cache(
         [
             {"name": "spec:active customer", "claim": "deleted_at is null",
-             "sql_fragment": "customer WHERE deleted_at IS NULL", "tombstone": False},
+             "sql_fragment": "customer WHERE deleted_at IS NULL",
+             "tombstone": False, "verified": True},
             {"name": None, "claim": "revenue excludes cancelled orders",
              "sql_fragment": None, "tombstone": True},
         ]
@@ -856,6 +857,39 @@ def test_a_populated_cache_renders_as_prose():
     assert "customer WHERE deleted_at IS NULL" in rendered
     # A tombstone is a negative constraint and has to read as one.
     assert "NOT TRUE: revenue excludes cancelled orders" in rendered
+
+
+def test_an_unverified_recipe_says_so_and_a_verified_one_is_unmarked():
+    """PLAN_SYSTEM tells the model an unverified recipe is a lead, not a fact.
+
+    It said that for a while against a marking that never reached it:
+    `store.load_cache` selects `verified`, and `load_cache` dropped it building
+    the dicts this function renders. The regression is silent — the model reads
+    a plausible sentence about a distinction it cannot make — so it is asserted
+    in both directions.
+    """
+    entries = [
+        {"name": "revenue", "claim": "qty x price on non-cancelled orders",
+         "sql_fragment": "sum(qty * price)", "verified": True},
+        {"name": "churn", "claim": "a guess at how churn is defined",
+         "sql_fragment": "count(*) FROM subscription", "verified": False},
+        # A schema_fact has no fragment, so there is nothing to verify and
+        # nothing to mark — it must not pick up the warning by omission.
+        {"name": "orders.created", "claim": "the timestamp is `created`",
+         "sql_fragment": None, "verified": False},
+    ]
+    rendered = graph.render_cache(entries)
+
+    assert "  SQL: sum(qty * price)" in rendered
+    assert "  SQL (unverified): count(*) FROM subscription" in rendered
+    assert rendered.count("(unverified)") == 1
+    assert "the timestamp is `created`" in rendered
+
+    # A dict that never carried the key understates authority rather than
+    # granting it — the safe direction for a gate against believing a guess.
+    assert "(unverified)" in graph.render_cache(
+        [{"name": "x", "claim": "c", "sql_fragment": "count(*)"}]
+    )
 
 
 # ------------------------------------------------------- the verification gate
