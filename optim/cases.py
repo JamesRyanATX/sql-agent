@@ -23,12 +23,17 @@ from typing import Any, Iterator
 
 from app import graph
 
-# Bumped by hand when `graph.extract_message` changes shape, with a comment
-# saying what moved. A corpus recorded under an older assembly is not wrong so
-# much as answering a different question, and `optimize` refuses a stale one:
-# tuning a prompt against a message the product no longer sends is the kind of
-# result that reproduces perfectly and means nothing.
-FORMAT_VERSION = 1
+# Bumped by hand when `graph.extract_message` or this dataclass changes shape,
+# with a comment saying what moved. A corpus recorded under an older assembly is
+# not wrong so much as answering a different question, and `optimize` refuses a
+# stale one: tuning a prompt against a message the product no longer sends is
+# the kind of result that reproduces perfectly and means nothing.
+#
+# 2: dropped `turn_id`, added `prompt_fp`. The harvest stopped joining to the
+#    `turn` table — see optim/harvest.py for why — so provenance is the trace,
+#    not the row, and the fingerprint is what keeps round two of an
+#    optimisation off round one's output.
+FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,12 @@ class ExtractCase:
     # apart without a second type or a flag.
     obs_id: str | None = None
     trace_id: str | None = None
-    turn_id: int | None = None
     connection_id: str | None = None
+    # The 8-char fingerprint of the `extract` prompt that produced this case,
+    # off the turn span's metadata. Once a candidate ships, new traces come from
+    # the thing being optimised — without this a second round trains on the
+    # first round's output and the improvement it measures is its own echo.
+    prompt_fp: str | None = None
     # The recorded run's output tokens. The cost term is a one-sided penalty
     # against this, so a candidate is measured against what production paid
     # rather than against an absolute nobody chose.
@@ -118,16 +127,22 @@ def write_jsonl(path: Path, cases: list[ExtractCase]) -> None:
 
 
 def read_jsonl(path: Path) -> list[ExtractCase]:
-    """Load a corpus, refusing one recorded under a different assembly."""
-    cases = [ExtractCase(**row) for row in _rows(path)]
-    stale = {c.format_version for c in cases} - {FORMAT_VERSION}
+    """Load a corpus, refusing one recorded under a different assembly.
+
+    The version is checked on the raw row, before the dataclass is built. A
+    stale corpus usually differs by a *field*, so constructing first turns a
+    legible "re-harvest" into an unexpected-keyword TypeError.
+    """
+    rows = list(_rows(path))
+    stale = {r.get("format_version") for r in rows} - {FORMAT_VERSION}
     if stale:
         raise ValueError(
-            f"{path} holds cases at format_version {sorted(stale)}, but "
-            f"graph.extract_message is at {FORMAT_VERSION}. Re-harvest — these "
-            "cases replay a message the product no longer sends."
+            f"{path} holds cases at format_version {sorted(stale, key=str)}, but "
+            f"the harvest is at {FORMAT_VERSION}. Re-harvest — these cases "
+            "either replay a message the product no longer sends or are missing "
+            "provenance a later stage needs."
         )
-    return cases
+    return [ExtractCase(**row) for row in rows]
 
 
 def _rows(path: Path) -> Iterator[dict[str, Any]]:

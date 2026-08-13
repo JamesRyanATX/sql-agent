@@ -24,7 +24,7 @@ from optim.cases import ExtractCase
 
 # Not "extract". The harness must not write its own calls into the corpus it
 # harvests from, or round two trains on round one's output — and the generation
-# name is exactly what `tracing.generations()` filters on.
+# name is exactly what `tracing.observations()` filters on.
 NODE = "extract.replay"
 
 

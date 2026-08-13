@@ -464,7 +464,7 @@ Tracing (Observability above) is built and off by default. Not wired up: cost in
 currency — Langfuse prices a generation from its model name, and `claude-opus-5`
 is not in its table, so a custom model definition is what would turn the token
 counts into money. Langfuse's own scores, evals and datasets are all still
-unused; the one thing that reads a trace back is `tracing.generations()`, below.
+unused; the one thing that reads a trace back is `tracing.observations()`, below.
 
 ### Prompt evaluation and search (`optim/`)
 
@@ -483,8 +483,19 @@ is the only place a generation is opened, and it records
 `input={"system","messages"}` under a `name=` that is the graph node, Langfuse
 already holds a per-node dataset of exact inputs and outputs — `extract` is a
 function of three recorded strings, so one metric call is one `low`-effort model
-call and needs no database at all. The join back is `turn.trace_id`, a column
-`migrations/004_tracing.sql` added and nothing had ever read.
+call and needs no database at all.
+
+**The harvest reads Langfuse and nothing else**, and that is a correction. It
+first asked Postgres which warehouse each recorded call was about, by joining
+`turn.trace_id` — and `make reset` empties the `turn` table by design, while the
+trace store keeps everything. So a reset turned every earlier recording into
+debris: intact, and unattributable. Thirteen of fifteen, the first time. A reset
+should reset; what was wrong was depending on a table whose job is to be
+emptied. Scope now comes from the turn span's own `input.connection_id`, and
+`prompts.fingerprint()` on the same span says which prose produced it. Note the
+asymmetry for later: **Langfuse has the inputs, Postgres has the outcomes, and
+only Postgres gets reset** — `extract` scores entirely off the recorded call, but
+a `plan` metric would need outcomes and would meet this again.
 
 ```
 make optim-probe     do the current prompts still honour their invariants?
@@ -542,7 +553,7 @@ make optim-diff      what the winner changed, beside the invariant checklist
 - `uv` for everything (`uv run …`); dependencies in [pyproject.toml](pyproject.toml).
 - `langfuse` is import-legal in [app/tracing.py](app/tracing.py) and nowhere
   else, `sqlalchemy`-style. Everything else takes a context manager from there —
-  or, now that traces are read back as well as written, `generations()`. That
+  or, now that traces are read back as well as written, `observations()`. That
   rule was documentation until the optimiser gave a second module a reason to
   want its own client; [tests/test_cli_isolation.py](tests/test_cli_isolation.py)
   asserts it, along with "nothing that ships imports `optim`".

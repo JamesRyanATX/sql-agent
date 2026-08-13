@@ -1,22 +1,32 @@
 """Turn recorded `extract` calls into a replayable corpus.
 
-Langfuse holds the inputs and outputs; Postgres holds the outcome and the
-connection scope. The bridge between them is `turn.trace_id` — a column added by
-`migrations/004_tracing.sql`, whose own header says the trace "lives in another
-system entirely, on the other side of an HTTP exporter, and there is nothing
-here to join it to". This is the join it did not have.
+**Langfuse is the record, and this reads only Langfuse.** That is a correction
+rather than a convenience. The first version asked Postgres which warehouse each
+recorded call was about, by joining `turn.trace_id` — and `make reset` empties
+the `turn` table by design, while the trace store keeps everything forever. So a
+reset silently turned every recorded call into debris: the data was intact, and
+nothing could prove whose it was. Thirteen of fifteen, the first time it
+happened.
 
-Nothing here scores anything. Harvesting and scoring are separate on purpose: a
-corpus is expensive to produce and cheap to re-read, and every experiment should
-be re-runnable against the same rows.
+A reset should reset. What was wrong was depending on a table whose whole job is
+to be emptied. The scope comes from the turn span instead, which records
+`connection_id` in its own input — and, since `prompts.fingerprint()` went on
+it, which prose produced the turn.
+
+Worth knowing for later: Langfuse has the *inputs*, Postgres has the
+*outcomes* — whether the SQL errored, how many fix attempts — and only Postgres
+gets reset. `extract` does not care, because its score comes entirely from the
+recorded call. A `plan` harvest would care a lot: labelling "should the cache
+have been enough?" means looking at what happened next.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from app import db, store, tracing
+from app import tracing
 from optim.cases import ExtractCase, filed_from, sql_from
 from optim.replay import NODE as REPLAY_NODE
 
@@ -25,43 +35,32 @@ from optim.replay import NODE as REPLAY_NODE
 class Harvest:
     """What came back, and what did not. Printed rather than returned quietly."""
 
-    cases: list[ExtractCase]
+    cases: list[ExtractCase] = field(default_factory=list)
     seen: int = 0
-    no_sql: int = 0
     no_message: int = 0
-    unmatched: int = 0
+    no_sql: int = 0
+    unscoped: int = 0
+    other_connection: int = 0
     contaminated: int = 0
+    duplicate: int = 0
 
     def report(self) -> str:
-        dropped = self.seen - len(self.cases)
-        lines = [f"{len(self.cases)} cases from {self.seen} generations"]
-        if dropped:
-            lines.append(f"  dropped {dropped}:")
-            for label, n in (
-                ("no user message", self.no_message),
-                ("SQL would not parse", self.no_sql),
-                ("no matching turn row", self.unmatched),
-                ("written by the harness itself", self.contaminated),
-            ):
-                if n:
-                    lines.append(f"    {n} {label}")
-        # The unmatched count is the one that surprises people, and the cause is
-        # almost never the connection filter. A trace outlives the turn row that
-        # points at it: `make reset` and `DELETE /cache` drop turns while
-        # Langfuse keeps everything, and the suite's own runs write traces whose
-        # turn rows live in `agent_test`. Say so rather than letting "dropped 10"
-        # read as a bug in the join.
-        if self.unmatched and self.unmatched > len(self.cases):
-            lines.append(
-                "  most generations have no turn row here. A trace outlives the "
-                "row that points at it — `make reset` drops turns, the test "
-                "suite writes its own to agent_test, and tracing may have been "
-                "off when these ran."
-            )
+        lines = [f"{len(self.cases)} cases from {self.seen} recorded extract calls"]
+        dropped = [
+            ("no user message", self.no_message),
+            ("SQL would not parse", self.no_sql),
+            ("no turn span, so no way to say which warehouse", self.unscoped),
+            ("another connection", self.other_connection),
+            ("written by the harness itself", self.contaminated),
+            ("identical to a case already kept", self.duplicate),
+        ]
+        if any(n for _, n in dropped):
+            lines.append(f"  dropped {self.seen - len(self.cases)}:")
+            lines += [f"    {n} {label}" for label, n in dropped if n]
         return "\n".join(lines)
 
 
-async def extract_cases(
+def extract_cases(
     *,
     connection_id: str,
     days: int = 30,
@@ -74,23 +73,29 @@ async def extract_cases(
     mixes two is a corpus whose scores describe neither.
     """
     since = since or datetime.now(timezone.utc) - timedelta(days=days)
-    traces = await _traces_for(connection_id, since)
+    scope = turn_scope(since=since)
 
-    harvest = Harvest(cases=[])
-    for observation in tracing.generations(node="extract", since=since):
+    harvest = Harvest()
+    seen_messages: set[str] = set()
+
+    for observation in tracing.observations(name="extract", since=since):
         harvest.seen += 1
 
         # `replay` writes under `extract.replay`, so the harness's own calls
-        # never reach a corpus — but a `name=` filter is one typo from being
-        # wrong about that, and the cost of being wrong is round two training on
-        # round one's output. Cheap to assert.
+        # should never reach a corpus — but a name filter is one typo from being
+        # wrong about that, and being wrong means round two trains on round
+        # one's output. Cheap to assert twice.
         if observation.get("name") == REPLAY_NODE:
             harvest.contaminated += 1
             continue
 
-        trace_id = observation.get("trace_id")
-        if trace_id not in traces:
-            harvest.unmatched += 1
+        trace_id = observation.get("trace_id") or ""
+        scoped = scope.get(trace_id)
+        if scoped is None:
+            harvest.unscoped += 1
+            continue
+        if scoped.connection_id != connection_id:
+            harvest.other_connection += 1
             continue
 
         message = _user_message(observation.get("input"))
@@ -103,22 +108,65 @@ async def extract_cases(
             harvest.no_sql += 1
             continue
 
-        turn_id = traces[trace_id]
+        # T2-style repeats produce byte-identical extract inputs, and a corpus
+        # holding the same case five times weights it five times — tuning the
+        # prompt for whichever question the demo happens to ask twice.
+        if message in seen_messages:
+            harvest.duplicate += 1
+            continue
+        seen_messages.add(message)
+
         harvest.cases.append(
             ExtractCase(
-                name=f"turn-{turn_id}",
+                name=_label(trace_id, message),
                 user_message=message,
                 sql=sql,
                 filed=filed_from(message),
                 obs_id=observation.get("id"),
                 trace_id=trace_id,
-                turn_id=turn_id,
                 connection_id=connection_id,
-                baseline_tokens_out=int(observation.get("usage", {}).get("output") or 0),
+                prompt_fp=scoped.prompt_fp,
+                baseline_tokens_out=_tokens_out(observation),
             )
         )
 
-    return replace(harvest, cases=_dedupe(harvest.cases))
+    return harvest
+
+
+@dataclass(frozen=True)
+class Scope:
+    connection_id: str | None
+    prompt_fp: str | None
+
+
+def turn_scope(*, since: datetime | None = None) -> dict[str, Scope]:
+    """trace_id -> which warehouse the turn was about, and under which prose.
+
+    The turn span is the only place that says so. `migrations/004_tracing.sql`
+    called the trace "another system entirely, on the other side of an HTTP
+    exporter, and there is nothing here to join it to" — that is still true, and
+    the answer turned out to be not to join at all.
+    """
+    scope: dict[str, Scope] = {}
+    for span in tracing.observations(name="turn", kind="SPAN", since=since):
+        prompts = (span.get("metadata") or {}).get("prompts") or {}
+        scope[span.get("trace_id") or ""] = Scope(
+            connection_id=(span.get("input") or {}).get("connection_id"),
+            prompt_fp=prompts.get("extract"),
+        )
+    return scope
+
+
+def _tokens_out(observation: dict) -> int:
+    """What the recorded call cost, which the metric scores a candidate against.
+
+    Zero when Langfuse has no usage for the call, and the cost term reads zero
+    as "no baseline, do not score cost" rather than as "free" — so losing this
+    does not fail, it quietly deletes a fifth of the metric. It was lost once
+    exactly that way.
+    """
+    usage = observation.get("usage") or {}
+    return int(usage.get("output") or 0)
 
 
 def _user_message(recorded: object) -> str | None:
@@ -133,36 +181,9 @@ def _user_message(recorded: object) -> str | None:
     return None
 
 
-def _dedupe(cases: list[ExtractCase]) -> list[ExtractCase]:
-    """One case per message.
-
-    T2-style repeats of a question produce byte-identical extract inputs, and
-    a corpus that holds the same case five times weights it five times — which
-    would tune the prompt for whichever question the demo happens to ask twice.
-    """
-    seen: set[str] = set()
-    unique = []
-    for case in cases:
-        if case.user_message in seen:
-            continue
-        seen.add(case.user_message)
-        unique.append(case)
-    return unique
-
-
-async def _traces_for(connection_id: str, since: datetime) -> dict[str, int]:
-    """trace_id -> turn id, for one connection. The Postgres half of the join.
-
-    Also the connection filter. Scoping on the observation's own
-    `connection:{id}` tag would need the `trace_context` field group and would
-    trust a tag; the turn row is where the scope is authoritative, and it is
-    the same table the demo chart reads.
-    """
-    async with db.agent() as conn:
-        cur = await conn.execute(
-            "SELECT id, trace_id FROM turn "
-            "WHERE connection_id = %s AND trace_id IS NOT NULL AND created_at >= %s",
-            (connection_id, since),
-        )
-        rows = await cur.fetchall()
-    return {r["trace_id"]: r["id"] for r in rows}
+def _label(trace_id: str, message: str) -> str:
+    """A short readable id. The trace prefix keeps it unique, the question keeps
+    it meaningful in a report someone is reading at speed."""
+    question = message.removeprefix("Question: ").split("\n", 1)[0]
+    slug = re.sub(r"[^a-z0-9]+", "-", question.casefold()).strip("-")[:36]
+    return f"{trace_id[:8]}-{slug}" if slug else trace_id[:8]

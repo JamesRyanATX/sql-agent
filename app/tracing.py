@@ -9,7 +9,7 @@ site. (`turn`, `generation` and `span`; a tool observation is `span` with
 `as_type="tool"`, which is why the trace diagram in CLAUDE.md shows four kinds.)
 
 The reader is newer than the rest and inverts the module's old one-way
-character: `generations()` pulls recorded model calls back out, which is what
+character: `observations()` pulls recorded calls back out, which is what
 lets `optim/` build a prompt corpus from what the agent has already done. It
 lives here rather than where it is wanted for exactly the reason above.
 
@@ -219,14 +219,15 @@ def generation(
 # rule. tests/test_cli_isolation.py now enforces it.
 
 
-def generations(
+def observations(
     *,
-    node: str,
+    name: str,
+    kind: str = "GENERATION",
     since: Any = None,
     until: Any = None,
     page: int = 100,
 ) -> Iterator[dict[str, Any]]:
-    """Every model call recorded under one node label, oldest page first.
+    """Everything recorded under one observation name, oldest page first.
 
     This is what makes an offline prompt corpus possible at all. Because
     `llm.complete()` is the only place a generation is opened, and it records
@@ -234,7 +235,16 @@ def generations(
     Langfuse already holds a per-node dataset of exact inputs and outputs. The
     architecture built the harvester by accident; this reads it back.
 
-    Yields `{}` nothing at all when tracing is off, which is the common case.
+    Two shapes are used. `kind="GENERATION"` with a node name is the dataset.
+    `name="turn", kind="SPAN"` is the *scope*: the turn span records
+    `input={"question", "connection_id"}` and the prompt fingerprint in its
+    metadata, which is the only way to say which warehouse a recorded call was
+    about. It has to come from here rather than from a join to `turn.trace_id`,
+    because `make reset` empties that table by design and Langfuse keeps the
+    trace — and v4 removed the trace-list endpoint, so an observation cannot be
+    filtered by the `connection:` tag either.
+
+    Yields nothing at all when tracing is off, which is the common case.
     """
     lf = client()
     if lf is None:
@@ -248,8 +258,8 @@ def generations(
         # and returns 400 if set at all: input arrives as a raw string, which
         # is why `_as_json` below is required rather than defensive.
         response = lf.api.observations.get_many(
-            name=node,
-            type="GENERATION",
+            name=name,
+            type=kind,
             from_start_time=since,
             to_start_time=until,
             fields="core,basic,io,metadata,usage",
