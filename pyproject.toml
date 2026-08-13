@@ -66,6 +66,7 @@ dev = [
 ]
 optim = [
     "gepa>=0.1.4",
+    "tqdm>=4.70.0",
 ]
 
 [tool.pytest.ini_options]

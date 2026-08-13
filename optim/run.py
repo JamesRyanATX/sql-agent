@@ -111,7 +111,8 @@ def probe(node: str, candidate: Path | None) -> None:
 @click.option("--budget", default=150, show_default=True, help="max metric calls")
 @click.option("--val-fraction", default=0.3, show_default=True)
 @click.option("--seed", default=0, show_default=True)
-def optimize(node: str, budget: int, val_fraction: float, seed: int) -> None:
+@click.option("--resume", is_flag=True, help=f"continue the run in {RUN_DIR.name}/")
+def optimize(node: str, budget: int, val_fraction: float, seed: int, resume: bool) -> None:
     """GEPA over one node's prompt, then the probe gate."""
     import gepa
 
@@ -125,6 +126,20 @@ def optimize(node: str, budget: int, val_fraction: float, seed: int) -> None:
         )
     if not CORPUS.exists():
         raise click.ClickException(f"no corpus at {CORPUS} — run `harvest` first")
+
+    # GEPA resumes from `run_dir` if there is anything in it, and does so
+    # silently. That is right when you are continuing an exhausted budget and
+    # wrong every other time: the state is keyed to the seed it started from, so
+    # a resume after editing app/prompts.py or re-harvesting reports a candidate
+    # as descended from a seed that never produced it. Making the choice
+    # explicit costs one flag; getting it wrong costs a run you believe.
+    if not resume and RUN_DIR.exists() and any(RUN_DIR.iterdir()):
+        raise click.ClickException(
+            f"{RUN_DIR} holds a previous run and GEPA would resume from it.\n"
+            f"  --resume            continue that run\n"
+            f"  rm -rf {RUN_DIR}    start fresh (this is what you want after "
+            f"editing a prompt or re-harvesting)"
+        )
 
     cases = read_jsonl(CORPUS)
     if len(cases) < THIN_CORPUS:

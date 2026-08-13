@@ -135,3 +135,45 @@ def test_a_much_shorter_candidate_is_flagged_for_reading(loop, scripted, capsys)
 
     assert survivors, "brevity alone is not disqualifying"
     assert "read the diff closely" in capsys.readouterr().out
+
+
+# ------------------------------------------------------- the resume guard
+
+
+def test_a_leftover_run_dir_is_refused_rather_than_silently_resumed(tmp_path, monkeypatch):
+    """GEPA resumes from run_dir without saying so, and its state is keyed to
+    the seed it started from. A resume after editing app/prompts.py or
+    re-harvesting would report a candidate as descended from a seed that never
+    produced it — a result you would believe."""
+    from click.testing import CliRunner
+
+    from optim import run
+
+    monkeypatch.setattr(run, "RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(run, "CORPUS", tmp_path / "extract.jsonl")
+    (tmp_path / "extract.jsonl").write_text("")
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "state.bin").write_text("a previous run")
+
+    result = CliRunner().invoke(run.cli, ["optimize", "--node", "extract"])
+
+    assert result.exit_code != 0
+    assert "would resume from it" in result.output
+    assert "--resume" in result.output
+
+
+def test_an_empty_run_dir_is_not_a_previous_run(tmp_path, monkeypatch):
+    """The other direction: a directory GEPA created and left empty must not
+    block the next run forever."""
+    from click.testing import CliRunner
+
+    from optim import run
+
+    monkeypatch.setattr(run, "RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(run, "CORPUS", tmp_path / "missing.jsonl")
+    (tmp_path / "run").mkdir()
+
+    result = CliRunner().invoke(run.cli, ["optimize", "--node", "extract"])
+
+    # Falls through to the corpus check, which is the *next* guard.
+    assert "run `harvest` first" in result.output
