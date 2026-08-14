@@ -1,6 +1,7 @@
 .env
-# direnv. A fact about one machine — on NixOS it puts nix-ld's libstdc++ on
-# LD_LIBRARY_PATH so greenlet's compiled extension loads. See CLAUDE.md.
+# direnv. Where machine-specific environment goes — on NixOS it puts nix-ld's
+# libstdc++ on LD_LIBRARY_PATH so greenlet's compiled extension loads. Not the
+# project's business, which is why it is here and not in the Makefile.
 .envrc
 .direnv/
 # config/config.yaml *is* tracked — it holds the demo defaults, and a fresh

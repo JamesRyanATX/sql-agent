@@ -53,19 +53,22 @@ One test: `uv run pytest tests/test_store.py::test_named_entries_upsert_rather_t
 `addopts = -m 'not live'` in [pyproject.toml](pyproject.toml) means live tests are
 opt-in; run them with `-m live`.
 
-**On NixOS, a `uv run` that bypasses `make` needs `LD_LIBRARY_PATH` to include
-`$NIX_LD_LIBRARY_PATH`** — the two lines above do it for every recipe, so `make
-test` is always fine, and it is the direct invocations that are not: the
-single-test command above, and `uv run sql-agent`. The symptom is `ValueError:
-the greenlet library is required`, which is a lie — greenlet is installed. Its
-compiled extension links `libstdc++.so.6`, and the real error is an `ImportError`
-one frame down that nothing prints. nix-ld *does* provide that library, but it
-works by supplying an `ld.so` at the FHS interpreter path, which fixes foreign
-**executables**; greenlet's `.so` is `dlopen`'d by an already-running
-interpreter, and that lookup reads the process's own `LD_LIBRARY_PATH`. A
-gitignored `.envrc` covers the gap for anyone with direnv. The Makefile's version
-stays regardless: it is committed and needs nothing installed, which is the
-weaker dependency of the two.
+**On NixOS, `LD_LIBRARY_PATH` has to include `$NIX_LD_LIBRARY_PATH`, and that
+belongs in the shell rather than in this repository.** The symptom is
+`ValueError: the greenlet library is required`, which is a lie — greenlet is
+installed. Its compiled extension links `libstdc++.so.6`, and the real error is
+an `ImportError` one frame down that nothing prints. nix-ld *does* provide that
+library, but it works by supplying an `ld.so` at the FHS interpreter path, which
+fixes foreign **executables**; greenlet's `.so` is `dlopen`'d by an
+already-running interpreter, and that lookup reads the process's own
+`LD_LIBRARY_PATH`, which nix-ld never set.
+
+A gitignored `.envrc` is the whole fix — `make` inherits the environment, so it
+covers the recipes and a bare `uv run` alike. The Makefile carried an
+`ifdef NIX_LD_LIBRARY_PATH` block for this and no longer does: it only ever
+covered `make`, and one distribution's linker layout is not something a
+`Makefile` committed for everyone should know about. Documented here because the
+error names the wrong library, not because the repository does anything about it.
 
 Ad-hoc questions: `uv run sql-agent "how many customers do we have?"` — needs
 the API up, since the CLI is an HTTP client, and needs `SQL_AGENT_URL` set and a
