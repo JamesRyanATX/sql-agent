@@ -53,18 +53,19 @@ One test: `uv run pytest tests/test_store.py::test_named_entries_upsert_rather_t
 `addopts = -m 'not live'` in [pyproject.toml](pyproject.toml) means live tests are
 opt-in; run them with `-m live`.
 
-**On NixOS, every target-database test fails until `LD_LIBRARY_PATH` includes
-`$NIX_LD_LIBRARY_PATH`.** The symptom is `ValueError: the greenlet library is
-required`, which is a lie — greenlet is installed. Its compiled extension links
-`libstdc++.so.6`, and the real error is an `ImportError` one frame down that
-nothing prints. nix-ld *does* provide that library, but it works by supplying an
-`ld.so` at the FHS interpreter path, which fixes foreign **executables**;
-greenlet's `.so` is `dlopen`'d by an already-running interpreter, and that lookup
-reads the process's own `LD_LIBRARY_PATH`. A gitignored `.envrc` doing
-`export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$NIX_LD_LIBRARY_PATH"`
-is the fix — appended, never assigned, because it is usually already set. Not
-committed, because it is a fact about one machine; documented here, because the
-error message points at the wrong library.
+**On NixOS, a `uv run` that bypasses `make` needs `LD_LIBRARY_PATH` to include
+`$NIX_LD_LIBRARY_PATH`** — the two lines above do it for every recipe, so `make
+test` is always fine, and it is the direct invocations that are not: the
+single-test command above, and `uv run sql-agent`. The symptom is `ValueError:
+the greenlet library is required`, which is a lie — greenlet is installed. Its
+compiled extension links `libstdc++.so.6`, and the real error is an `ImportError`
+one frame down that nothing prints. nix-ld *does* provide that library, but it
+works by supplying an `ld.so` at the FHS interpreter path, which fixes foreign
+**executables**; greenlet's `.so` is `dlopen`'d by an already-running
+interpreter, and that lookup reads the process's own `LD_LIBRARY_PATH`. A
+gitignored `.envrc` covers the gap for anyone with direnv. The Makefile's version
+stays regardless: it is committed and needs nothing installed, which is the
+weaker dependency of the two.
 
 Ad-hoc questions: `uv run sql-agent "how many customers do we have?"` — needs
 the API up, since the CLI is an HTTP client, and needs `SQL_AGENT_URL` set and a
