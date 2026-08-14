@@ -27,6 +27,7 @@ make test-live                         # includes tests that spend real tokens
 docker compose --profile mysql up -d   # opt-in; the dialect tests skip without it
 make langfuse-up                       # opt-in; the trace stack, UI on :3000
 make optim-probe                       # do the prompts still honour their invariants?
+make optim-apply                       # write a gated winner into config/prompts/
 make customer-count                    # ask the cold-path question
 make connections                       # every database the agent can be pointed at
 make cache                             # print the cache as the model sees it
@@ -51,6 +52,19 @@ it — `make dev` was removed when the clients became HTTP clients.
 One test: `uv run pytest tests/test_store.py::test_named_entries_upsert_rather_than_duplicate -q`.
 `addopts = -m 'not live'` in [pyproject.toml](pyproject.toml) means live tests are
 opt-in; run them with `-m live`.
+
+**On NixOS, every target-database test fails until `LD_LIBRARY_PATH` includes
+`$NIX_LD_LIBRARY_PATH`.** The symptom is `ValueError: the greenlet library is
+required`, which is a lie — greenlet is installed. Its compiled extension links
+`libstdc++.so.6`, and the real error is an `ImportError` one frame down that
+nothing prints. nix-ld *does* provide that library, but it works by supplying an
+`ld.so` at the FHS interpreter path, which fixes foreign **executables**;
+greenlet's `.so` is `dlopen`'d by an already-running interpreter, and that lookup
+reads the process's own `LD_LIBRARY_PATH`. A gitignored `.envrc` doing
+`export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$NIX_LD_LIBRARY_PATH"`
+is the fix — appended, never assigned, because it is usually already set. Not
+committed, because it is a fact about one machine; documented here, because the
+error message points at the wrong library.
 
 Ad-hoc questions: `uv run sql-agent "how many customers do we have?"` — needs
 the API up, since the CLI is an HTTP client, and needs `SQL_AGENT_URL` set and a
@@ -129,6 +143,43 @@ driver connection, and it now also means a registry row. **Never bind a bare
 `connection` variable to a registry row** — it is `connection_id: str` or
 `registered: store.Connection`, always.
 
+## Two config sources, and which is which
+
+**`settings()` is the environment. `config()` is a tracked file.** Two objects
+rather than one, so a call site says which it reads.
+
+| | `app/settings.py` | `app/config.py` |
+|---|---|---|
+| from | env + `.env` | `config/config.yaml` + `config.local.yaml` |
+| holds | the two database URLs, `API_TOKEN`, `CONNECTION_SECRET`, the two model API keys, the Langfuse keys, `CONFIG_DIR` | which model, per-node effort, `max_tool_calls`, `max_fix_attempts`, `statement_timeout_ms`, `max_rows` |
+| tracked | no (`.env` is gitignored) | yes — the overlay is not |
+| unknown key | `extra="ignore"` — dropped in silence | `extra="forbid"` — an error |
+
+The split is "secret or address" against "behaviour". A tracked file must never
+hold a key, which is why `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` stayed in the
+environment while the model *name* moved. And `CONFIG_DIR` is an env var because
+where the config lives cannot itself be config.
+
+**The environment variables that moved are gone, not demoted.** `PROVIDER`,
+`MODEL`, `OPENAI_*`, `EFFORT_*`, `MAX_TOOL_CALLS`, `MAX_FIX_ATTEMPTS`,
+`STATEMENT_TIMEOUT_MS`, `MAX_ROWS` and `PROMPT_DIR` are not read. Folding the
+yaml in as a low-priority pydantic-settings source was the alternative, and it
+would have left a stale `EFFORT_PLAN=low` in somebody's `.env` silently beating
+the file they were editing. `RETIRED` in [app/main.py](app/main.py) warns about
+every one of them at startup, for the same reason the old `STATEMENT_TIMEOUT`
+check existed: `extra="ignore"` makes a retired name and a typo identical.
+
+`config/config.yaml` is tracked and holds the **demo** defaults — Anthropic,
+`claude-opus-5`, the effort values PLAN.md §7.1 names — so a fresh clone runs.
+`config/config.local.yaml` is gitignored and deep-merged over it, which is where
+a machine-specific endpoint goes. Deep, not shallow: a local file naming only
+`model.model` keeps the tracked file's `provider`.
+
+Both are memoised per process, like the prompts and for a stronger reason — a
+model that changed between two turns would invalidate `plan`'s cache prefix with
+no symptom but the token counter going up. The lifespan reads both **first**, so
+a bad config fails at boot rather than on the first model call of a demo.
+
 ## Architecture
 
 **The API is the only way in.** `sql_agent_cli/` is an HTTP client that renders
@@ -177,24 +228,43 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
 ```
 
 - **[app/graph.py](app/graph.py)** — nodes, JSON schemas, edges. The
-  structured-output schemas live here as module constants; the *prose* moved to
-  `app/prompts.py`, because a schema is the node's wire contract and a prompt is
-  the thing an optimiser rewrites.
-- **[app/prompts.py](app/prompts.py)** — the six durable instruction blocks, and
-  the seam. `get(name)` returns the constant or a `<node>.txt` override from
-  `PROMPT_DIR`, resolved **once per process** — memoised because `plan`'s system
-  block sits behind an Anthropic cache breakpoint on the promise it varies with
-  `connection_id` alone, and a prompt re-read per turn could change between two
-  turns of one server's life with no symptom but T2 quietly costing more. Keys
-  are the `node=` labels `llm.complete` uses as Langfuse generation names, so a
-  harvested trace and an override file name the same thing. Empty `PROMPT_DIR`
-  is the deployed state: the prose in git is what ships. `fingerprint()` goes on
-  the turn span so a harvest can tell which prose produced which trace.
+  structured-output schemas live here as module constants; the *prose* is
+  `config/prompts/`, because a schema is the node's wire contract and a prompt
+  is the thing an optimiser rewrites.
+- **[config/prompts/](config/prompts/)** — six markdown files, and **the whole
+  file is the prompt**: what is sent is the text, stripped, with no frontmatter
+  and no separator. Filenames are the `node=` labels `llm.complete` uses as
+  Langfuse generation names, so a harvested trace, the graph node, the config
+  block and the file all name the same thing. `README.md` is the one non-prompt
+  file the loader allows, and is where the comments that used to sit above the
+  constants went. See [config/prompts/README.md](config/prompts/README.md).
+- **[app/prompts.py](app/prompts.py)** — the loader. `get(name)` reads
+  `$CONFIG_DIR/prompts/<node>.md`, resolved **once per process** — memoised
+  because `plan`'s system block sits behind an Anthropic cache breakpoint on the
+  promise it varies with `connection_id` alone, and a prompt re-read per turn
+  could change between two turns of one server's life with no symptom but T2
+  quietly costing more. A missing file, an empty file and a stray `extrct.md`
+  are all errors, because a prompt that silently is not what you think it is is
+  how an optimisation run measures the seed and reports it as an improvement.
+  Imports stdlib and `app.settings` only — deliberately not `app.config`, since
+  *where* the prompts are is an environment question and only that is needed to
+  read a file. `fingerprint()` goes on the turn span so a harvest can tell which
+  prose produced which trace.
+- **[app/config.py](app/config.py)** — `config/config.yaml`: which model, at
+  what effort, within what bounds. A global `model:` block, an optional override
+  on any node, and a `gepa:` block for the teacher. `config/config.local.yaml`
+  is deep-merged over it and gitignored. `extra="forbid"` at every level, which
+  is what makes it safe to put node names at the top level beside settings — a
+  typo is an error rather than a key that configures nothing. See below for why
+  it is a second object rather than a source inside `Settings`.
 - **[app/llm.py](app/llm.py)** — the *only* module that talks to a model. Two
   backends behind one `complete()`: `anthropic` (demo) and `openai_compat`
-  (Ollama/vLLM/LM Studio for local dev). Nodes never see the difference; build
-  messages with `assistant_turn()` / `tool_results()` because the two wire
-  formats disagree about tool results.
+  (Ollama/vLLM/LM Studio for local dev). Which one a call uses is resolved from
+  its `node=`, so a node may override the model. Nodes never see the difference;
+  build messages with `assistant_turn(result, node=…)` / `tool_results(…,
+  node=…)` because the two wire formats disagree about tool results — and they
+  take a node for that reason: an override can change the *backend*, and reading
+  a global provider there would build the wrong shape for the explore loop.
 - **[app/store.py](app/store.py)** — the connection registry, cache and turn-log
   reads/writes, plus `stale_ids`, `count_disabled`, `read_turns` and the two
   resets. See the note above for which server and which target each takes, and
@@ -321,9 +391,13 @@ the demo rather than failing a test.
   outside it lets a resumed thread silently switch warehouses, replaying a cache
   loaded from one while `execute` runs against another. For the same reason a
   session that has asked about one connection is refused (409) against another.
-- **Effort, never thinking-off.** Cost is controlled per node via
-  `EFFORT_*` settings. Disabling thinking on Opus 5 can turn a tool call into
-  visible text that never executes, which silently breaks the explore loop.
+- **Effort, never thinking-off.** Cost is controlled per node via each node's
+  `effort:` in `config/config.yaml`. Disabling thinking on Opus 5 can turn a
+  tool call into visible text that never executes, which silently breaks the
+  explore loop — so `effort` is a `Literal` with no value that does it, and
+  there is no longer a global `OPENAI_REASONING_EFFORT` that overrode every node
+  at once. A global override of a per-node setting can only lose the
+  distinction.
 - **The agent cannot see its own tables** — they are on another server. This
   used to be a name filter in `tools.py`; it was deleted, because a filter that
   matches on names also hides a *business* table that happens to be called
@@ -470,7 +544,7 @@ unused; the one thing that reads a trace back is `tracing.observations()`, below
 
 The second flywheel, and the one PLAN.md §10 named as the road not taken: *"the
 prompt template never changes — only what's in it. DSPy optimizers like GEPA are
-the industrial version."* Built for `extract` only, manual, human-merged.
+the industrial version."* Built for `extract` only, manual, human-committed.
 
 The idea it is **not** built on is optimising in realtime from telemetry. GEPA
 scores by *running* candidates; a trace records what happened under prompt P and
@@ -502,6 +576,7 @@ make optim-probe     do the current prompts still honour their invariants?
 make optim-harvest   recorded extract calls -> optim/out/extract.jsonl
 make optim-run       GEPA over one node's prompt, gated on the probes
 make optim-diff      what the winner changed, beside the invariant checklist
+make optim-apply     write it into config/prompts/<node>.md (nothing committed)
 ```
 
 - **`optim/` reads the app; the app never reads `optim/`.** It is a development
@@ -517,8 +592,8 @@ make optim-diff      what the winner changed, beside the invariant checklist
   under a different request shape than production uses tunes it for a
   configuration you do not run — and DSPy's own field markers would make harness
   tokens stop being production tokens, in a repo whose claim is a token count.
-  GEPA's `reflection_lm` is `llm.complete` at max effort, so there is still
-  exactly one module that talks to a model.
+  GEPA's `reflection_lm` is `llm.complete` at the `gepa:` block's effort (max
+  by default), so there is still exactly one module that talks to a model.
 - **The probes are the valset and they are not GEPA's valset.** GEPA sees a
   train/val split of harvested cases; the probes run *after* it returns, against
   every candidate in the pool, and any that regresses one the seed passed is
@@ -534,9 +609,29 @@ make optim-diff      what the winner changed, beside the invariant checklist
   prompts someone reasoned their way to; if one starts passing, the metric has a
   hole. An empty extraction scored 0.6 before that file existed, because census,
   names and cost are all vacuously perfect when nothing was recorded.
-- **There is deliberately no `optim-apply`.** Promotion is a human editing
-  `app/prompts.py` and writing the comment that says which failure the new
-  wording addresses. A machine-applied prompt arrives without one.
+- **`optim-apply` writes the file and stops.** It stages nothing and commits
+  nothing; what it leaves is a working-tree diff. This reversed a policy — there
+  used to be no `apply` at all, on the argument that a machine-applied prompt
+  arrives without the comment explaining why it says what it says. That argument
+  was about `app/prompts.py`, where the prose sat inside a Python string literal
+  and the only way to promote a candidate was a copy-paste with no diff: the one
+  step in the loop nothing could review. Now the prose is a tracked file, so the
+  review gate is `git diff config/prompts/`, which is strictly stronger than a
+  human retyping it. The comment did not stop being required — it moved to the
+  commit message, and `config/prompts/README.md` carries the per-prompt notes
+  the file body no longer can. `apply` refuses a target with uncommitted
+  changes, so the diff you read is the one it wrote, and refuses a winner with
+  no recorded passing gate, so a file hand-dropped into `optim/out/` cannot be
+  promoted as though a run had cleared it. And it refuses a winner that scored
+  *below the seed*: `_gate` ranks survivors against each other after skipping
+  the seed, so GEPA reporting "best program: 0" — the search found nothing
+  better — still produced a written winner and an invitation to promote it.
+  Observed, not hypothetical: a completed run scored the seed 0.959 and its best
+  survivor 0.928. That was survivable while promotion was a copy-paste under
+  human eyes; `apply` made it one command, so `optimize` now records
+  `seed_score` in the verdict and `apply` compares against it. A probe suite is
+  a set of predicates about failures, not a measure of quality — clearing every
+  probe does not make a candidate better than what it replaces.
 - **`tokens_in` is not comparable during a run** — every candidate is a distinct
   cache prefix, so `cache_system=True` never hits in the harness. The cost term
   scores `tokens_out` only; "extract got cheaper" measured here would be a lie
@@ -551,6 +646,10 @@ make optim-diff      what the winner changed, beside the invariant checklist
 ## Conventions
 
 - `uv` for everything (`uv run …`); dependencies in [pyproject.toml](pyproject.toml).
+- **Prose belongs in `config/prompts/*.md`, settings in `config/config.yaml`,
+  secrets and addresses in the environment.** A string literal in `app/` that a
+  model reads is in the wrong file — that is what the move was — and a key in a
+  tracked file is a leak waiting for a `git push`.
 - `langfuse` is import-legal in [app/tracing.py](app/tracing.py) and nowhere
   else, `sqlalchemy`-style. Everything else takes a context manager from there —
   or, now that traces are read back as well as written, `observations()`. That

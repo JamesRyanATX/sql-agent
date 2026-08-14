@@ -1,0 +1,56 @@
+# Which model, at what effort, within what bounds. Read by app/config.py.
+#
+# This file is tracked, and what is in it is what ships: the demo runs Anthropic
+# and claude-opus-5. To run something else locally, put just the keys you want to
+# change in config.local.yaml beside this file — it is gitignored and deep-merged
+# over the top, so overriding `model.model` keeps `model.provider` from here.
+#
+# API keys are not here and never will be. They are ANTHROPIC_API_KEY and
+# OPENAI_API_KEY in .env — this file is tracked, and that is the whole argument.
+#
+# A key naming nothing is an error rather than a no-op, at every level.
+
+# The default for every node below that does not override it.
+model:
+  provider: anthropic          # or openai_compat, for any OpenAI-shaped endpoint
+  model: claude-opus-5
+  # url: http://192.168.68.54:11434/v1   # openai_compat only; must not be
+  #                                      # localhost — the API runs in a container
+  max_tokens: 16000
+  timeout: 900
+
+# Bounds, so T1 doesn't run forever on stage.
+max_tool_calls: 24
+max_fix_attempts: 3
+max_rows: 50                   # rows handed back to the model from execute
+# Milliseconds, an integer. Every supported dialect can be told a millisecond
+# count; "5s" is a Postgres interval literal that MySQL parses as neither a
+# number nor an error. app/dialects.py has what each one does with it.
+statement_timeout_ms: 5000
+
+# Per-node effort. See PLAN.md §7.1: lowering effort is how a node is made
+# cheap. Disabling thinking is not — on Opus 5 that can turn a tool call into
+# plain visible text that never runs, silently breaking the explore loop — so
+# there is no value here that does it.
+#
+# Any node may also take its own `model:` block, with the same keys as the one
+# above. `load_cache` is deliberately absent: it reads a table, not a model.
+plan:
+  effort: low                  # the cached path, and the number the demo sells
+explore:
+  effort: high                 # covers explore.summary too: one prompt, two calls
+generate_sql:
+  effort: high
+fix:
+  effort: high
+extract:
+  effort: low                  # covers extract.replay, which is optim/'s harness
+answer:
+  effort: low
+
+# GEPA's reflection model — the teacher that proposes candidate prompts. Its own
+# block because it is the one call in the system that is not part of a turn, and
+# because giving it a stronger model than production runs is the normal thing to
+# want. Called with node="gepa.reflect" from optim/adapter.py.
+gepa:
+  effort: max

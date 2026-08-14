@@ -108,6 +108,11 @@ services:
       # The dev loop: edit app/ on the host, uvicorn --reload restarts in place.
       # Only a dependency change needs `docker compose build`.
       - ./app:/srv/app
+      # The prompts and config.yaml, on the same bargain — and it has to be a
+      # mount as well as a COPY, or `make optim-apply` on the host would write a
+      # prompt the running container cannot see. --reload-dir covers it, so an
+      # applied prompt is live on the next request.
+      - ./config:/srv/config
     healthcheck:
       # So `make up`'s --wait covers the API too. /health checks the agent's own
       # database; a registered target being down is a fact about that connection,

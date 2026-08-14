@@ -33,7 +33,7 @@ from tests.test_coldpath import (  # noqa: F401 — `pool` is a fixture
     text_result,
     tool_result,
 )
-from tests.test_llm_openai import capture
+from tests.test_llm_openai import capture, use_openai
 
 DEFAULT_CONNECTION = "default"
 
@@ -152,9 +152,7 @@ async def test_a_model_call_opens_a_generation(monkeypatch):
     """
     rec = Recorder()
     monkeypatch.setattr(tracing, "generation", rec)
-    monkeypatch.setenv("PROVIDER", "openai_compat")
-    monkeypatch.setenv("OPENAI_MODEL", "qwen-test")
-    settings.cache_clear()
+    use_openai(monkeypatch, model="qwen-test")
     try:
         capture(monkeypatch, httpx.Response(200, json=OK))
         result = await llm.complete(
@@ -165,7 +163,6 @@ async def test_a_model_call_opens_a_generation(monkeypatch):
         )
     finally:
         monkeypatch.undo()
-        settings.cache_clear()
 
     assert len(rec.opened) == 1
     opened = rec.opened[0]
@@ -191,8 +188,7 @@ async def test_a_failed_model_call_is_marked_on_its_generation(monkeypatch):
     everywhere else in this codebase. On a trace it has to read as a failure."""
     rec = Recorder()
     monkeypatch.setattr(tracing, "generation", rec)
-    monkeypatch.setenv("PROVIDER", "openai_compat")
-    settings.cache_clear()
+    use_openai(monkeypatch)
     try:
         capture(monkeypatch, httpx.Response(400, text="no such field"))
         with pytest.raises(llm.LlmError):
@@ -201,7 +197,6 @@ async def test_a_failed_model_call_is_marked_on_its_generation(monkeypatch):
             )
     finally:
         monkeypatch.undo()
-        settings.cache_clear()
 
     # The recorder is not the real context manager, so it cannot mark anything
     # itself — what this pins is that the exception propagates out of the `with`

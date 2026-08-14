@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app import graph, llm, store
-from app.settings import settings
+from app.config import config
 from optim.cases import ExtractCase
 
 # Not "extract". The harness must not write its own calls into the corpus it
@@ -66,7 +66,7 @@ async def replay(
         result = await llm.complete(
             system=candidate,
             messages=[{"role": "user", "content": case.user_message}],
-            effort=effort or settings().effort_extract,
+            effort=effort or config().effort_for("extract"),
             schema=graph.EXTRACT_SCHEMA,
             node=NODE,
         )

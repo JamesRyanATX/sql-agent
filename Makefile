@@ -126,8 +126,11 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # `optim/` is a development tool, so `gepa` is a dependency group rather than a
 # dependency — `uv sync --no-dev` already excludes groups, which is the same
 # mechanism that keeps pytest out of the image. Nothing here runs in the
-# container and nothing here applies a prompt: promotion is a human editing
-# app/prompts.py and writing the comment that says why.
+# container.
+#
+# `optim-apply` writes config/prompts/$(NODE).md and stops — it stages nothing
+# and commits nothing. Promotion is the commit you make after reading the diff,
+# and its message is where the reason goes: no run can produce that.
 
 NODE ?= extract
 OPTIM = uv run --group optim python -m optim.run
@@ -143,6 +146,9 @@ optim-run:  ## GEPA over one node's prompt, gated on the probes (costs tokens)
 
 optim-diff:  ## what the winner changed, beside the invariant checklist
 	$(OPTIM) diff --node $(NODE)
+
+optim-apply:  ## write the gated winner into config/prompts/$(NODE).md (nothing is committed)
+	$(OPTIM) apply --node $(NODE)
 
 # --- demo: presentation & recording -----------------------------------------
 

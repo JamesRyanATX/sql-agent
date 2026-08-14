@@ -1,7 +1,7 @@
 {
   "name": "grounding",
   "invariant": "Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.",
-  "cites": "app/prompts.py EXTRACT_SYSTEM; app/graph.py grounded_in()",
+  "cites": "config/prompts/extract.md; app/graph.py grounded_in()",
   "why": "The literal failure in grounded_in's docstring: the model reported revenue excluding pending orders while its SQL excluded only cancelled — a 16% gap between the answer and the query. The findings below name four statuses so the temptation to write the tidy definition rather than the one that ran is real. The second half of the predicate is the anti-gaming clamp: grounded_in accepts a token subsequence, so a fragment as short as `count(*)` verifies against anything, and an optimiser told to raise the verified rate finds that in about four generations — destroying the gate by maximising the metric derived from it.",
   "predicate": "recipes_are_grounded",
   "case": {

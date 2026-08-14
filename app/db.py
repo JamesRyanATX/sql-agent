@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 # app.db) and checked by the import. An injected resolver would buy nothing but
 # a place for the lookup to hide.
 from app import dialects, store
+from app.config import config
 from app.settings import settings
 
 _agent_pool: AsyncConnectionPool | None = None
@@ -256,7 +257,7 @@ async def target_engine(connection_id: str) -> AsyncEngine:
             isolation_level="AUTOCOMMIT",
             **_engine_kwargs(registered.dialect),
         )
-        dialects.install(engine, registered.dialect, settings().statement_timeout_ms)
+        dialects.install(engine, registered.dialect, config().statement_timeout_ms)
         try:
             # Take a connection. The reason changed with the port but the
             # conclusion did not: `create_async_engine` never dials anything —
@@ -338,6 +339,6 @@ async def target_readonly(connection_id: str) -> AsyncIterator[TargetConnection]
             isolation_level=dialect.default_isolation_level
         )
         async with conn.begin():
-            for statement in cap.transaction(dialect, settings().statement_timeout_ms):
+            for statement in cap.transaction(dialect, config().statement_timeout_ms):
                 await conn.exec_driver_sql(statement)
             yield conn

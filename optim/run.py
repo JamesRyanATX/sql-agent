@@ -1,15 +1,23 @@
-"""`python -m optim.run <command>`. Four verbs, and deliberately not a fifth.
+"""`python -m optim.run <command>`. Five verbs.
 
     harvest    pull recorded extract calls out of Langfuse into a corpus
     probe      do the current prompts still honour their invariants?
     optimize   GEPA over one node's prompt, gated on the probes
     diff       what the winner changed, beside the invariant checklist
+    apply      write the winner into config/prompts/<node>.md
 
-There is no `apply`. Writing a prompt into `app/prompts.py` is a git-visible
-edit a human makes after reading the diff — a machine-applied prompt arrives
-without the comment explaining why it says what it says, in a repo whose stated
-convention is that comments cite the failure that motivated the code. The last
-mile is a person writing that comment.
+There used to be no `apply`, on the argument that a machine-applied prompt
+arrives without the comment explaining why it says what it says. That argument
+was about `app/prompts.py`, where the prose lived inside a Python string literal
+and the only way to promote a candidate was a copy-paste with no diff — the one
+step in the loop nothing could review.
+
+The prose is now `config/prompts/<node>.md`, tracked. So `apply` writes a file
+and stops: it stages nothing and commits nothing, and what it leaves behind is a
+working-tree diff a human reads. The comment did not stop being required — it
+moved to the commit message, which is where a reason for changing a file belongs
+and where `git log -p config/prompts/` will still find it. `apply` refuses when
+the target is already dirty, so the diff you read is the one it wrote.
 """
 
 from __future__ import annotations
@@ -29,8 +37,27 @@ from optim.cases import ExtractCase, read_jsonl, write_jsonl
 
 OUT = Path(__file__).resolve().parent / "out"
 CORPUS = OUT / "extract.jsonl"
-WINNER = OUT / "candidate-extract.txt"
 RUN_DIR = OUT / "run"
+
+
+def winner(node: str) -> Path:
+    """Where `optimize` leaves a gated candidate, for `diff` and `apply`.
+
+    A function of the node, which it was not: the path was a constant with
+    `extract` baked into it, so optimising a second node would have written over
+    the first one's winner under the first one's name.
+    """
+    return OUT / f"candidate-{node}.txt"
+
+
+def _verdict(node: str) -> Path:
+    """What `optimize` recorded about the run that produced `winner(node)`.
+
+    Beside the winner rather than in it, because the winner file is exactly the
+    prompt — `apply` copies it verbatim and a header would end up in the prose.
+    """
+    return OUT / f"candidate-{node}.json"
+
 
 # Under this, GEPA is fitting noise. Not a hard stop — a warning, because the
 # right response is usually to go and generate more traces rather than to
@@ -86,14 +113,14 @@ def harvest(conn: str, days: int) -> None:
 @click.option(
     "--candidate",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="a prompt file to check instead of the one in app/prompts.py",
+    help="a prompt file to check instead of the tracked one",
 )
 def probe(node: str, candidate: Path | None) -> None:
     """Do the prompts still honour the invariants written into them?"""
     from optim.adapter import Loop
 
     text = candidate.read_text(encoding="utf-8").strip() if candidate else prompts.get(node)
-    label = str(candidate) if candidate else "app/prompts.py"
+    label = str(candidate or prompts.directory() / f"{node}.md")
 
     with Loop() as loop:
         outcomes = _run_probes(loop, text, probes.load(node))
@@ -130,7 +157,7 @@ def optimize(node: str, budget: int, val_fraction: float, seed: int, resume: boo
     # GEPA resumes from `run_dir` if there is anything in it, and does so
     # silently. That is right when you are continuing an exhausted budget and
     # wrong every other time: the state is keyed to the seed it started from, so
-    # a resume after editing app/prompts.py or re-harvesting reports a candidate
+    # a resume after editing config/prompts/ or re-harvesting reports a candidate
     # as descended from a seed that never produced it. Making the choice
     # explicit costs one flag; getting it wrong costs a run you believe.
     if not resume and RUN_DIR.exists() and any(RUN_DIR.iterdir()):
@@ -195,10 +222,50 @@ def optimize(node: str, budget: int, val_fraction: float, seed: int, resume: boo
         )
 
     best = survivors[0]
-    WINNER.parent.mkdir(parents=True, exist_ok=True)
-    WINNER.write_text(best["text"], encoding="utf-8")
-    click.echo(f"\nwrote {WINNER} (val score {best['score']:.3f})")
-    click.echo("read it, then `python -m optim.run diff`. Nothing is applied.")
+    seed_score = _seed_score(result, seed_prompt)
+    target = winner(node)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(best["text"], encoding="utf-8")
+    # The gate's own verdict, written where `apply` can read it. `apply` refuses
+    # a winner it cannot see a passing gate for, so that a file hand-dropped
+    # into optim/out/ cannot be promoted as though a run had cleared it.
+    _verdict(node).write_text(
+        json.dumps(
+            {
+                "node": node,
+                "score": best["score"],
+                "seed_score": seed_score,
+                "candidate": best["index"],
+                "gated": True,
+                "probes": sorted(p.name for p in probes.load(node)),
+                "seed_fingerprint": prompts.fingerprint().get(node),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    click.echo(f"\nwrote {target} (val score {best['score']:.3f})")
+
+    # The survivors are ranked against each other and never against the prompt
+    # they came from — GEPA reports its own best program, and when that is the
+    # seed, `_gate` still hands back the best *mutation* and this still writes
+    # it. That was survivable while promotion was a copy-paste under human eyes.
+    # `apply` made it one command, so the comparison has to be made here and
+    # carried in the verdict.
+    if seed_score is not None and best["score"] < seed_score:
+        click.secho(
+            f"\nBut the seed scored {seed_score:.3f} and this scored "
+            f"{best['score']:.3f} — the run found nothing better than what is "
+            f"already in config/prompts/{node}.md. `apply` will refuse it "
+            f"without --force, and forcing it promotes a measured regression.",
+            fg="yellow",
+        )
+        return
+    click.echo(
+        "read it with `python -m optim.run diff`, then `python -m optim.run "
+        f"apply --node {node}` to write it into config/prompts/{node}.md. "
+        "Nothing is applied and nothing is committed."
+    )
 
 
 def _split(
@@ -243,6 +310,24 @@ def _run_probes(loop, text: str, all_probes: list[probes.Probe]) -> list[Outcome
         return list(await asyncio.gather(*(one(p) for p in all_probes)))
 
     return loop.run(all_of_them())
+
+
+def _seed_score(result, seed_prompt: str) -> float | None:
+    """What the *current* prompt scored on the valset, for comparison.
+
+    GEPA reports a best program and it is frequently index 0, the seed — the
+    search having found nothing better. `_gate` cannot see that, because it
+    ranks survivors against each other after skipping the seed. None when the
+    seed is not in the pool with a score, in which case there is nothing to
+    compare and the caller says nothing rather than guessing.
+    """
+    from optim.adapter import COMPONENT
+
+    scores = result.val_aggregate_scores or []
+    for i, candidate in enumerate(result.candidates):
+        if candidate[COMPONENT] == seed_prompt and i < len(scores):
+            return scores[i]
+    return None
 
 
 def _gate(loop, result, seed_prompt: str, node: str) -> list[dict]:
@@ -325,21 +410,23 @@ def _report(outcomes: list[Outcome], label: str) -> list[Outcome]:
 @click.option("--node", default="extract", show_default=True)
 def diff(node: str) -> None:
     """What the winner changed, beside the invariants it has to keep."""
-    if not WINNER.exists():
-        raise click.ClickException(f"no candidate at {WINNER} — run `optimize` first")
+    source = winner(node)
+    if not source.exists():
+        raise click.ClickException(f"no candidate at {source} — run `optimize` first")
 
     seed = prompts.get(node)
-    winner = WINNER.read_text(encoding="utf-8").strip()
+    proposed = source.read_text(encoding="utf-8").strip()
 
     for line in difflib.unified_diff(
-        seed.splitlines(), winner.splitlines(),
-        fromfile=f"app/prompts.py::{node}", tofile=str(WINNER), lineterm="",
+        seed.splitlines(), proposed.splitlines(),
+        fromfile=str(prompts.directory() / f"{node}.md"), tofile=str(source),
+        lineterm="",
     ):
         colour = {"+": "green", "-": "red", "@": "cyan"}.get(line[:1] if line[:2] not in ("++", "--") else "")
         click.secho(line, fg=colour)
 
-    click.echo(f"\n{len(seed)} chars -> {len(winner)} "
-               f"({(len(winner) - len(seed)) / len(seed):+.0%})\n")
+    click.echo(f"\n{len(seed)} chars -> {len(proposed)} "
+               f"({(len(proposed) - len(seed)) / len(seed):+.0%})\n")
     click.echo("the invariants this prompt is the only home for:")
     for p in probes.load(node):
         click.echo(f"  - {p.invariant}")
@@ -349,6 +436,123 @@ def diff(node: str) -> None:
         "the probe suite says it still behaves — it does not say the sentence "
         "was doing nothing. Cache rot surfaces turns later, outside anything "
         "measured here."
+    )
+    click.echo(f"\n`apply --node {node}` writes it into {prompts.directory() / f'{node}.md'}.")
+
+
+# ------------------------------------------------------------------------ apply
+
+
+def _git(*args: str) -> str:
+    """git, or "" if this is not a checkout. Never raises."""
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["git", *args],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return done.stdout if done.returncode == 0 else ""
+
+
+@cli.command()
+@click.option("--node", default="extract", show_default=True)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="write over a dirty target, or promote a candidate that scored below the seed",
+)
+def apply(node: str, force: bool) -> None:
+    """Write the gated winner into config/prompts/<node>.md.
+
+    Writes a file and stops. Nothing is staged, nothing is committed, and the
+    thing left behind is a working-tree diff — which is the whole point of the
+    prose living in a tracked file rather than in a Python string literal.
+
+    Three refusals. A promoted prompt must be traceable to a run that cleared
+    the probes (hence a verdict recording `gated: true`); it must not have
+    measured worse than the prompt it replaces (hence `seed_score`); and the
+    diff a human reads must be the one this wrote (hence a clean target).
+    """
+    source = winner(node)
+    if not source.exists():
+        raise click.ClickException(f"no candidate at {source} — run `optimize` first")
+
+    verdict_path = _verdict(node)
+    if not verdict_path.exists():
+        raise click.ClickException(
+            f"no gate verdict at {verdict_path}. {source} exists, but nothing "
+            f"records that it survived the probes — and a candidate that did "
+            f"not clear the gate is exactly what the gate is for. Re-run "
+            f"`optimize --node {node}`."
+        )
+    verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+    if not verdict.get("gated"):
+        raise click.ClickException(f"{verdict_path} does not record a passing gate")
+
+    # A candidate can clear every probe and still be worse than the prompt it
+    # was mutated from: the probes are predicates about failures, not a measure
+    # of quality, and the survivors are ranked against each other. Promoting a
+    # measured regression is the one outcome this whole apparatus exists to
+    # prevent, so it takes --force and says what it costs.
+    seed_score, score = verdict.get("seed_score"), verdict.get("score")
+    if not force and seed_score is not None and score is not None and score < seed_score:
+        raise click.ClickException(
+            f"the winner scored {score:.3f} and the prompt already in "
+            f"config/prompts/{node}.md scored {seed_score:.3f}. The run found "
+            f"nothing better. Applying this promotes a measured regression — "
+            f"pass --force only if you have read the diff and want it anyway."
+        )
+
+    target = prompts.directory() / f"{node}.md"
+    if not target.is_file():
+        raise click.ClickException(f"no prompt at {target} — is CONFIG_DIR right?")
+
+    # `git status --porcelain <path>` is empty for a clean tracked file. Empty
+    # also means "not a git checkout at all", which is why the check is skipped
+    # rather than failed in that case: refusing to work outside a repository
+    # would be a rule about our tooling, not about the prompt.
+    if not force and _git("rev-parse", "--git-dir"):
+        if _git("status", "--porcelain", "--", str(target)).strip():
+            raise click.ClickException(
+                f"{target} has uncommitted changes. Commit or discard them "
+                f"first, so the diff this leaves is the one it wrote — or pass "
+                f"--force if you meant to write over them."
+            )
+
+    proposed = source.read_text(encoding="utf-8").strip()
+    before = target.read_text(encoding="utf-8").strip()
+    if proposed == before:
+        click.echo(f"{target} already says exactly this. Nothing to do.")
+        return
+
+    target.write_text(proposed + "\n", encoding="utf-8")
+
+    # The provenance the file body cannot carry, now that the whole file is the
+    # prompt. A line here is a machine's claim about a score; the commit beside
+    # it is the human's claim about why.
+    notes = prompts.directory() / prompts.NOTES
+    if notes.is_file():
+        stamp = (_git("log", "-1", "--format=%cs") or "").strip() or "undated"
+        with notes.open("a", encoding="utf-8") as fh:
+            fh.write(
+                f"\n- `{node}.md` — GEPA candidate {verdict.get('candidate')}, "
+                f"val {verdict.get('score', 0.0):.3f}, from prompt "
+                f"`{verdict.get('seed_fingerprint')}`. Applied on or after {stamp}.\n"
+            )
+
+    click.secho(f"wrote {target}", fg="green")
+    click.echo(
+        f"\nNothing is staged and nothing is committed. Read it:\n"
+        f"    git diff -- {target}\n"
+        f"Then commit, and put in the message which failure the new wording "
+        f"addresses — that reason is the one thing no run can produce, and the "
+        f"file body can no longer hold a comment."
     )
 
 

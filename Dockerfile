@@ -23,11 +23,17 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+# The prompts and config/config.yaml. Not optional and not mounted-only: an
+# image that can start without them would start with no prompts at all, and the
+# first symptom would be a turn rather than a boot.
+COPY config ./config
 
 EXPOSE 8000
 
-# --reload is the dev loop: app/ is bind-mounted, so an edit on the host
-# restarts the server in place with no rebuild.
+# --reload is the dev loop: app/ and config/ are bind-mounted, so an edit on the
+# host restarts the server in place with no rebuild. config/ is in the list
+# because prompts and config both resolve once per process — without a restart,
+# editing a prompt does nothing and says nothing.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--reload", "--reload-dir", "/srv/app"]
+     "--reload", "--reload-dir", "/srv/app", "--reload-dir", "/srv/config"]

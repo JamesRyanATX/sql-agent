@@ -1,7 +1,7 @@
 {
   "name": "census",
   "invariant": "Neither kind is a census.",
-  "cites": "app/prompts.py EXTRACT_SYSTEM; CLAUDE.md, the five traps",
+  "cites": "config/prompts/extract.md; CLAUDE.md, the five traps",
   "why": "A row count is this query's answer, not a fact about the schema. It goes stale the instant a row changes and nothing ever revisits it to check, so a cached '1,840 active customers' is wrong forever and silently. The findings here hand the model the numbers on a plate — copying them across is the failure, and the paragraph forbidding it costs tokens on every turn while paying off only in a failure that surfaces turns later, which is exactly the shape a cost objective deletes.",
   "predicate": "no_census",
   "case": {

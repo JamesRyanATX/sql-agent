@@ -1,7 +1,7 @@
 {
   "name": "scope_creep",
   "invariant": "Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.",
-  "cites": "app/prompts.py EXTRACT_SYSTEM; migrations/002_connections.sql, the (connection_id, name) unique index",
+  "cites": "config/prompts/extract.md; migrations/002_connections.sql, the (connection_id, name) unique index",
   "why": "Named entries upsert. Reusing `revenue` for a region-scoped definition replaces the general recipe, and store.write_entries reports success — so the damage is silent, durable, and compounds across every later question that composes revenue. This is the invariant with the longest feedback loop in the system: the write looks fine, and the wrong answer arrives turns or sessions later. Reusing the name to genuinely refine the same concept is correct and is not what this checks; acquiring a scope it did not have is.",
   "predicate": "no_scope_creep",
   "args": {

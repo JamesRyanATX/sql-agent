@@ -1,4 +1,12 @@
 .env
+# direnv. A fact about one machine — on NixOS it puts nix-ld's libstdc++ on
+# LD_LIBRARY_PATH so greenlet's compiled extension loads. See CLAUDE.md.
+.envrc
+.direnv/
+# config/config.yaml *is* tracked — it holds the demo defaults, and a fresh
+# clone has to be able to run. This is the local overlay deep-merged over it,
+# which is where a machine-specific model endpoint goes. Same bargain .env makes.
+config/config.local.yaml
 .venv/
 __pycache__/
 *.py[cod]

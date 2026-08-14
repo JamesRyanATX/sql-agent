@@ -43,44 +43,24 @@ class Settings(BaseSettings):
     # makes above. See app/secrets.py for what this does and does not buy.
     connection_secret: str = ""
 
-    # "anthropic" is the demo model. "openai_compat" points at any OpenAI-shaped
-    # endpoint (Ollama, vLLM, LM Studio) for local development.
-    provider: str = "anthropic"
-
+    # --- model credentials -------------------------------------------------
+    # *Which* model, at what effort, with what bounds, is config/config.yaml —
+    # see app/config.py. What stays here is the half that must never be in a
+    # tracked file: the keys.
     anthropic_api_key: str = ""  # falls back to the SDK's own env resolution
-    model: str = "claude-opus-5"
-
-    openai_base_url: str = "http://localhost:11434/v1"
-    openai_model: str = ""
     openai_api_key: str = "not-needed"
-    openai_timeout: float = 900.0  # a 27B local model takes minutes, not seconds
 
-    # Generation controls for local reasoning models. A thinking model handed an
-    # open-ended question will happily spend ten minutes deliberating before its
-    # first tool call, so the ceiling on output tokens is the ceiling on wall
-    # clock. Caps the per-call max_tokens the nodes ask for.
-    openai_max_tokens: int = 16_000
-    # Sent only if set — support varies by server and model.
-    openai_reasoning_effort: str = ""
-
-    # Per-node effort. See PLAN.md §7.1: lowering effort is how we make a node
-    # cheap. Disabling thinking is not — on Opus 5 that can turn a tool call
-    # into plain visible text that never runs, which would silently break the
-    # explore loop.
-    effort_plan: str = "low"
-    effort_explore: str = "high"
-    effort_sql: str = "high"
-    effort_extract: str = "low"
-
-    # A directory of `<node>.txt` files overriding the instruction blocks in
-    # app/prompts.py — the seam the prompt optimiser writes a candidate through,
-    # and the only way to run one without editing source. Empty is the deployed
-    # state: the prose in git is what ships, and promoting a candidate is a
-    # human editing that file and writing the comment saying why.
+    # --- where the config lives ---------------------------------------------
+    # The directory holding config.yaml, the optional config.local.yaml, and
+    # prompts/. An environment variable because *where* the config is cannot
+    # itself be config, and because the test suite and the optimiser need to
+    # point a process at a scratch copy.
     #
-    # Read once per process, never per turn. See app/prompts.py for why that is
-    # an invariant rather than an optimisation.
-    prompt_dir: str = ""
+    # This replaced PROMPT_DIR, which named a directory of overrides layered on
+    # constants in source. There are no constants now: config/prompts/*.md is
+    # the prose, so an override seam and a source of truth were the same thing
+    # wearing two names.
+    config_dir: str = "config"
 
     # --- observability -----------------------------------------------------
     # Tracing is on when both keys are set and off otherwise. There is
@@ -102,16 +82,6 @@ class Settings(BaseSettings):
     # but a refusal mid-demo is unrecoverable, and the cost of having it on is
     # zero when it never fires. Turn off if the account lacks the beta.
     use_fallbacks: bool = True
-
-    # Bounds, so T1 doesn't run forever on stage.
-    max_tool_calls: int = 24
-    max_fix_attempts: int = 3
-    # Milliseconds, an integer, because that is the only unit all three
-    # supported dialects can be told. It was the string "5s" — a Postgres
-    # interval literal, which MySQL parses as neither a number nor an error.
-    # See app/dialects.py for what each one does with it.
-    statement_timeout_ms: int = 5_000
-    max_rows: int = 50  # rows handed back to the model from execute
 
     # Per-target pools. Small and short-lived by default: these are somebody
     # else's databases, and a registry of ten should not mean ten idle sockets.

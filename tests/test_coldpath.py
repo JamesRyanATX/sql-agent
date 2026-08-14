@@ -17,6 +17,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from app import db, graph, llm, store
+from app.config import config
 from app.settings import settings
 from tests.conftest import DEFAULT_CONNECTION
 
@@ -173,7 +174,7 @@ async def test_a_broken_query_is_fixed_and_retried(pool, monkeypatch):
 
 async def test_the_fix_loop_is_bounded(pool, monkeypatch):
     """Otherwise a query the model can't fix loops forever on stage."""
-    monkeypatch.setattr(settings(), "max_fix_attempts", 2)
+    monkeypatch.setattr(config(), "max_fix_attempts", 2)
     model = ScriptedModel(
         text_result("findings"),
         json_result({"sql": "SELECT nope FROM orders", "assumptions": []}),
@@ -226,7 +227,7 @@ async def test_a_result_that_fills_the_page_says_so(pool, monkeypatch):
     """`fetchmany(max_rows)` cannot tell a full page from a result that happened
     to be exactly that long, so `capped` is the only honest thing to send: the
     client can say "more matched" but never a total nobody counted."""
-    monkeypatch.setattr(settings(), "max_rows", 4)
+    monkeypatch.setattr(config(), "max_rows", 4)
     model = ScriptedModel(
         text_result("generate_series again, this time past the cap"),
         json_result(
@@ -246,7 +247,7 @@ async def test_a_result_that_fills_the_page_says_so(pool, monkeypatch):
 
 async def test_exploration_is_capped(pool, monkeypatch):
     """T1 has to be expensive, but it also has to end."""
-    monkeypatch.setattr(settings(), "max_tool_calls", 3)
+    monkeypatch.setattr(config(), "max_tool_calls", 3)
     model = ScriptedModel(
         *[tool_result("list_tables", {}) for _ in range(3)],
         text_result("ran out of budget; customer table looks relevant"),
@@ -265,7 +266,7 @@ async def test_exploration_is_capped(pool, monkeypatch):
 async def test_hitting_the_cap_still_produces_findings(pool, monkeypatch):
     """Exiting on the budget rather than voluntarily must not hand generate_sql
     "(no findings)" — it would write SQL blind."""
-    monkeypatch.setattr(settings(), "max_tool_calls", 1)
+    monkeypatch.setattr(config(), "max_tool_calls", 1)
     model = ScriptedModel(
         tool_result("list_tables", {}),
         text_result("budget spent; customer has a deleted_at column"),
@@ -554,7 +555,7 @@ async def test_hits_are_credited_only_when_the_answer_worked(pool, monkeypatch):
     assert await hits_now() == (0, None)
 
     # A turn that fails outright credits nothing.
-    monkeypatch.setattr(settings(), "max_fix_attempts", 0)
+    monkeypatch.setattr(config(), "max_fix_attempts", 0)
     model = ScriptedModel(
         json_result(
             {
@@ -571,7 +572,7 @@ async def test_hits_are_credited_only_when_the_answer_worked(pool, monkeypatch):
     assert await hits_now() == (0, None)
 
     # A turn that answers credits the entries it leaned on.
-    monkeypatch.setattr(settings(), "max_fix_attempts", 3)
+    monkeypatch.setattr(config(), "max_fix_attempts", 3)
     model = ScriptedModel(
         json_result(
             {
@@ -756,7 +757,7 @@ async def test_a_failed_extraction_does_not_lose_the_answer(pool, monkeypatch):
 
 async def test_nothing_is_learned_from_a_query_that_never_ran(pool, monkeypatch):
     """A failed turn has no evidence, so it must not write recipes."""
-    monkeypatch.setattr(settings(), "max_fix_attempts", 1)
+    monkeypatch.setattr(config(), "max_fix_attempts", 1)
     model = ScriptedModel(
         text_result("findings"),
         json_result({"sql": "SELECT nope FROM orders", "assumptions": []}),

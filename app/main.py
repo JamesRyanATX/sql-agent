@@ -2,20 +2,69 @@ import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from app import db, store, tracing
+from app import config as config_module
+from app import db, prompts, store, tracing
 from app.api import router as v1
+from app.config import config
 from app.graph import build_graph
 from app.settings import settings
 
 log = logging.getLogger(__name__)
 
+# Environment variables that used to configure something and now do not. They
+# moved into config/config.yaml when "which model, how hard, within what
+# bounds" stopped being one flat namespace with the database URLs and the
+# secrets. Kept as a list rather than deleted quietly, because `extra="ignore"`
+# makes a retired name and a typo'd name look identical from in here.
+RETIRED = {
+    "PROVIDER",
+    "MODEL",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "OPENAI_TIMEOUT",
+    "OPENAI_MAX_TOKENS",
+    "OPENAI_REASONING_EFFORT",
+    "EFFORT_PLAN",
+    "EFFORT_EXPLORE",
+    "EFFORT_SQL",
+    "EFFORT_EXTRACT",
+    "MAX_TOOL_CALLS",
+    "MAX_FIX_ATTEMPTS",
+    "MAX_ROWS",
+    "STATEMENT_TIMEOUT",
+    "STATEMENT_TIMEOUT_MS",
+    "PROMPT_DIR",
+}
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # First, and deliberately unguarded: read the config and the prompts. Both
+    # are memoised for the life of the process, so the alternative to failing
+    # here is failing on the first model call of the first turn — which on a
+    # demo is the worst possible moment to discover that CONFIG_DIR is wrong or
+    # that a prompt file is empty. Boot is where a config error belongs.
+    resolved = config()
+    prompts.fingerprint()
+    if (local := config_module.overlay()) is not None:
+        # A warning rather than an info, for the reason the tracing line below
+        # is one: uvicorn configures handlers for its own loggers only, so
+        # anything below WARNING from here is dropped, and a startup line nobody
+        # sees is not information. And this one earns it — the overlay is
+        # untracked, so the model actually answering questions is not the one
+        # config/config.yaml says ships, and that should never be a surprise.
+        log.warning(
+            "%s is overlaying config.yaml — running %s/%s",
+            local,
+            resolved.model.provider,
+            resolved.model.model,
+        )
+
     agent_pool = await db.open_pools()
     # Checkpoints are the agent's own state, so they belong on the agent's
     # server — never on the database it is answering questions about.
@@ -39,13 +88,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # agent has learned about it, so this should never be a surprise.
         log.warning("API_TOKEN is unset — /v1 is open and unauthenticated")
 
-    if "STATEMENT_TIMEOUT" in os.environ:
-        # `Settings` has extra="ignore", so the old name is not an error — it is
-        # silently dropped and the default quietly applies. A timeout that
-        # stopped being the one you configured should say so.
+    # `Settings` has extra="ignore", so a retired name is not an error — it is
+    # silently dropped and the default quietly applies. Every one of these used
+    # to configure something, and a value that stopped being the one you set
+    # should say so. `config/config.yaml` is where they went; the two API keys
+    # stayed in the environment, because a tracked file must not hold a secret.
+    retired = sorted(RETIRED & os.environ.keys())
+    if retired:
         log.warning(
-            "STATEMENT_TIMEOUT is set and no longer read — it is "
-            "STATEMENT_TIMEOUT_MS now, an integer count of milliseconds"
+            "%s set and no longer read — these moved to %s. See its comments "
+            "for the new key names; `statement_timeout_ms` is still an integer "
+            "count of milliseconds.",
+            ", ".join(retired),
+            Path(settings().config_dir) / "config.yaml",
         )
 
     if not settings().connection_secret:

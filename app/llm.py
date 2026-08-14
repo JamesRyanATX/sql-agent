@@ -7,6 +7,12 @@ Two backends behind one `complete()`:
 - **openai_compat** — any OpenAI-shaped endpoint, including Ollama. For local
   development when the Anthropic key isn't available.
 
+Which of the two a call uses is `config/config.yaml`, resolved per `node=`: a
+global `model:` block, and an optional override on any node. That is why
+`assistant_turn()` and `tool_results()` take a `node` — they pick a wire format,
+and the wire format is a property of the node's backend, not of the process.
+Reading the global provider there was correct only while there was one.
+
 Nodes never see the difference. Messages are built with `assistant_turn()` and
 `tool_results()` rather than literal dicts, because the two wire formats
 disagree about how a tool result is represented.
@@ -30,6 +36,7 @@ import anthropic
 import httpx
 
 from app import tracing
+from app.config import Model, config
 from app.settings import settings
 
 # Generous, and deliberately so: on Opus 5 max_tokens caps thinking *plus*
@@ -45,7 +52,10 @@ _EMIT = "respond"
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 _anthropic_client: anthropic.AsyncAnthropic | None = None
-_http: httpx.AsyncClient | None = None
+# Keyed by (url, timeout), because a per-node override may name another endpoint
+# and httpx binds base_url and timeout to the client. Two nodes on one endpoint
+# still share one connection pool, which is the reason not to build these per call.
+_http: dict[tuple[str, float], httpx.AsyncClient] = {}
 
 
 class Refusal(Exception):
@@ -89,9 +99,16 @@ class Result:
 # ------------------------------------------------------------------- message API
 
 
-def assistant_turn(result: Result) -> dict[str, Any]:
-    """The assistant turn to append before handing back tool results."""
-    if settings().provider == "anthropic":
+def assistant_turn(result: Result, *, node: str) -> dict[str, Any]:
+    """The assistant turn to append before handing back tool results.
+
+    `node` for the same reason `complete()` takes one: it decides the backend,
+    and the two backends disagree about the shape of an assistant turn. Reading
+    a global provider here would build Anthropic's shape for a node overridden
+    to openai_compat, and the explore loop is the only caller — so the failure
+    would be the loop, every time, on the second iteration.
+    """
+    if config().model_for(node).provider == "anthropic":
         return {"role": "assistant", "content": result.raw}
     return {
         "role": "assistant",
@@ -107,14 +124,16 @@ def assistant_turn(result: Result) -> dict[str, Any]:
     }
 
 
-def tool_results(items: list[tuple[str, str, bool]]) -> list[dict[str, Any]]:
+def tool_results(
+    items: list[tuple[str, str, bool]], *, node: str
+) -> list[dict[str, Any]]:
     """Tool outputs as messages. `items` is (tool_use_id, payload, is_error).
 
     Anthropic wants every result in a *single* user message — splitting them
     trains the model out of calling tools in parallel. OpenAI wants one `tool`
-    message each.
+    message each. `node` picks the backend, as in `assistant_turn()`.
     """
-    if settings().provider == "anthropic":
+    if config().model_for(node).provider == "anthropic":
         return [
             {
                 "role": "user",
@@ -169,6 +188,7 @@ def _strip_pre_fallback(content: list[Any]) -> list[Any]:
 
 async def _complete_anthropic(
     *,
+    spec: Model,
     system: str,
     messages: list[dict[str, Any]],
     effort: str,
@@ -192,7 +212,7 @@ async def _complete_anthropic(
         ]
 
     kwargs: dict[str, Any] = {
-        "model": settings().model,
+        "model": spec.model,
         "max_tokens": max_tokens,
         "system": system_param,
         "messages": messages,
@@ -238,17 +258,20 @@ async def _complete_anthropic(
 # ----------------------------------------------------------------- openai_compat
 
 
-def _http_client() -> httpx.AsyncClient:
-    global _http
-    if _http is None:
-        _http = httpx.AsyncClient(
-            base_url=settings().openai_base_url,
+def _http_client(spec: Model) -> httpx.AsyncClient:
+    """One client per endpoint. The key is in env; the address is in the yaml."""
+    key = (spec.url or "", spec.timeout)
+    client = _http.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=spec.url or "",
             # A 27B model on consumer hardware takes minutes per call, not
             # seconds. The default 5s read timeout would fail every request.
-            timeout=httpx.Timeout(settings().openai_timeout, connect=10.0),
+            timeout=httpx.Timeout(spec.timeout, connect=10.0),
             headers={"authorization": f"Bearer {settings().openai_api_key}"},
         )
-    return _http
+        _http[key] = client
+    return client
 
 
 # Our five effort levels onto the three an OpenAI-compatible server accepts.
@@ -263,6 +286,7 @@ _EFFORT = {
 
 async def _complete_openai(
     *,
+    spec: Model,
     system: str,
     messages: list[dict[str, Any]],
     effort: str,
@@ -271,20 +295,23 @@ async def _complete_openai(
     max_tokens: int,
 ) -> Result:
     body: dict[str, Any] = {
-        "model": settings().openai_model,
+        "model": spec.model,
         # Local models don't need Opus 5's headroom for adaptive thinking, and
         # the ceiling on output tokens is the ceiling on wall clock.
-        "max_tokens": min(max_tokens, settings().openai_max_tokens),
+        "max_tokens": min(max_tokens, spec.max_tokens),
         "messages": [{"role": "system", "content": system}, *messages],
     }
     # Per-node effort applies here too. Without it a reasoning model has no
     # brake: the `plan` node is configured `low` precisely because a cached
     # turn should be cheap, and a live run that ignored it spent 14,339 output
     # tokens deliberating — making the cached path *more* expensive than the
-    # exploration it replaced. A settings override wins if set.
-    chosen = settings().openai_reasoning_effort or _EFFORT.get(effort, "medium")
-    if chosen:
-        body["reasoning_effort"] = chosen
+    # exploration it replaced.
+    #
+    # There used to be an OPENAI_REASONING_EFFORT that overrode every node at
+    # once. It is gone: the per-node values in config/config.yaml are what it
+    # was reaching for, and a global override of a per-node setting can only
+    # ever be a way to lose the distinction.
+    body["reasoning_effort"] = _EFFORT.get(effort, "medium")
 
     if schema is not None:
         # Structured output as a forced tool call. `response_format` and the
@@ -325,7 +352,7 @@ async def _complete_openai(
             for t in tools
         ]
 
-    resp = await _http_client().post("/chat/completions", json=body)
+    resp = await _http_client(spec).post("/chat/completions", json=body)
     if resp.status_code >= 400:
         # Not `raise_for_status()`. It reports the status and the URL and throws
         # the body away — and the body is the entire diagnosis. A local server
@@ -333,7 +360,7 @@ async def _complete_openai(
         # to MDN, which sends you looking at the network instead of at the one
         # key it did not like.
         raise LlmError(
-            f"{resp.status_code} from {settings().openai_base_url}"
+            f"{resp.status_code} from {spec.url}"
             f"/chat/completions: {resp.text[:500]}"
         )
     data = resp.json()
@@ -401,22 +428,25 @@ async def complete(
     `effort` and `cache_system` are Anthropic-only and ignored elsewhere — an
     OpenAI-compatible endpoint has no equivalent of either.
 
-    `node` names the caller for the trace, and is the only reason this function
-    knows the graph exists. Being the one place that talks to a model makes this
-    also the one place a generation is opened: both backends, and every iteration
-    of the explore loop, whose per-call cost is otherwise summed away inside the
-    node before anything can see it. The wrapper goes here rather than in the two
-    `_complete_*` functions so there is one thing to keep in step, not two.
+    `node` names the caller for the trace, selects the prompt in `app/prompts.py`
+    and now selects the model too — it is the one string that ties a graph node
+    to everything configurable about it. Being the one place that talks to a
+    model makes this also the one place a generation is opened: both backends,
+    and every iteration of the explore loop, whose per-call cost is otherwise
+    summed away inside the node before anything can see it. The wrapper goes here
+    rather than in the two `_complete_*` functions so there is one thing to keep
+    in step, not two.
     """
     assert not (tools and schema), "a structured call takes no tools"
-    anthropic_backend = settings().provider == "anthropic"
+    spec = config().model_for(node)
+    anthropic_backend = spec.provider == "anthropic"
 
     with tracing.generation(
         name=node,
-        model=settings().model if anthropic_backend else settings().openai_model,
+        model=spec.model,
         input={"system": system, "messages": messages},
         metadata={
-            "provider": settings().provider,
+            "provider": spec.provider,
             "effort": effort,
             "cache_system": cache_system,
             "structured": schema is not None,
@@ -426,6 +456,7 @@ async def complete(
     ) as gen:
         if anthropic_backend:
             result = await _complete_anthropic(
+                spec=spec,
                 system=system,
                 messages=messages,
                 effort=effort,
@@ -436,6 +467,7 @@ async def complete(
             )
         else:
             result = await _complete_openai(
+                spec=spec,
                 system=system,
                 messages=messages,
                 effort=effort,
@@ -463,7 +495,6 @@ async def complete(
 
 
 async def aclose() -> None:
-    global _http
-    if _http is not None:
-        await _http.aclose()
-        _http = None
+    for client in _http.values():
+        await client.aclose()
+    _http.clear()

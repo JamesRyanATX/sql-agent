@@ -31,6 +31,7 @@ from typing import Any, Sequence
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 
 from app import llm
+from app.config import config
 from optim import metric_extract as metric
 from optim.cases import ExtractCase
 from optim.replay import Replayed, replay
@@ -184,9 +185,12 @@ class ExtractAdapter(GEPAAdapter):
 def reflection_lm(loop: Loop) -> Any:
     """GEPA's teacher, over the same seam every other model call uses.
 
-    Max effort deliberately: this runs a few dozen times against a whole
-    reflective dataset, and it is the step that decides what the next candidate
-    says. It is the one place in this project where thinking is worth the money.
+    Max effort by default, and `config/config.yaml`'s `gepa:` block if it says
+    otherwise: this runs a few dozen times against a whole reflective dataset,
+    and it is the step that decides what the next candidate says. It is the one
+    place in this project where thinking is worth the money — and the one call
+    that is not part of a turn, which is why it gets its own block rather than
+    borrowing a node's.
     """
 
     def call(prompt: str | list[dict[str, Any]]) -> str:
@@ -199,7 +203,7 @@ def reflection_lm(loop: Loop) -> Any:
             llm.complete(
                 system=REFLECT_SYSTEM,
                 messages=messages,
-                effort="max",
+                effort=config().effort_for("gepa.reflect", "max"),
                 node="gepa.reflect",
             )
         )

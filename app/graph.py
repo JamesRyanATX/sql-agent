@@ -27,8 +27,8 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from app import db, llm, prompts, store, tools, tracing
+from app.config import config
 from app.events import to_events
-from app.settings import settings
 
 
 def _add(a: int, b: int) -> int:
@@ -303,7 +303,7 @@ async def plan(state: TurnState) -> TurnState:
             f"{render_cache(cache)}"
         ),
         messages=[{"role": "user", "content": f"Question: {state['question']}"}],
-        effort=settings().effort_plan,
+        effort=config().effort_for("plan"),
         schema=PLAN_SCHEMA,
         cache_system=True,
         node="plan",
@@ -366,11 +366,11 @@ async def explore(state: TurnState) -> TurnState:
     result: llm.Result | None = None
 
     async with db.target(state["connection_id"]) as conn:
-        while calls < settings().max_tool_calls:
+        while calls < config().max_tool_calls:
             result = await llm.complete(
                 system=system,
                 messages=messages,
-                effort=settings().effort_explore,
+                effort=config().effort_for("explore"),
                 tools=tools.SCHEMAS,
                 node="explore",
             )
@@ -380,7 +380,7 @@ async def explore(state: TurnState) -> TurnState:
             if not result.tool_uses:
                 break
 
-            messages.append(llm.assistant_turn(result))
+            messages.append(llm.assistant_turn(result, node="explore"))
             outcomes: list[tuple[str, str, bool]] = []
             for call in result.tool_uses:
                 calls += 1
@@ -401,19 +401,20 @@ async def explore(state: TurnState) -> TurnState:
                     }
                 )
                 outcomes.append((call.id, payload, is_error))
-            messages.extend(llm.tool_results(outcomes))
+            messages.extend(llm.tool_results(outcomes, node="explore"))
 
         # Hitting the cap means the model was mid-investigation and never got
         # to write its summary. Ask for it explicitly rather than handing
         # generate_sql "(no findings)" and letting it write SQL blind.
         if result is not None and result.tool_uses:
-            messages.append(llm.assistant_turn(result))
+            messages.append(llm.assistant_turn(result, node="explore"))
             messages.extend(
                 llm.tool_results(
                     [
                         (t.id, json.dumps({"error": "exploration budget spent"}), True)
                         for t in result.tool_uses
-                    ]
+                    ],
+                    node="explore",
                 )
             )
             messages.append(
@@ -428,7 +429,7 @@ async def explore(state: TurnState) -> TurnState:
             result = await llm.complete(
                 system=system,
                 messages=messages,
-                effort=settings().effort_explore,
+                effort=config().effort_for("explore"),
                 node="explore.summary",
             )
             tokens_in += result.tokens_in
@@ -458,7 +459,7 @@ async def generate_sql(state: TurnState) -> TurnState:
                 ),
             }
         ],
-        effort=settings().effort_sql,
+        effort=config().effort_for("generate_sql"),
         schema=SQL_SCHEMA,
         node="generate_sql",
     )
@@ -513,7 +514,7 @@ async def execute(state: TurnState) -> TurnState:
                 # pool on exit and the result closes with it. dict(m) because
                 # RowMapping is dict-*like* and json.dumps will not serialise it.
                 fetched = (
-                    [dict(m) for m in result.mappings().fetchmany(settings().max_rows)]
+                    [dict(m) for m in result.mappings().fetchmany(config().max_rows)]
                     if result.returns_rows
                     else []
                 )
@@ -532,7 +533,7 @@ async def execute(state: TurnState) -> TurnState:
                 # `fetchmany(max_rows)` cannot tell a full page from a result
                 # that happened to be exactly that long, so the honest thing a
                 # client can say is "more may exist" — never a total we never had.
-                "capped": len(rows) == settings().max_rows,
+                "capped": len(rows) == config().max_rows,
             }
         )
         return {"rows": rows, "error": ""}
@@ -561,7 +562,7 @@ async def fix(state: TurnState) -> TurnState:
                 ),
             }
         ],
-        effort=settings().effort_sql,
+        effort=config().effort_for("fix"),
         schema=FIX_SCHEMA,
         node="fix",
     )
@@ -756,7 +757,7 @@ async def extract(state: TurnState) -> TurnState:
                     ),
                 }
             ],
-            effort=settings().effort_extract,
+            effort=config().effort_for("extract"),
             schema=EXTRACT_SCHEMA,
             node="extract",
         )
@@ -833,7 +834,7 @@ async def answer(state: TurnState) -> TurnState:
                     ),
                 }
             ],
-            effort=settings().effort_extract,
+            effort=config().effort_for("answer"),
             node="answer",
         )
         text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
@@ -892,7 +893,7 @@ def route_after_plan(state: TurnState) -> str:
 
 def route_after_execute(state: TurnState) -> str:
     if state.get("error"):
-        if state.get("fix_attempts", 0) < settings().max_fix_attempts:
+        if state.get("fix_attempts", 0) < config().max_fix_attempts:
             return "fix"
         return "answer"  # gave up; nothing worth learning from a query that never ran
     return "extract"

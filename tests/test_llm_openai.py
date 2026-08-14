@@ -14,7 +14,22 @@ import httpx
 import pytest
 
 from app import graph, llm
-from app.settings import settings
+from app.config import Config, Model
+
+
+def use_openai(monkeypatch, *, model: str = "qwen-test") -> Config:
+    """Point every node at one openai_compat endpoint.
+
+    Which backend a call uses is `config/config.yaml` now, not PROVIDER — and
+    `llm` does `from app.config import config`, so the name to patch is the one
+    it holds. A whole config file for a request-shape test would be ceremony;
+    what these pin is the body, and the body is a function of the spec alone.
+    """
+    loaded = Config(
+        model=Model(provider="openai_compat", model=model, url="http://test/v1")
+    )
+    monkeypatch.setattr(llm, "config", lambda: loaded)
+    return loaded
 
 
 def capture(monkeypatch, response: httpx.Response) -> dict:
@@ -27,10 +42,13 @@ def capture(monkeypatch, response: httpx.Response) -> dict:
         sent.update(json.loads(request.content))
         return response
 
+    # Takes the spec `complete()` resolved from the node, and ignores it: what
+    # is under test is the body, and the address it would have gone to is the
+    # one thing a MockTransport cannot honour anyway.
     monkeypatch.setattr(
         llm,
         "_http_client",
-        lambda: httpx.AsyncClient(
+        lambda spec: httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url="http://test/v1"
         ),
     )
@@ -63,41 +81,33 @@ async def test_a_forced_schema_call_uses_the_string_tool_choice(monkeypatch):
     of the two is universally implemented. LM Studio answers the named form with
     `400 Invalid tool_choice type: 'object'`, which is how this was found.
     """
-    monkeypatch.setenv("PROVIDER", "openai_compat")
-    settings.cache_clear()
-    try:
-        sent = capture(monkeypatch, httpx.Response(200, json=OK))
-        await llm.complete(
-            system="s", messages=[{"role": "user", "content": "q"}],
-            schema=graph.PLAN_SCHEMA, effort="low", max_tokens=100,
-        )
-        assert sent["tool_choice"] == "required"
-        # And the equivalence it rests on: exactly one tool is offered, so
-        # "required" cannot select anything else.
-        assert [t["function"]["name"] for t in sent["tools"]] == [llm._EMIT]
-    finally:
-        settings.cache_clear()
+    use_openai(monkeypatch)
+    sent = capture(monkeypatch, httpx.Response(200, json=OK))
+    await llm.complete(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        schema=graph.PLAN_SCHEMA, effort="low", max_tokens=100,
+    )
+    assert sent["tool_choice"] == "required"
+    # And the equivalence it rests on: exactly one tool is offered, so
+    # "required" cannot select anything else.
+    assert [t["function"]["name"] for t in sent["tools"]] == [llm._EMIT]
 
 
 async def test_ordinary_tool_calls_do_not_force_anything(monkeypatch):
     """`explore` offers four tools and must be free to answer without calling
     one — that is how the loop ends."""
-    monkeypatch.setenv("PROVIDER", "openai_compat")
-    settings.cache_clear()
-    try:
-        sent = capture(monkeypatch, httpx.Response(200, json={
-            "choices": [{"message": {"content": "hi"}}], "usage": {},
-        }))
-        from app.tools import SCHEMAS
+    use_openai(monkeypatch)
+    sent = capture(monkeypatch, httpx.Response(200, json={
+        "choices": [{"message": {"content": "hi"}}], "usage": {},
+    }))
+    from app.tools import SCHEMAS
 
-        await llm.complete(
-            system="s", messages=[{"role": "user", "content": "q"}],
-            tools=SCHEMAS, effort="high", max_tokens=100,
-        )
-        assert "tool_choice" not in sent
-        assert len(sent["tools"]) == len(SCHEMAS)
-    finally:
-        settings.cache_clear()
+    await llm.complete(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        tools=SCHEMAS, effort="high", max_tokens=100,
+    )
+    assert "tool_choice" not in sent
+    assert len(sent["tools"]) == len(SCHEMAS)
 
 
 async def test_a_rejected_request_reports_what_the_server_said(monkeypatch):
@@ -105,18 +115,14 @@ async def test_a_rejected_request_reports_what_the_server_said(monkeypatch):
     away — and the body is the entire diagnosis. "400 Bad Request for url ..."
     plus a link to MDN sends you looking at the network instead of at the one
     field the server did not like."""
-    monkeypatch.setenv("PROVIDER", "openai_compat")
-    settings.cache_clear()
-    try:
-        capture(monkeypatch, httpx.Response(
-            400, json={"error": "Invalid tool_choice type: 'object'."}
-        ))
-        with pytest.raises(llm.LlmError) as e:
-            await llm.complete(
-                system="s", messages=[{"role": "user", "content": "q"}],
-                effort="low", max_tokens=100,
-            )
-        assert "Invalid tool_choice" in str(e.value)
-        assert "400" in str(e.value)
-    finally:
-        settings.cache_clear()
+    use_openai(monkeypatch)
+    capture(monkeypatch, httpx.Response(
+        400, json={"error": "Invalid tool_choice type: 'object'."}
+    ))
+    with pytest.raises(llm.LlmError) as e:
+        await llm.complete(
+            system="s", messages=[{"role": "user", "content": "q"}],
+            effort="low", max_tokens=100,
+        )
+    assert "Invalid tool_choice" in str(e.value)
+    assert "400" in str(e.value)
