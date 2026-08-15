@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from click.testing import CliRunner
 
-from sql_agent_cli.main import cli
+from sql_agent.main import cli
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def spy(monkeypatch):
 
         return fake
 
-    from sql_agent_cli import connections, main, memory
+    from sql_agent import connections, main, memory
 
     monkeypatch.setattr(main, "_ask", record("ask"))
     monkeypatch.setattr(connections, "_connect", record("connect"))

@@ -8,7 +8,7 @@ and "don't import app" is the kind of rule that holds until somebody needs one
 convenient function at 6pm.
 
 So it is a test, in the register of tests/test_traps.py: the packaging already
-makes it true (the wheel ships `sql_agent_cli` and nothing else), and this says
+makes it true (the wheel ships `sql_agent` and nothing else), and this says
 so out loud in the place where it would be broken.
 
 Two more live here now, on the same argument. `langfuse` is import-legal in
@@ -26,7 +26,7 @@ import pathlib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CLI = ROOT / "sql_agent_cli"
+CLI = ROOT / "cli" / "sql_agent"
 APP = ROOT / "app"
 MODULES = sorted(CLI.glob("*.py"))
 SHIPPED = sorted(APP.glob("*.py")) + MODULES

@@ -1,29 +1,14 @@
 """`config/config.yaml`: which model, at what effort, within what bounds.
 
-The other half of `app/settings.py`, and separate from it on purpose. Two
-sources became two objects so that a call site says which one it reads:
-`config().max_tool_calls` came out of a tracked file a human edits and reviews,
-`settings().api_token` came out of the environment. Folding the yaml in as a
-low-priority pydantic-settings source would have made those indistinguishable at
-every call site, and would have left a stale `EFFORT_PLAN=low` in somebody's
-`.env` silently beating the file they were editing.
-
-Which is why the environment variables this replaced are *gone* rather than
-demoted. `Settings` has `extra="ignore"`, so a retired name is dropped in
-silence and the default quietly applies — `app/main.py` warns about every one of
-them at startup for that reason.
-
-Three layers, and the third is optional:
+Behaviour. Secrets and addresses are `app/settings.py`, and they are two objects
+so a call site says which it reads.
 
     config/config.yaml        tracked. The demo defaults: Anthropic, claude-opus-5.
     config/config.local.yaml  gitignored, deep-merged over it. Your local model.
-    CONFIG_DIR                where both of those are. An env var, because where
-                              the config lives cannot itself be config.
+    CONFIG_DIR                where both of those are.
 
-`extra="forbid"` at every level, so a key naming nothing is an error. That is
-what makes it safe to put node names at the top level beside settings: `explor:`
-cannot be mistaken for a node this file does not know about, because there is no
-such thing — the six are declared fields.
+`extra="forbid"` at every level, which is what makes it safe to put node names at
+the top level beside settings: a typo is an error, not a key configuring nothing.
 """
 
 from __future__ import annotations
@@ -47,32 +32,21 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # `openai_compat` is any OpenAI-shaped endpoint (Ollama, vLLM, LM Studio).
-    # A Literal because `llm.py` used to test `== "anthropic"` and treat
-    # everything else as OpenAI-compatible, which made `openai_compatible` work
-    # by accident and `anthropi` work by accident in the other direction.
+    # A Literal so a misspelled provider is an error rather than a silent fallback.
     provider: Literal["anthropic", "openai_compat"] = "anthropic"
     model: str = "claude-opus-5"
 
     # openai_compat only; ignored by the Anthropic backend, which has one address.
     url: str | None = None
 
-    # A thinking model handed an open-ended question will happily spend ten
-    # minutes deliberating before its first tool call, so the ceiling on output
-    # tokens is the ceiling on wall clock.
+    # For a thinking model the ceiling on output tokens is the ceiling on wall clock.
     max_tokens: int = 16_000
     # A 27B local model takes minutes, not seconds.
     timeout: float = 900.0
 
     @model_validator(mode="after")
     def _endpoint_is_known(self) -> Model:
-        """`openai_compat` has no default address, and must not invent one.
-
-        There is no such thing as *the* OpenAI-compatible endpoint, and the
-        obvious default is the worst one: `localhost` from inside the api
-        container is the api container, so a turn would fail on connect with an
-        error about the wrong machine. Saying so while reading the file costs a
-        line; finding it out mid-turn costs the demo.
-        """
+        """`openai_compat` has no default address, and must not invent one."""
         if self.provider == "openai_compat" and not self.url:
             raise ValueError(
                 "provider: openai_compat needs a url — there is no default "
@@ -87,10 +61,9 @@ class Node(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # See PLAN.md §7.1: lowering effort is how a node is made cheap. Disabling
-    # thinking is not — on Opus 5 that can turn a tool call into plain visible
-    # text that never runs, which would silently break the explore loop. There
-    # is deliberately no value here that disables it.
+    # PLAN.md §7.1. Lowering effort is how a node is made cheap; disabling
+    # thinking is not, and no value here does it — on Opus 5 that can turn a tool
+    # call into visible text that never runs, breaking the explore loop.
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     model: Model | None = None
 
@@ -106,16 +79,13 @@ class Config(BaseModel):
     # Bounds, so T1 doesn't run forever on stage.
     max_tool_calls: int = 24
     max_fix_attempts: int = 3
-    # Milliseconds, an integer, because that is the only unit all three
-    # supported dialects can be told. It was the string "5s" — a Postgres
-    # interval literal, which MySQL parses as neither a number nor an error.
+    # Milliseconds as an integer, the only unit all three dialects can be told.
     # See app/dialects.py for what each one does with it.
     statement_timeout_ms: int = 5_000
     max_rows: int = 50  # rows handed back to the model from execute
 
-    # The six nodes that talk to a model. `load_cache` is not among them and
-    # never will be: it reads a table. A node here with no prompt file, or a
-    # prompt file with no node here, is the same bug seen from two sides.
+    # The six nodes that talk to a model. `load_cache` reads a table, so it is
+    # not one. Each of these must have a prompt file, and vice versa.
     plan: Node = Field(default_factory=Node)
     explore: Node = Field(default_factory=Node)
     generate_sql: Node = Field(default_factory=Node)
@@ -123,10 +93,9 @@ class Config(BaseModel):
     extract: Node = Field(default_factory=Node)
     answer: Node = Field(default_factory=Node)
 
-    # GEPA's reflection model — the teacher that proposes candidate prompts.
-    # Its own block because it is the one call in the system that is not part of
-    # a turn, and because giving it a stronger model than production runs is the
-    # normal thing to want. `optim/adapter.py` calls it with node="gepa.reflect".
+    # GEPA's teacher, which proposes candidate prompts. Its own block because it
+    # is the one call that is not part of a turn, and usually wants a stronger
+    # model. `optim/adapter.py` calls it with node="gepa.reflect".
     gepa: Node = Field(default_factory=lambda: Node(effort="max"))
 
     # --- resolution --------------------------------------------------------
@@ -134,15 +103,8 @@ class Config(BaseModel):
     def node(self, name: str) -> Node:
         """The block for a `node=` label, or an empty one.
 
-        Dotted labels fall back to their prefix, which is the whole mapping
-        table: `explore.summary` resolves to `explore` (one loop, one prompt,
-        two calls), `extract.replay` to `extract` (so `optim/`'s harness runs
-        under production's own effort rather than measuring a configuration
-        nobody ships), and `gepa.reflect` to `gepa`.
-
-        An unknown label is not an error: `llm.complete`'s default is the
-        literal `"model"`, and a call that names nothing should get the global
-        defaults rather than a traceback.
+        A dotted label falls back to its prefix — `explore.summary` to `explore`,
+        `gepa.reflect` to `gepa`. An unknown label gets the global defaults.
         """
         block = getattr(self, name, None)
         if block is None and "." in name:
@@ -164,10 +126,8 @@ class Config(BaseModel):
 def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
     """`over` wins, one key at a time, recursing into dicts.
 
-    Deep rather than shallow so that a local file naming only `model.model`
-    keeps the tracked file's `model.provider`. A shallow merge would replace the
-    whole block, which is how a local override of one field silently resets the
-    other three.
+    Deep, so a local file naming only `model.model` keeps the tracked file's
+    `model.provider` rather than resetting the whole block.
     """
     out = dict(base)
     for key, value in over.items():
@@ -190,10 +150,8 @@ def _read(path: Path) -> dict[str, Any]:
 def overlay() -> Path | None:
     """`config.local.yaml`, if there is one.
 
-    Its own function because the *presence* of an overlay is a fact worth
-    saying out loud at startup: it is untracked, so what the server is running
-    is not what the repository says it runs, and "which model is this?" has a
-    surprising answer exactly when this file exists.
+    Its own function because the presence of an untracked overlay is worth a
+    startup warning: the server is not running what the repository says it runs.
     """
     path = Path(settings().config_dir) / LOCAL
     return path if path.is_file() else None
@@ -203,14 +161,12 @@ def overlay() -> Path | None:
 def config() -> Config:
     """`config/config.yaml`, merged with `config.local.yaml` and validated.
 
-    Memoised like `settings()`, and for a stronger reason than either: `plan`'s
-    system block sits behind an Anthropic cache breakpoint, and a model that
-    changed between two turns of one process would invalidate the prefix with no
-    symptom but the token counter going back up. Tests call `config.cache_clear()`.
+    Memoised: a model that changed between two turns of one process would
+    invalidate `plan`'s cache prefix with no symptom but the token counter going
+    up. Tests call `config.cache_clear()`.
 
-    A missing `config.yaml` is an error, not a fall-through to defaults. The
-    file is tracked, so its absence means CONFIG_DIR is pointed somewhere wrong,
-    and defaulting there would run the demo against a model nobody chose.
+    A missing `config.yaml` is an error rather than a fall-through to defaults —
+    the file is tracked, so its absence means CONFIG_DIR is wrong.
     """
     root = Path(settings().config_dir)
     path = root / FILE

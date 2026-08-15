@@ -1,23 +1,15 @@
 """Turn recorded `extract` calls into a replayable corpus.
 
-**Langfuse is the record, and this reads only Langfuse.** That is a correction
-rather than a convenience. The first version asked Postgres which warehouse each
-recorded call was about, by joining `turn.trace_id` — and `make reset` empties
-the `turn` table by design, while the trace store keeps everything forever. So a
-reset silently turned every recorded call into debris: the data was intact, and
-nothing could prove whose it was. Thirteen of fifteen, the first time it
-happened.
+**Langfuse is the record, and this reads only Langfuse.** Scope comes from the
+turn span's own `input.connection_id`, never from a join to `turn.trace_id`:
+`make reset` empties that table by design while the trace store keeps
+everything, so the join would turn every earlier recording into debris — intact
+and unattributable.
 
-A reset should reset. What was wrong was depending on a table whose whole job is
-to be emptied. The scope comes from the turn span instead, which records
-`connection_id` in its own input — and, since `prompts.fingerprint()` went on
-it, which prose produced the turn.
-
-Worth knowing for later: Langfuse has the *inputs*, Postgres has the
-*outcomes* — whether the SQL errored, how many fix attempts — and only Postgres
-gets reset. `extract` does not care, because its score comes entirely from the
-recorded call. A `plan` harvest would care a lot: labelling "should the cache
-have been enough?" means looking at what happened next.
+Worth knowing for later: Langfuse has the *inputs*, Postgres has the *outcomes*
+— whether the SQL errored, how many fix attempts — and only Postgres gets reset.
+`extract` scores entirely off the recorded call, so it does not care. A `plan`
+harvest would, because labelling it means looking at what happened next.
 """
 
 from __future__ import annotations
@@ -68,9 +60,8 @@ def extract_cases(
 ) -> Harvest:
     """Every `extract` call for one connection, as replayable cases.
 
-    Scoped to one connection for the same reason `load_cache` is: what the agent
-    learned about one warehouse is not evidence about another, and a corpus that
-    mixes two is a corpus whose scores describe neither.
+    Scoped to one connection for the same reason `load_cache` is: a corpus
+    mixing two warehouses has scores that describe neither.
     """
     since = since or datetime.now(timezone.utc) - timedelta(days=days)
     scope = turn_scope(since=since)
@@ -82,9 +73,8 @@ def extract_cases(
         harvest.seen += 1
 
         # `replay` writes under `extract.replay`, so the harness's own calls
-        # should never reach a corpus — but a name filter is one typo from being
-        # wrong about that, and being wrong means round two trains on round
-        # one's output. Cheap to assert twice.
+        # should never reach a corpus. Asserted twice because being wrong means
+        # round two trains on round one's output.
         if observation.get("name") == REPLAY_NODE:
             harvest.contaminated += 1
             continue
@@ -109,8 +99,7 @@ def extract_cases(
             continue
 
         # T2-style repeats produce byte-identical extract inputs, and a corpus
-        # holding the same case five times weights it five times — tuning the
-        # prompt for whichever question the demo happens to ask twice.
+        # holding one case five times weights it five times.
         if message in seen_messages:
             harvest.duplicate += 1
             continue
@@ -142,10 +131,7 @@ class Scope:
 def turn_scope(*, since: datetime | None = None) -> dict[str, Scope]:
     """trace_id -> which warehouse the turn was about, and under which prose.
 
-    The turn span is the only place that says so. `migrations/004_tracing.sql`
-    called the trace "another system entirely, on the other side of an HTTP
-    exporter, and there is nothing here to join it to" — that is still true, and
-    the answer turned out to be not to join at all.
+    The turn span is the only place that says so.
     """
     scope: dict[str, Scope] = {}
     for span in tracing.observations(name="turn", kind="SPAN", since=since):
@@ -160,10 +146,9 @@ def turn_scope(*, since: datetime | None = None) -> dict[str, Scope]:
 def _tokens_out(observation: dict) -> int:
     """What the recorded call cost, which the metric scores a candidate against.
 
-    Zero when Langfuse has no usage for the call, and the cost term reads zero
-    as "no baseline, do not score cost" rather than as "free" — so losing this
-    does not fail, it quietly deletes a fifth of the metric. It was lost once
-    exactly that way.
+    Zero when Langfuse has no usage for the call. The cost term reads zero as
+    "no baseline" rather than "free", so losing this does not fail — it quietly
+    deletes a fifth of the metric.
     """
     usage = observation.get("usage") or {}
     return int(usage.get("output") or 0)
@@ -182,8 +167,8 @@ def _user_message(recorded: object) -> str | None:
 
 
 def _label(trace_id: str, message: str) -> str:
-    """A short readable id. The trace prefix keeps it unique, the question keeps
-    it meaningful in a report someone is reading at speed."""
+    """A short readable id: the trace prefix for uniqueness, the question so a
+    report stays meaningful to someone reading at speed."""
     question = message.removeprefix("Question: ").split("\n", 1)[0]
     slug = re.sub(r"[^a-z0-9]+", "-", question.casefold()).strip("-")[:36]
     return f"{trace_id[:8]}-{slug}" if slug else trace_id[:8]

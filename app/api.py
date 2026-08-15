@@ -1,8 +1,8 @@
 """The versioned API. Every route the outside world touches lives here.
 
-`scripts/*` are HTTP clients of this module, not a second implementation — the
-graph, the pool and the checkpointer exist in one process, and the code path the
-demo exercises is the code path a user gets.
+`cli/sql_agent/` is an HTTP client of this module, not a second implementation —
+the graph, the pool and the checkpointer exist in one process, and the code path
+the demo exercises is the code path a user gets.
 """
 
 from __future__ import annotations
@@ -44,13 +44,8 @@ from app.settings import settings
 async def require_token(authorization: str = Header(default="")) -> None:
     """Bearer auth for everything under /v1.
 
-    Read at request time, not import time: `settings()` is `lru_cache`d and the
-    test suite clears it, so a module-level snapshot would freeze whatever the
-    first import happened to see.
-
-    An empty `API_TOKEN` disables enforcement — that is what tests and a first
-    `make up` run on. The server says so at startup rather than leaving it
-    silent (see `app.main`).
+    Read at request time, not import time, because the suite clears `settings()`.
+    An empty `API_TOKEN` disables enforcement, and `app.main` warns at startup.
     """
     expected = settings().api_token
     if not expected:
@@ -74,11 +69,8 @@ router = APIRouter(prefix="/v1", dependencies=[Depends(require_token)])
 async def connection_dep(cid: str = Path(...)) -> store.Connection:
     """Resolve the connection a scoped route is about, or 404.
 
-    Hung off the sub-router below rather than repeated in each handler, for the
-    same reason `require_token` is hung off `router`: a route added later is
-    scoped by default instead of by somebody remembering. The path segment is
-    what makes it unforgettable — there is no unscoped route to reach by
-    accident, because it doesn't exist.
+    Hung off the sub-router rather than repeated per handler, so a route added
+    later is scoped by default and the unscoped call is unrepresentable.
     """
     try:
         return await db.resolve(cid)
@@ -119,14 +111,11 @@ def _out(registered: store.Connection, stats: dict[str, int] | None = None) -> C
 async def _probe(registered: store.Connection) -> ConnectionTestOut:
     """Connect, and report what we found. Never raises.
 
-    Deliberately does not go through `db.target_engine` — a probe of a
-    connection that may not work should not leave a cached engine behind, and a
-    probe run right after a PATCH has to dial the new address rather than a
-    pooled old one. `NullPool` for the same reason.
+    Not through `db.target_engine` (hence `NullPool`): a probe should leave no
+    cached engine behind, and one run after a PATCH must dial the new address.
 
-    **No read-only hooks on this engine.** The probe's question is "what could
-    these credentials do?", and connecting in a read-only session would make
-    every warehouse look read-only.
+    **No read-only hooks on this engine** — the question is what these
+    credentials *could* do, and a read-only session makes every warehouse look so.
     """
     started = time.monotonic()
     cap = dialects.for_dialect(registered.dialect)
@@ -174,9 +163,8 @@ async def _probe(registered: store.Connection) -> ConnectionTestOut:
         username=username,
         default_schema=schema,
         tables=tables,
-        # None where there is nothing to judge. On SQLite that is the honest
-        # answer — there are no credentials — and reporting True would be a lie
-        # a user would act on.
+        # None where there is nothing to judge — on SQLite there are no
+        # credentials, and reporting True would be a lie a user would act on.
         read_only=None if writable is None else not (writable or superuser),
         warnings=warnings,
     )
@@ -204,11 +192,8 @@ async def _pg_privileges(conn, registered) -> tuple[str | None, bool | None, boo
 
 
 async def _mysql_privileges(conn, registered) -> tuple[str | None, bool | None, bool]:
-    """`SHOW GRANTS`, deliberately — not `information_schema.table_privileges`.
-
-    That view lists table-level grants only, so a user with `GRANT ALL ON db.*`
-    shows up as holding none: a false "read-only: true", which is the direction
-    that matters.
+    """`SHOW GRANTS`, not `information_schema.table_privileges` — that view lists
+    table-level grants only, so `GRANT ALL ON db.*` reads as read-only: true.
     """
     username = (await conn.exec_driver_sql("SELECT CURRENT_USER()")).scalar_one()
     try:
@@ -240,10 +225,8 @@ _PRIVILEGE = {
 def _sanitise(e: Exception, registered: store.Connection) -> str:
     """A connection failure a caller can act on, with no credentials in it.
 
-    Unwrapped through `.orig` first: SQLAlchemy's wrapper is `OperationalError`
-    for everything and says nothing, and its `str()` appends the statement and a
-    https://sqlalche.me/e/ link. The password check stays as the backstop —
-    a driver's connection error quotes the address it failed on.
+    Unwrapped through `.orig`, because SQLAlchemy's wrapper is
+    `OperationalError` for everything. The password check is the backstop.
     """
     orig = getattr(e, "orig", None) or e
     detail = str(orig).strip().splitlines()[0] if str(orig).strip() else ""
@@ -278,15 +261,10 @@ async def create_connection(
 ) -> ConnectionCreatedOut:
     """Register a database.
 
-    The probe runs by default and its result comes back *inside* the 201, but a
-    failed probe does not block the create: a typo should be visible now, while
-    the user is still looking at it, whereas refusing to save a connection
-    because the warehouse is down for maintenance is worse than saving it with a
-    warning.
-
-    Give the agent a role holding SELECT and nothing else. We cannot make one
-    for you, and with a registered connection the read-only session is what
-    stands in for it.
+    The probe runs by default and comes back *inside* the 201, but a failed one
+    does not block the create — a warehouse down for maintenance should still
+    register, with a warning. Give the agent a role holding SELECT and nothing
+    else; the read-only session is only what stands in for one.
     """
     registered = store.Connection(
         id=body.id,
@@ -378,10 +356,9 @@ async def test_connection(
 ) -> ConnectionTestOut:
     """Can we reach it, and what are we?
 
-    **200 even when the probe fails**, with `ok: false` and a sanitised error. A
-    failed diagnostic is a successful diagnostic: a non-2xx would make a client
-    print "502 from /v1/…" where the useful sentence is "password
-    authentication failed for user 'analytics'".
+    **200 even when the probe fails**, with `ok: false` and a sanitised error: a
+    non-2xx would make a client print "502 from /v1/…" where the useful sentence
+    is "password authentication failed for user 'analytics'".
     """
     return await _probe(registered)
 
@@ -406,15 +383,12 @@ async def ask(
     body: AskBody,
     registered: store.Connection = Depends(connection_dep),
 ) -> StreamingResponse:
-    """One turn, streamed as it happens.
+    """One turn, streamed as it happens — watching T1's exploration scroll past
+    and then *not* happen on T2 is the product.
 
-    Streaming is the product: the point is watching T1's exploration scroll past
-    and then *not* happen on T2.
-
-    The connection is opened here, before the response is returned, and not
-    lazily inside the graph. Once the generator is handed to Starlette a 200 is
-    already on the wire, and an unreachable warehouse would arrive as an error
-    event inside a successful response instead of the 502 it is.
+    The connection is opened here rather than lazily inside the graph: once the
+    generator reaches Starlette a 200 is on the wire, and an unreachable
+    warehouse would arrive as an error event inside it instead of a 502.
     """
     graph = req.app.state.graph
     session_id = str(body.session_id)
@@ -422,9 +396,8 @@ async def ask(
     async with db.agent() as conn:
         bound = await store.session_connection(conn, session_id)
     if bound is not None and bound != registered.id:
-        # The thread's history is checkpointed. Reusing it against a second
-        # warehouse would hand the model the first one's conversation while it
-        # answers about the second.
+        # The thread's history is checkpointed, so reusing it against a second
+        # warehouse hands the model the first one's conversation.
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=(
@@ -454,9 +427,8 @@ async def ask(
             # Without this nginx buffers the whole stream and the live demo
             # looks frozen until the turn finishes.
             "X-Accel-Buffering": "no",
-            # Tells a caller that didn't supply one which thread it just used,
-            # so the next question can continue the same conversation. Headers
-            # flush before the body, so this arrives immediately.
+            # Which thread a caller that supplied none just used, so the next
+            # question can continue it. Headers flush before the body.
             "X-Session-Id": session_id,
         },
     )
@@ -470,25 +442,21 @@ async def read_cache(
     """What the agent has learned about this connection.
 
     Served through `store.load_cache()`, so this is exactly what the model reads
-    on the next turn — same entries, same order, tombstones included. That
-    equivalence is the point: the cache is the product (PLAN.md §6.2).
-
-    `kind` filters the listing only. It never changes what the model would see.
+    on the next turn — same entries, same order, tombstones included (§6.2).
+    `kind` filters the listing only; it never changes what the model sees.
     """
     async with db.agent() as conn:
         entries = await store.load_cache(conn, connection_id=registered.id)
         disabled = await store.count_disabled(conn, connection_id=registered.id)
-    # Staleness is a question about the *business* schema — has it moved since
-    # these entries were learned? — so it is asked on the other server, and on
-    # **this entry's** other server. Asking a different connection's target
-    # would report every entry stale, or worse, coincidentally not stale.
+    # Staleness is a question about the business schema, so it is asked on the
+    # other server — and on **this entry's** other server.
     async with db.target(registered.id) as conn:
         stale = await store.stale_ids(conn, entries)
 
     shown = [e for e in entries if kind is None or e.kind == kind]
     return CacheListOut(
-        # Counted over everything loaded, not over `shown` — a filtered view
-        # that also reported filtered totals would misreport the cache's size.
+        # Counted over everything loaded, not over `shown`: a filtered view
+        # reporting filtered totals would misreport the cache's size.
         summary=CacheSummary(
             total=len(entries),
             verified=sum(1 for e in entries if e.verified),
@@ -523,14 +491,9 @@ async def reset_cache(
     """Forget everything learned about this connection. The stage recovery
     button (PLAN.md §9).
 
-    Takes this connection's turn log and the checkpoints of its sessions with it
-    — see `store.reset_learned`. Another connection's cache is untouched, and
-    the registry row itself survives: this is "forget what you learned", not
-    "forget the database exists".
-
-    The business data is on another server that this connection cannot reach,
-    so "leaves the business schema alone" is now a property of the wiring rather
-    than a promise.
+    Takes this connection's turn log and its sessions' checkpoints with it — see
+    `store.reset_learned`. Another connection's cache is untouched and the
+    registry row survives: "forget what you learned", not "forget the database".
     """
     async with db.agent() as conn:
         wiped = await store.reset_learned(conn, connection_id=registered.id)
@@ -543,14 +506,8 @@ async def read_turns(
     finished: bool = Query(default=True),
     registered: store.Connection = Depends(connection_dep),
 ) -> TurnListOut:
-    """The turn log: what was asked, and what it cost.
-
-    This is the demo chart as rows, and it is the whole reason `make turns`
-    could stop being a psql query. Ascending, so it reads left to right.
-
-    `finished` defaults to true, matching what `make turns` showed. False also
-    shows turns still in flight and the ones that failed, which that query had
-    no way to ask for.
+    """The turn log as rows: what was asked, and what it cost. Ascending, so it
+    reads left to right; `finished=false` adds the unfinished and failed turns.
     """
     async with db.agent() as conn:
         rows = await store.read_turns(

@@ -1,41 +1,30 @@
 """Read-only introspection tools for the explore loop (PLAN.md §4).
 
 Sampling is what discovers the traps: `sample_column('customer', 'deleted_at')`
-comes back with non-nulls, and that's how the agent infers soft deletes rather
+comes back with non-nulls, and that is how the agent infers soft deletes rather
 than being told.
 
-Two safety properties, both structural rather than conventional:
+Two safety properties, both structural:
 
 1. **Identifiers are allowlisted against the dialect's own reflection, then
-   carried as `quoted_name(..., quote=True)`.** Table and column names cannot be
-   bound as parameters, so only a name the database has just told us exists may
-   be put into a statement. `quoted_name` travels with the expression tree, so
-   the quoting happens at compile time against whichever dialect runs it — a
-   table called `order` or `Customer` works, and nothing is ever concatenated.
-   Everything else is a bound parameter.
-2. **These run on a target connection, which the agent reaches read-only.** The
-   agent's own tables aren't hidden from this listing, they simply aren't in this
-   database — `cache_entry`, `turn` and the checkpoints are on another server.
-   There used to be a name filter here doing that job; it was one forgotten call
-   site away from not working.
+   carried as `quoted_name(..., quote=True)`.** Names cannot be bound as
+   parameters, so only a name the database just told us exists may reach a
+   statement, and the quoting happens at compile time against whichever dialect
+   runs it. Everything else is a bound parameter.
+2. **These run on a target connection.** The agent's own tables are not filtered
+   out of the listing — they are on another server.
 
-**Constraints come from SQLAlchemy's reflection, and the reason the old
-hand-written `pg_catalog` query existed still holds**:
-`information_schema.table_constraints` only shows constraints to a caller
-holding a *non-SELECT* privilege, so the read-only role the agent connects as
-sees an empty set and every table comes back keyless — join discovery would
-silently degrade to guessing from column names. SQLAlchemy's PostgreSQL dialect
-reads `pg_catalog` for that exact reason, and every other dialect has its own
-answer to its own version of the problem. The invariant did not go away; it
-stopped being ours to maintain. `tests/test_isolation.py::
-test_the_reader_role_can_still_read_everything_it_needs` is what fails if that
-stops being true.
+**Constraints come from SQLAlchemy's reflection.**
+`information_schema.table_constraints` only shows constraints to a caller with a
+non-SELECT privilege, so the read-only role would see none and every table would
+come back keyless, degrading join discovery to guessing from column names. Each
+dialect has its own answer to that, which is why this does not hand-write one.
+`tests/test_isolation.py::test_the_reader_role_can_still_read_everything_it_needs`
+is what fails if it stops being true.
 
-**Every column read by name carries an explicit lower-case label.** `dict_row`
-used to hand back Postgres's own folded names; `RowMapping` keys come straight
-from `cursor.description`, and MySQL returns `SELECT count(*) AS n` as whatever
-case it was written in. The labels here are ours, so this is free — but it is a
-rule, not an accident.
+**Every column read by name carries an explicit lower-case label.** `RowMapping`
+keys come from `cursor.description`, and MySQL returns `SELECT count(*) AS n` in
+whatever case it was written.
 """
 
 from __future__ import annotations
@@ -70,13 +59,8 @@ async def _reflect(
 ) -> T:
     """Run one closure's worth of reflection on the connection's greenlet.
 
-    `Inspector` is sync — it issues queries as it walks — and `run_sync` hands it
-    a sync-facing proxy over *this* connection rather than opening a second one.
-
-    One closure per tool call, never one per question asked of the Inspector:
-    each `run_sync` is a greenlet round trip, and the Inspector's `info_cache`
-    lives only as long as the Inspector does, so splitting `describe_table` into
-    three calls would reflect the table three times.
+    One closure per tool call, never one per question asked of the Inspector —
+    its `info_cache` lives only as long as it does.
     """
 
     def run(sync_conn: Any) -> T:
@@ -88,14 +72,9 @@ async def _reflect(
 def _type_name(type_: Any, dialect: Dialect) -> str:
     """The type as this dialect spells it in DDL.
 
-    `str(type_)` gives SQLAlchemy's generic name — `TIMESTAMP` for what Postgres
-    calls `timestamp with time zone`, which is a distinction the agent needs
-    when it writes a date comparison. Compiling against the dialect gives the
-    database's own words back.
-
-    An unrecognised extension type reflects as `NullType`, which has no DDL and
-    raises rather than rendering. A name the model cannot use is still better
-    than a tool call that fails.
+    `str(type_)` gives SQLAlchemy's generic `TIMESTAMP` for what Postgres calls
+    `timestamp with time zone`, which the agent needs to write a date
+    comparison. Falls back for extension types, which reflect as `NullType`.
     """
     try:
         return str(type_.compile(dialect=dialect))
@@ -109,16 +88,8 @@ def _type_name(type_: Any, dialect: Dialect) -> str:
 def _resolve(name: str, candidates: Sequence[str], what: str) -> str:
     """Match a model-supplied name against what the database actually has.
 
-    The allowlist half of the safety property is unchanged: identifiers cannot
-    be bound as parameters, so only a name the database just told us exists may
-    be put into a statement. What changed is that "exists" is no longer
-    case-blind — Postgres folds unquoted identifiers, MySQL on a case-sensitive
-    filesystem does not, and `Customer` and `customer` can be two tables.
-
-    So an exact match wins outright; a unique case-insensitive match is accepted,
-    because the model getting the case wrong is the common failure and it is
-    recoverable; two of them is an error naming both, because guessing there is
-    how the agent silently reads the wrong table.
+    `Customer` and `customer` can be two tables, so an exact match wins, a
+    unique case-insensitive match is accepted, and two is an error naming both.
     """
     if name in candidates:
         return name
@@ -131,11 +102,8 @@ def _resolve(name: str, candidates: Sequence[str], what: str) -> str:
 
 
 def _ident(name: str) -> quoted_name:
-    """Force the dialect's own quoting, at compile time.
-
-    The `psycopg.sql.Identifier` of this port. The name came out of reflection,
-    so it is byte-exact what the server stores — which is the other half of the
-    case-sensitivity fix.
+    """Force the dialect's own quoting, at compile time. The name came out of
+    reflection, so it is byte-exact what the server stores.
     """
     return quoted_name(name, quote=True)
 
@@ -148,13 +116,10 @@ async def list_tables(conn: AsyncConnection) -> dict[str, Any]:
     tables are empty skips the search, and the search is what T1 is."""
 
     def work(i: Inspector, _d: Dialect) -> tuple[list[str], dict[str, int]]:
-        # schema=None means "the default schema", which honours search_path on
-        # Postgres rather than hardcoding 'public', is the connected database on
-        # MySQL and `main` on SQLite. Passing a name explicitly would differ
-        # from today's behaviour whenever search_path is unusual.
+        # No schema= — the default honours search_path on Postgres, is the
+        # connected database on MySQL and `main` on SQLite.
         names = i.get_table_names()
-        # get_multi_columns, not a get_columns loop: one round trip instead of
-        # forty, and forty is what the decoy schema is.
+        # One round trip rather than one per table, and forty is the decoy schema.
         widths = i.get_multi_columns(filter_names=names)
         return names, {key[1]: len(cols) for key, cols in widths.items()}
 
@@ -190,9 +155,8 @@ async def describe_table(conn: AsyncConnection, table: str) -> dict[str, Any]:
         for c in cols
     ]
     primary_key = list(pk.get("constrained_columns") or [])
-    # The column pairing that `JOIN LATERAL unnest(conkey) WITH ORDINALITY` was
-    # doing by hand: constrained_columns and referred_columns are parallel and
-    # ordered, so a composite foreign key pairs correctly under a plain zip.
+    # constrained_columns and referred_columns are parallel and ordered, so a
+    # composite foreign key pairs correctly under a plain zip.
     foreign_keys = [
         f"{src} -> {fk['referred_table']}.{ref}"
         for fk in fks
@@ -229,8 +193,8 @@ async def sample_column(
 ) -> dict[str, Any]:
     """Distinct values plus how many rows are null.
 
-    The null count is the load-bearing part: it's what turns `deleted_at` from
-    a column that exists into a soft-delete convention the agent can state.
+    The null count is what turns `deleted_at` from a column that exists into a
+    soft-delete convention the agent can state.
     """
     tbl, col = await _column_of(conn, table, column)
     limit = max(1, min(int(limit), 50))
@@ -242,26 +206,19 @@ async def sample_column(
         await conn.execute(
             select(
                 func.count().label("total"),
-                # `count(*) FILTER (WHERE c IS NULL)` was the direct spelling,
-                # and MySQL has no FILTER clause — SQLAlchemy compiles
-                # func.count().filter() to FILTER on *every* dialect, so it
-                # would be a runtime syntax error rather than a portability
-                # layer (verified). count(c) counts non-nulls in every dialect
-                # there is, so the null count is a subtraction with no dialect
-                # to get wrong.
+                # Not `count(*) FILTER (WHERE c IS NULL)`: MySQL has no FILTER
+                # clause and SQLAlchemy compiles `.filter()` to it on every
+                # dialect. count(c) counts non-nulls everywhere.
                 (func.count() - func.count(c)).label("nulls"),
                 func.count(distinct(c)).label("distinct_values"),
             ).select_from(t)
         )
     ).mappings().one()
 
-    # DISTINCT and ORDER BY on the **raw column**, never on the cast.
-    # `CAST(x AS CHAR)` on MySQL drops the column's collation and falls back to
-    # the connection's, which is case-insensitive by default — so casting first
-    # folds `west`, `West` and `WEST` into one value and quietly erases exactly
-    # the kind of convention this tool exists to reveal. Stringifying afterwards
-    # in Python costs nothing and cannot change what the database considers
-    # distinct.
+    # DISTINCT and ORDER BY on the **raw column**, never on a cast. `CAST(x AS
+    # CHAR)` on MySQL drops the column's collation for the connection's, which is
+    # case-insensitive by default, folding `west`/`West`/`WEST` into one value.
+    # Stringify in Python instead.
     values = [
         str(r[0])
         for r in (
@@ -295,11 +252,9 @@ async def count_distinct(
     c = sa_column(_ident(col))
     t = sa_table(_ident(tbl), c)
 
-    # GROUP BY the raw column, not the cast — see `sample_column`. On MySQL,
-    # grouping by `CAST(region AS CHAR)` returns `west: 12` where grouping by
-    # `region` returns `west: 4, West: 4, WEST: 4`, because the cast loses the
-    # column's collation. This tool's whole job is showing a categorical
-    # column's real shape, and that is the shape.
+    # GROUP BY the raw column, not a cast — see `sample_column`. On MySQL the
+    # cast returns `west: 12` where the column returns `west: 4, West: 4,
+    # WEST: 4`, and that is the shape this tool exists to show.
     rows = (
         await conn.execute(
             select(c.label("value"), func.count().label("n"))
@@ -400,10 +355,8 @@ async def run_tool(
     except ToolError as e:
         return json.dumps({"error": str(e)}), True
     except Exception as e:  # a bad argument shouldn't end the turn
-        # `.orig`, not `e`. SQLAlchemy's wrapper stringifies to the driver's
-        # message *plus* the whole statement it just tried *plus* a
-        # https://sqlalche.me/e/ link — a few hundred tokens of context per
-        # failed call, in a loop that runs up to 24 of them, teaching the model
-        # nothing it can act on.
+        # `.orig`, not `e`: SQLAlchemy's wrapper stringifies to the driver's
+        # message plus the whole statement plus a docs link — hundreds of tokens
+        # per failed call, in a loop that runs up to 24 of them.
         orig = getattr(e, "orig", None) or e
         return json.dumps({"error": f"{type(orig).__name__}: {orig}"}), True

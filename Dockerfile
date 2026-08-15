@@ -18,7 +18,7 @@ WORKDIR /srv
 # Dependencies only, and before the source, so editing a node doesn't reinstall
 # anything. --no-install-project skips building the project's own wheel, which
 # is the CLI: this image runs the server and never invokes it, and the wheel
-# could not build here anyway because sql_agent_cli/ is not copied in.
+# could not build here anyway because cli/sql_agent/ is not copied in.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 

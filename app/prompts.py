@@ -1,39 +1,18 @@
-"""The seam an optimiser writes through, and the loader behind it.
+"""Reads `config/prompts/<node>.md`, the prose half of what a node sends.
 
-The prose lives in `config/prompts/<node>.md` and this module reads it. It used
-to live here as six string constants, and moving it out was the point: a GEPA
-winner is now written into the file it came from, so promotion is a reviewed
-commit rather than a copy-paste into a Python string literal — the one step in
-the loop that had no diff. See `config/prompts/README.md` for the contract and
-for the notes the constants' comments used to carry.
+Only prose that is a function of nothing — not the question, not the cache, not
+the dialect. Anything composed per turn stays in `graph.py`, as do the JSON
+schemas, which are wire contracts rather than prose.
 
-What is in those files is prose that is a function of *nothing* — not the
-question, not the cache, not the dialect. `render_cache()` and `dialect_note()`
-stay in `graph.py`, because they compose per turn and are the content this prose
-tells the model what to do with. The JSON schemas stay there too: they are the
-node's wire contract, not prose.
+Blocks resolve **once per process**: `graph.plan` puts its system block behind an
+Anthropic cache breakpoint promising it varies with `connection_id` alone, so a
+prompt changing mid-process would show up only as T2 costing more.
 
-A module rather than six reads and an `if`, for two reasons.
+Imports stdlib and `app.settings` only, so `optim/` can read a seed candidate
+without pulling in langgraph and sqlalchemy.
 
-`optim/` needs the seed candidate without importing the world. `from app.graph
-import EXTRACT_SYSTEM` drags in langgraph, sqlalchemy, `app.db`, `app.tools` and
-`app.store`; this module imports stdlib and `app.settings`. It deliberately does
-**not** import `app.config` either — where the prompts are is an environment
-question (`CONFIG_DIR`), what the model does with them is a config-file one, and
-only the first is needed to read a file.
-
-And the blocks have to resolve **once per process**. `graph.plan` puts its system
-block behind an Anthropic cache breakpoint on the promise that the block varies
-with `connection_id` alone (§7.1). A prompt re-read per turn could change between
-two turns of one server's life, and the only symptom would be T2 quietly costing
-more. `_loaded` is memoised for that reason, not for speed — prose that is
-constant for a whole process is strictly stronger than the invariant asks for,
-which is why reading a file here is safe and would not be in `TurnState` or in
-`config["configurable"]`.
-
-Keys are the `node=` labels `llm.complete` records as the Langfuse generation
-name, so a harvested trace and its prompt file name the same thing. `explore`
-covers `explore.summary` as well: one prompt, two calls.
+Keys are the `node=` labels `llm.complete` records as Langfuse generation names.
+`explore` covers `explore.summary` too: one prompt, two calls.
 """
 
 from __future__ import annotations
@@ -45,14 +24,11 @@ from pathlib import Path
 from app.settings import settings
 
 
-# The vocabulary, and the only thing this module still hardcodes. Six files
-# named for these, and nothing else, is the whole directory contract.
+# Six files named for these, and nothing else, is the directory contract.
 NODES = ("explore", "plan", "generate_sql", "fix", "extract", "answer")
 
-# The one non-prompt file `config/prompts/` may hold. It is where the notes that
-# used to be comments above the constants went, so it has to be allowed — and it
-# has to be allowed by name, because "tolerate anything unrecognised" is exactly
-# the rule this loader exists to not have.
+# The one non-prompt file `config/prompts/` may hold. Allowed by name, because
+# tolerating anything unrecognised is the rule this loader exists to not have.
 NOTES = "README.md"
 
 
@@ -65,17 +41,8 @@ def directory() -> Path:
 def _loaded() -> dict[str, str]:
     """`config/prompts/<node>.md`, one entry per node.
 
-    Memoised deliberately — see the module docstring. Tests and the optimiser
-    call `_loaded.cache_clear()` after moving the directory, the same way they
-    already call `settings.cache_clear()`.
-
-    Three things are errors rather than no-ops, and they are the same error:
-    a prompt that silently is not what you think it is. A missing file would
-    leave a node with nothing to say; an empty one is the placeholder somebody
-    forgot to fill; a stray `extrct.md` is a typo that changes nothing, which
-    means an optimisation run that measures the seed and reports it as a
-    candidate improvement. That last one is the kind of wrong that agrees with
-    itself, and it is why this loader has never had a lenient mode.
+    Missing, empty and misnamed files are all errors — each one is a prompt that
+    silently is not what you think it is. Tests call `_loaded.cache_clear()`.
     """
     root = directory()
     if not root.is_dir():
@@ -117,11 +84,8 @@ def get(name: str) -> str:
 def fingerprint() -> dict[str, str]:
     """node -> 8 hex chars of its prompt, for the turn span's metadata.
 
-    The one thing Langfuse's own prompt management would have given for free:
-    which prose produced this trace. Without it a harvest cannot tell a run
-    under one revision from a run under the next, and round two of an
-    optimisation trains on round one's output. Eight chars because this
-    distinguishes revisions, it does not authenticate them.
+    Which prose produced a trace. Without it a harvest cannot tell one revision
+    from the next, and round two of an optimisation trains on round one's output.
     """
     return {
         name: hashlib.sha256(text.encode()).hexdigest()[:8]

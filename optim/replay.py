@@ -1,16 +1,13 @@
 """Run one `extract` case against one candidate prompt.
 
-This is the unit of evaluation, and choosing it is the central design decision.
-A whole turn costs ~11.5k tokens and minutes of wall clock; GEPA wants 100-500
-scored rollouts. But `extract` is very nearly a pure function of three recorded
-strings, so one metric call is one `low`-effort model call and needs **no
-database at all** — no target to reflect, no agent-db to write to, nothing to
-reset between rollouts.
+The unit of evaluation, and choosing it is the central design decision. A whole
+turn costs ~11.5k tokens and minutes of wall clock, while GEPA wants 100-500
+scored rollouts — but `extract` is nearly a pure function of three recorded
+strings, so one metric call is one model call and needs **no database at all**.
 
-What that unit cannot measure is the flywheel, which is a property of a
-*sequence* of turns. That is a real limit rather than an oversight: the cheap
-evaluation and the interesting objective are different objects, and whole-turn
-A/B is a final gate over one or two candidates, run over HTTP, not a metric.
+What that unit cannot measure is the flywheel, which is a property of a sequence
+of turns. Whole-turn A/B is a final gate over one or two candidates, run over
+HTTP, not a metric.
 """
 
 from __future__ import annotations
@@ -22,9 +19,8 @@ from app import graph, llm, store
 from app.config import config
 from optim.cases import ExtractCase
 
-# Not "extract". The harness must not write its own calls into the corpus it
-# harvests from, or round two trains on round one's output — and the generation
-# name is exactly what `tracing.observations()` filters on.
+# Not "extract": the generation name is what `tracing.observations()` filters
+# on, so sharing it would let round two train on round one's output.
 NODE = "extract.replay"
 
 
@@ -37,10 +33,9 @@ class Replayed:
     raw: list[dict[str, Any]] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
-    # Set when the call or the parse failed. A metric turns this into score 0
-    # with the text as feedback rather than an exception: GEPA's adapter
-    # contract is that a candidate which crashes is a candidate that scored
-    # badly, not a run that stops.
+    # Set when the call or the parse failed. The metric turns this into score 0
+    # with the text as feedback: GEPA's contract is that a candidate which
+    # crashes scored badly, not that the run stops.
     error: str | None = None
 
     @property
@@ -59,8 +54,8 @@ async def replay(
 
     `entries_from` rather than a re-implementation, so the verification gate the
     metric reads is the one production applies. `fallback_tables` is empty
-    because inferring them needs a target connection and nothing downstream of
-    here scores `tables` — that is what keeps this database-free.
+    because inferring them needs a target connection and nothing here scores
+    `tables` — which is what keeps this database-free.
     """
     try:
         result = await llm.complete(
@@ -77,9 +72,8 @@ async def replay(
     try:
         entries = graph.entries_from(raw, case.sql, [])
     except (KeyError, TypeError) as e:
-        # The schema is enforced provider-side, so this is close to unreachable
-        # — but "close to" is why a candidate that finds the gap should score 0
-        # instead of ending the run.
+        # The schema is enforced provider-side, so this is nearly unreachable —
+        # and a candidate that finds the gap should score 0, not end the run.
         return Replayed(
             case=case,
             raw=raw,

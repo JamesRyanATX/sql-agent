@@ -186,7 +186,7 @@ a bad config fails at boot rather than on the first model call of a demo.
 
 ## Architecture
 
-**The API is the only way in.** `sql_agent_cli/` is an HTTP client that renders
+**The API is the only way in.** `cli/sql_agent/` is an HTTP client that renders
 event streams and JSON — it holds no business logic, and the graph, the pools and
 the checkpointer exist in exactly one process. It **imports nothing from `app`**,
 which [tests/test_cli_isolation.py](tests/test_cli_isolation.py) asserts by
@@ -295,11 +295,15 @@ load_cache → plan ─(sufficient)→ execute → extract → answer
   error, fix, learned, answer, usage, done`).
 - **[app/main.py](app/main.py)** — app assembly only: lifespan (pool →
   checkpointer → graph), `/health`, and the router.
-- **[sql_agent_cli/](sql_agent_cli/)** — the `sql-agent` command. `http.py` is
-  the client (SSE framing lives here, and the ask stream runs with **no read
-  timeout** — a T1 turn takes minutes and httpx's 5s default would kill every
-  one); `config.py` holds the two `SQL_AGENT_*` variables and the connection
-  precedence; `main.py` holds `AskOrCommand`, which decides whether argv is a
+- **[cli/sql_agent/](cli/sql_agent/)** — the `sql-agent` command. **`cli/` is a
+  source root, not a package**: it holds no `__init__.py` and never gets one,
+  because hatchling strips it at build time so the wheel installs a top-level
+  `sql_agent` and `cli` never becomes an import name. The import is
+  `from sql_agent import …`; the directory only names the thing for a human
+  reading the tree. `http.py` is the client (SSE framing lives here, and the ask
+  stream runs with **no read timeout** — a T1 turn takes minutes and httpx's 5s
+  default would kill every one); `config.py` holds the two `SQL_AGENT_*`
+  variables and the connection precedence; `main.py` holds `AskOrCommand`, which decides whether argv is a
   question or a subcommand; the rest render. `render.table` is the one aligned
   formatter — `turns`, `connections ls` and query results all go through it, so
   a psql-shaped `(N rows)` footer is a thing the tape can wait on. Query results
@@ -663,7 +667,7 @@ make optim-apply     write it into config/prompts/<node>.md (nothing committed)
 - `sqlalchemy` is import-legal in `app/db.py`, `app/tools.py`, `app/dialects.py`,
   `app/api.py` and `app/store.py`'s four target functions, and nowhere else — in
   particular not in `app/graph.py` beyond what `db.` hands back, and never in
-  `sql_agent_cli/`, which [tests/test_cli_isolation.py](tests/test_cli_isolation.py)
+  `cli/sql_agent/`, which [tests/test_cli_isolation.py](tests/test_cli_isolation.py)
   asserts.
 - Migrations are `migrations/*.sql`, applied in filename order on every `make
   migrate`, so every statement must be `IF NOT EXISTS`-idempotent. They are a

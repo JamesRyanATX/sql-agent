@@ -1,16 +1,11 @@
 """The turn graph (PLAN.md §4).
 
-Phases 3-4 wire the learning path:
+    load_cache → plan ─(sufficient)→ execute → extract → answer
+                     └(insufficient)→ explore → generate_sql → execute
+                                                 execute ⇄ fix (≤3 attempts)
 
-    load_cache → explore ⇄ introspect → generate_sql → execute → extract → answer
-                                                          │  ▲
-                                                       error │
-                                                          ▼  │
-                                                        fix (≤3)
-
-`plan` — the branch that skips exploration and makes T2 cheap — arrives in
-phase 5. Until then every turn explores, but from phase 4 onward it also writes
-down what it learned.
+`plan` is the branch the demo rests on: it answers from cache without exploring,
+which is what makes T2 cheap.
 """
 
 from __future__ import annotations
@@ -38,30 +33,24 @@ def _add(a: int, b: int) -> int:
 class TurnState(TypedDict, total=False):
     session_id: str
     question: str
-    # Which registered database this turn is about. In the state and not in
-    # `config["configurable"]` alongside thread_id, deliberately: a resumed
-    # thread replays its checkpointed state, so a value living outside the
-    # checkpoint could silently switch warehouses mid-conversation — replaying
-    # a `cache` loaded from one while `execute` runs against another. It is
-    # also domain data (it scopes load_cache and lands in turn.connection_id),
-    # where thread_id is infrastructure.
+    # Which registered database this turn is about. In the state rather than in
+    # `config["configurable"]` beside thread_id: state is checkpointed, and a
+    # value outside it lets a resumed thread switch warehouses mid-conversation,
+    # replaying a cache loaded from one while `execute` runs against another.
     connection_id: str
     # Which SQL the model should write. Set by `load_cache` from the registry
-    # row — no target connection is needed, because `driver` is a column. In
-    # state for the same reason connection_id is: a value derived outside the
-    # checkpoint lets a resumed thread plan in one dialect and execute in
-    # another.
+    # row's `driver` column, so nothing is dialled. In state for the same reason
+    # as connection_id: a resumed thread must not plan in one dialect and
+    # execute in another.
     dialect: str
 
     turn_id: int
     started_at: float
     cache: list[dict[str, Any]]
-    # The Langfuse trace this turn is recorded as, or "" when tracing is off —
-    # which is the common case. Minted in `stream_turn` and carried in, rather
-    # than read back out of the ambient OpenTelemetry context inside `answer`,
-    # so writing it to the turn row does not depend on that context reaching
-    # LangGraph's tasks. Same argument as connection_id above: a turn's
-    # identity belongs in the checkpointed state.
+    # The Langfuse trace this turn is recorded as, or "" when tracing is off.
+    # Minted in `stream_turn` and carried in rather than read out of the ambient
+    # OpenTelemetry context, so writing it to the turn row does not depend on
+    # that context reaching LangGraph's tasks.
     trace_id: str
 
     sufficient: bool
@@ -77,21 +66,20 @@ class TurnState(TypedDict, total=False):
     explored: bool
     tool_calls: int
 
-    # Reduced across nodes, so the counter is a real sum of every API call the
-    # turn made rather than a number reconstructed afterwards.
+    # Reduced across nodes, so the counter sums every API call the turn made.
     tokens_in: Annotated[int, _add]
     tokens_out: Annotated[int, _add]
 
 
 # --------------------------------------------------------------------- prompts
 
-# A label, not the driver name: "postgresql+psycopg" is which library dials the
-# socket, and the model needs to know which SQL to write.
+# A label, not the driver name: the model needs to know which SQL to write, not
+# which library dials the socket.
 DIALECT_LABEL = {"postgresql": "PostgreSQL", "mysql": "MySQL", "sqlite": "SQLite"}
 
 # Appended to the system prompt of every node that reads or writes SQL. Only
-# what the model gets wrong often enough to be worth the tokens — this is not a
-# reference manual, and every line is paid for on every turn.
+# what the model gets wrong often enough to be worth the tokens — every line is
+# paid for on every turn.
 DIALECT_NOTES = {
     "postgresql": "",
     "mysql": (
@@ -114,10 +102,9 @@ def dialect_note(dialect: str) -> str:
     return f"\n\nTarget dialect: {label}." + (f" {note}" if note else "")
 
 
-# The six instruction blocks moved to app/prompts.py, which is a seam an
-# optimiser can write a candidate through without editing source. The schemas
-# stay: they are the node's wire contract, not prose, and nothing rewrites them.
-# `dialect_note` and `render_cache` stay too — they compose per turn.
+# The prose is config/prompts/, which an optimiser can write through. Schemas
+# stay here: they are the node's wire contract, not prose. So do `dialect_note`
+# and `render_cache`, which compose per turn.
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -198,25 +185,11 @@ FIX_SCHEMA = {
 
 
 def render_cache(entries: list[dict[str, Any]]) -> str:
-    """The prose the model reads. Empty until phase 4 starts writing entries.
+    """The prose the model reads.
 
-    `verified` is rendered on the SQL line, and only when it is *false*. Three
-    decisions in that sentence, each with a reason:
-
-    It is rendered at all because it used to not be, and PLAN_SYSTEM told the
-    model to weigh a marking that never reached it — `store.load_cache` selects
-    the column, `load_cache` dropped it building these dicts, and nothing
-    downstream could tell a run-successfully recipe from a guess.
-
-    On the SQL line, because the fragment is the thing `grounded_in` gates: a
-    schema_fact has no fragment and no verification concept, so marking one
-    would be noise on every entry that can never be anything else.
-
-    Only when false, because the extract prompt asks for a fragment copied from
-    the query that ran, so verified is the common case and the exception is what
-    carries information — the same bargain as the `NOT TRUE:` tombstone prefix.
-    A missing key reads as unverified: understating authority is the safe
-    direction for a gate whose whole job is to stop a guess being believed.
+    `verified` is marked on the SQL line, and only when *false* — a copied
+    fragment is the common case, so the exception carries the information. A
+    missing key reads as unverified, which understates authority.
     """
     if not entries:
         return ""
@@ -244,8 +217,8 @@ async def load_cache(state: TurnState) -> TurnState:
             question=state["question"],
         )
         entries = await store.load_cache(conn, connection_id=state["connection_id"])
-        # From the registry row, not from a target connection — `driver` is a
-        # column, so the dialect is known before anything is dialled.
+        # From the registry row: `driver` is a column, so the dialect is known
+        # before anything is dialled.
         registered = await store.get_connection(conn, state["connection_id"])
 
     cache = [
@@ -255,9 +228,8 @@ async def load_cache(state: TurnState) -> TurnState:
             "claim": e.claim,
             "sql_fragment": e.sql_fragment,
             "tombstone": e.tombstone,
-            # Carried because `render_cache` marks the unverified ones and
-            # PLAN_SYSTEM tells the model what that marking means. Dropping it
-            # here was a quiet bug for as long as the sentence existed.
+            # `render_cache` marks the unverified ones, and the plan prompt tells
+            # the model what that marking means.
             "verified": e.verified,
         }
         for e in entries
@@ -275,29 +247,23 @@ async def load_cache(state: TurnState) -> TurnState:
 async def plan(state: TurnState) -> TurnState:
     """Can this question be answered from what's cached? **This is the product.**
 
-    On the cached path it also writes the SQL, in the same call. Splitting the
-    decision from the generation costs a second round trip that re-sends the
-    system prompt and the whole cache — and if the cache is sufficient to
-    *answer*, it is sufficient to write the query (§4 amendment).
+    On the cached path it also writes the SQL, in the same call — splitting the
+    two costs a second round trip that re-sends the whole cache (§4 amendment).
     """
     emit = get_stream_writer()
     cache = state.get("cache", [])
 
     # A cold cache can only produce one answer, so don't pay a model call to
-    # hear it. This is every T1, and it keeps the cold path exactly as cheap as
-    # it was before this node existed.
+    # hear it. This is every T1, and it keeps the cold path cheap.
     if not cache:
         emit({"type": "plan", "cache_entries": 0, "sufficient": False, "missing": []})
         return {"sufficient": False}
 
     result = await llm.complete(
-        # The dialect goes in the *cached* system block, between the durable
-        # instruction and the cache text. That costs nothing: prompt caching
-        # keys on an exact prefix and the cache text is already per-connection,
-        # so the number of live entries is unchanged. The rule for anything
-        # added here — it must be a function of `connection_id` alone. The cache
-        # text is; the dialect is; the question is not, which is why the
-        # question stays in the user message.
+        # Anything added to this system block must be a function of
+        # `connection_id` alone — prompt caching keys on an exact prefix. The
+        # dialect and the cache text are; the question is not, so it stays in
+        # the user message.
         system=(
             f"{prompts.get('plan')}{dialect_note(state['dialect'])}\n\n"
             f"{render_cache(cache)}"
@@ -344,8 +310,7 @@ async def plan(state: TurnState) -> TurnState:
 async def explore(state: TurnState) -> TurnState:
     """A ReAct loop over the introspection tools.
 
-    Bounded by max_tool_calls — an unbounded loop is a demo that runs forever
-    on stage, and the cap is also what makes T1's cost a known quantity.
+    Bounded by max_tool_calls, which is what makes T1's cost a known quantity.
     """
     emit = get_stream_writer()
     known = render_cache(state.get("cache", []))
@@ -355,8 +320,8 @@ async def explore(state: TurnState) -> TurnState:
         + (f"\n\n{known}" if known else "")
     )
 
-    # Whatever `plan` could not resolve is exactly what this loop is for, so
-    # say so — an incremental turn should not re-derive what is already cached.
+    # Whatever `plan` could not resolve is what this loop is for, so say so —
+    # an incremental turn should not re-derive what is already cached.
     gaps = state.get("missing") or []
     ask = f"Question: {state['question']}"
     if gaps:
@@ -384,8 +349,8 @@ async def explore(state: TurnState) -> TurnState:
             outcomes: list[tuple[str, str, bool]] = []
             for call in result.tool_uses:
                 calls += 1
-                # A span each, because the alternative is what the turn table
-                # already shows: 24 introspection calls as the integer 24.
+                # A span each, so 24 introspection calls are not just the
+                # integer 24 the turn table shows.
                 with tracing.span(
                     name=f"tool.{call.name}", input=call.input, as_type="tool"
                 ) as sp:
@@ -403,9 +368,8 @@ async def explore(state: TurnState) -> TurnState:
                 outcomes.append((call.id, payload, is_error))
             messages.extend(llm.tool_results(outcomes, node="explore"))
 
-        # Hitting the cap means the model was mid-investigation and never got
-        # to write its summary. Ask for it explicitly rather than handing
-        # generate_sql "(no findings)" and letting it write SQL blind.
+        # Hitting the cap means the model never got to write its summary. Ask
+        # for one rather than handing generate_sql "(no findings)".
         if result is not None and result.tool_uses:
             messages.append(llm.assistant_turn(result, node="explore"))
             messages.extend(
@@ -474,16 +438,10 @@ async def generate_sql(state: TurnState) -> TurnState:
 
 
 def driver_message(e: BaseException) -> str:
-    """The error text the model is shown in `fix`, and the text a user sees in
-    `answer` when the turn gives up.
+    """The error text `fix` is shown, and what a user sees when the turn gives up.
 
-    SQLAlchemy wraps the driver's exception: `str()` prepends
-    `(psycopg.errors.UndefinedColumn)`, appends `[SQL: <the whole query>]` and a
-    docs link. `fix` already re-sends the SQL itself, so the echo is the same
-    context twice, and "Background on this error at: https://sqlalche.me/..." is
-    the last thing a user should read when their question failed. `.orig` is the
-    one sentence a database user would recognise, and it is exactly what this
-    node produced before the port.
+    SQLAlchemy's `str()` prepends its own type name, appends the whole query and
+    a docs link. `.orig` is the one sentence a database user would recognise.
     """
     orig = getattr(e, "orig", None)
     return str(orig if orig is not None else e).strip()
@@ -496,50 +454,43 @@ async def execute(state: TurnState) -> TurnState:
         with tracing.span(name="sql.execute", input=state["sql"]) as sp:
             async with db.target_readonly(state["connection_id"]) as conn:
                 # exec_driver_sql, never text(). `text()` reads `:name` as a bind
-                # parameter, and this string is whatever the model wrote — a
-                # literal like `WHERE status = ':pending'` would become a
-                # missing-parameter error instead of the SQL error the fix node
-                # knows how to react to. Postgres `::` casts happen to survive
-                # text()'s regex, which makes the failure rare enough to ship and
-                # confusing enough to lose a day to. exec_driver_sql hands the
-                # string to the driver untouched, exactly as psycopg did.
+                # parameter, and this string is whatever the model wrote, so
+                # `WHERE status = ':pending'` becomes a missing-parameter error
+                # instead of the SQL error `fix` knows how to react to. Postgres
+                # `::` casts survive text()'s regex, which makes it rare.
                 result = await conn.exec_driver_sql(state["sql"])
-                # A statement that returned no result set — the model
-                # occasionally writes an EXPLAIN — has already closed its cursor,
-                # and .mappings() on a closed one raises ResourceClosedError,
-                # which reads to `fix` as a driver fault rather than as "that
-                # isn't a SELECT".
+                # A statement returning no result set — the model occasionally
+                # writes an EXPLAIN — has closed its cursor, and .mappings() on a
+                # closed one raises ResourceClosedError, which reads to `fix` as
+                # a driver fault rather than "that isn't a SELECT".
                 #
-                # Drained inside the `async with`: the connection returns to the
-                # pool on exit and the result closes with it. dict(m) because
-                # RowMapping is dict-*like* and json.dumps will not serialise it.
+                # Drained inside the `async with`, because the result closes with
+                # the connection. dict(m) because json.dumps cannot take a
+                # RowMapping.
                 fetched = (
                     [dict(m) for m in result.mappings().fetchmany(config().max_rows)]
                     if result.returns_rows
                     else []
                 )
             rows = json.loads(json.dumps(fetched, default=str))
-            # The span keeps a preview; a trace does not need fifty rows to be
-            # legible, and the client is the thing that has to show the result.
+            # A preview: a trace does not need fifty rows to be legible.
             sp.update(output={"count": len(rows), "rows": rows[:5]})
         emit(
             {
                 "type": "rows",
                 "count": len(rows),
-                # Every row the model saw, not a hardcoded five. Five was
-                # silently a different number from `max_rows`, so a 20-row answer
-                # rendered as 5 with nothing on the wire saying so.
+                # Every row the model saw, so a client never renders fewer than
+                # the answer was based on.
                 "rows": rows,
                 # `fetchmany(max_rows)` cannot tell a full page from a result
-                # that happened to be exactly that long, so the honest thing a
-                # client can say is "more may exist" — never a total we never had.
+                # that happened to be exactly that long, so a client can only say
+                # "more may exist" — never a total nothing ever counted.
                 "capped": len(rows) == config().max_rows,
             }
         )
         return {"rows": rows, "error": ""}
     except Exception as e:
-        # Including programming errors: a bad column name is exactly what the
-        # fix node exists to react to.
+        # Including programming errors: a bad column name is what `fix` is for.
         message = driver_message(e)
         emit({"type": "error", "message": message})
         return {"error": message, "rows": []}
@@ -590,16 +541,9 @@ _TOKEN = re.compile(r"'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*|\d+|[^\s\w]")
 def _tokens(sql: str) -> list[str]:
     """Tokens for the subsequence gate, with string literals kept verbatim.
 
-    Everything used to be lower-cased. That is right for identifiers and
-    keywords, which SQL folds, and it is wrong for literals — which is trap 2:
-    `customer.region` holds `west`, `West` and `WEST`, so a recipe claiming
-    `region = 'west'` would be marked *verified* against SQL that filtered on
-    `'WEST'`. The gate exists to catch a recipe saying something the query did
-    not; a fold that erases the difference the demo is built on is the gate
-    lying.
-
-    `casefold()` rather than `lower()` for the rest: `İ` folds to `i̇`, and a
-    Turkish column name is not this function's problem to get wrong.
+    Identifiers and keywords fold because SQL folds them; literals must not.
+    `customer.region` holds `west`, `West` and `WEST`, so a folded recipe
+    claiming `region = 'west'` would verify against SQL filtering on `'WEST'`.
     """
     return [
         t if t.startswith("'") else t.casefold()
@@ -610,27 +554,14 @@ def _tokens(sql: str) -> list[str]:
 def grounded_in(fragment: str | None, sql: str) -> bool:
     """Does this recipe's fragment actually appear in the SQL that ran?
 
-    This is the whole verification gate, and it exists because of a specific
-    observed failure: the model reported revenue excluding pending orders while
-    its SQL excluded only cancelled and refunded — a 16% gap between the answer
-    and the query. Prose is a claim; executed SQL is evidence. Only evidence
-    marks an entry `verified`.
+    The verification gate: prose is a claim, executed SQL is evidence, and only
+    evidence marks an entry `verified`. The failure it catches is a model
+    reporting revenue excluding pending orders while its SQL excluded only
+    cancelled and refunded — a 16% gap between the answer and the query.
 
-    Matching is an **order-preserving token subsequence**, not a substring.
-    Substring matching was the first attempt and it was too brittle to be
-    useful: a recipe of `COUNT(*) FROM customer WHERE deleted_at IS NULL` failed
-    against `SELECT COUNT(*) AS active_customer_count FROM customer WHERE
-    deleted_at IS NULL`, because the alias sits between two adjacent fragment
-    tokens. A gate that rejects correct recipes is no more use than one that
-    accepts wrong ones.
-
-    Subsequence matching tolerates aliases, whitespace and formatting while
-    still rejecting a fragment that names anything the query never mentioned —
-    an invented `'pending'` has no token to match, wherever you look.
-
-    Unverified entries are still written — they're useful context, and §5's
-    compaction is what eventually drops the ones nothing uses. They just don't
-    carry the authority a verified recipe does.
+    An **order-preserving token subsequence**, not a substring, so an alias
+    between two fragment tokens cannot reject a correct recipe. Unverified
+    entries are still written; they just carry less authority.
     """
     if not fragment:
         return False
@@ -644,33 +575,26 @@ def grounded_in(fragment: str | None, sql: str) -> bool:
 async def infer_tables(sql: str, connection_id: str) -> list[str]:
     """Which real tables does this SQL touch?
 
-    The model is asked for `tables` and sometimes returns an empty list. Left
-    alone that silently disables drift detection — `schema_fp` becomes a hash
-    over nothing, so the entry can never go stale (§5) no matter what happens
-    to the schema it depends on.
+    The model sometimes returns an empty `tables`, which would make `schema_fp`
+    a hash over nothing — an entry that can never go stale (§5).
     """
     async with db.target(connection_id) as conn:
         known = await conn.run_sync(
             lambda sync_conn: set(inspect(sync_conn).get_table_names())
         )
-    # Folded on both sides, and the *stored* spelling is what comes back.
-    # Postgres folds unquoted identifiers to lower case, so lower-casing both
-    # sides was right there and wrong everywhere else: MySQL on a
-    # case-sensitive filesystem stores `Orders` as `Orders`, and the old
-    # intersection returned [] for it. That does not fail — it quietly switches
-    # off drift detection for every entry the turn writes, which is exactly what
-    # this function exists to prevent.
+    # Folded on both sides, and the *stored* spelling comes back. MySQL on a
+    # case-sensitive filesystem stores `Orders` as `Orders`, and a lower-cased
+    # intersection would return [] for it — switching off drift detection for
+    # every entry the turn writes, which is what this function prevents.
     by_fold = {n.casefold(): n for n in known}
     seen = {t.casefold() for t in _tokens(sql)}
     return sorted(by_fold[k] for k in by_fold.keys() & seen)
 
 
 # The two anchors `extract_message` writes and `optim/` splits back out. Named
-# rather than left inline because a harvested case is replayed *verbatim* — only
-# the SQL is parsed back out of it, for the verification gate — and a literal
-# duplicated across two packages is a literal that drifts. The drift would be
-# silent in the worst way: the metric would score a candidate's recipes against
-# the wrong query and report the grounding rate with a straight face.
+# rather than inline because a harvested case is replayed verbatim and only the
+# SQL is parsed back out of it — a literal duplicated across two packages drifts
+# silently, and the metric would score recipes against the wrong query.
 EXTRACT_SQL_ANCHOR = "SQL that ran:\n"
 EXTRACT_FILED_ANCHOR = "\n\nAlready filed."
 
@@ -680,9 +604,9 @@ def extract_message(
 ) -> str:
     """The user turn `extract` sends. Pure, so a probe case can build a real one.
 
-    Showing the model what is already filed is what stops it paraphrasing its
-    own keys — a live run produced "active customer count" on one turn and
-    "active customers count" on the next, which the upsert cannot merge.
+    Showing the model what is already filed stops it paraphrasing its own keys
+    into "active customer count" and "active customers count", which the upsert
+    cannot merge.
     """
     known = "\n".join(
         f"- {e['name']}: {e['claim']}" for e in cache if e.get("name")
@@ -706,10 +630,8 @@ def entries_from(
 ) -> list[store.CacheEntry]:
     """Model output → cache entries, with the verification gate applied.
 
-    Lifted out of `extract` and kept pure so the optimiser scores what
-    production would actually write. A harness that re-implements this agrees
-    with it right up until someone edits one of the two, and then measures a
-    prompt against a rule the product does not apply.
+    Pure, so the optimiser scores what production would actually write rather
+    than a re-implementation that agrees until one of the two is edited.
     """
     return [
         store.CacheEntry(
@@ -730,19 +652,17 @@ async def extract(state: TurnState) -> TurnState:
     if state.get("error") or not state.get("sql"):
         return {}
 
-    # Nothing was learned. `plan` answering from cache without exploring means
-    # the cache already held everything the question needed — re-deriving it
-    # writes near-duplicates of entries that are right there, and bills a call
-    # per turn to do it. This is a third of a cached turn's cost, and it recurs
-    # forever. A turn that needed a fix *did* learn something, so it still runs.
+    # Nothing was learned: `plan` answering from cache without exploring means
+    # the cache already held what the question needed, and re-deriving it writes
+    # near-duplicates at a model call per turn, forever. A turn that needed a fix
+    # did learn something, so it still runs.
     if state.get("sufficient") and not state.get("fix_attempts"):
         emit({"type": "learned", "count": 0, "skipped": 0, "entries": [], "cached": True})
         return {}
 
-    # Extraction is a bonus, not the deliverable. The question is already
-    # answered by the time we get here, and throwing that away because the
-    # model failed to *learn* from it would be a bad trade — the turn would
-    # report failure to a user who has a correct answer sitting right there.
+    # Extraction is a bonus, not the deliverable: the question is already
+    # answered by now, and failing the turn because the model could not learn
+    # from it would report failure to a user who has a correct answer.
     try:
         result = await llm.complete(
             system=prompts.get("extract"),
@@ -778,9 +698,8 @@ async def extract(state: TurnState) -> TurnState:
     fallback_tables = await infer_tables(sql, state["connection_id"])
     entries = entries_from(parsed, sql, fallback_tables)
 
-    # The one operation that spans both databases, and the order is forced: the
-    # fingerprint is a fact about the business schema, the entry it lands on is
-    # the agent's own memory, and no single connection reaches both.
+    # The one operation spanning both databases, and the order is forced: no
+    # single connection reaches the target and the agent's own memory.
     async with db.target(state["connection_id"]) as conn:
         await store.fingerprint_entries(conn, entries)
     async with db.agent() as conn:
@@ -844,9 +763,8 @@ async def answer(state: TurnState) -> TurnState:
     latency = int((time.monotonic() - state.get("started_at", time.monotonic())) * 1000)
 
     async with db.agent() as conn:
-        # Credit the entries this turn leaned on, but only now — an entry that
-        # fed a query which never ran has not earned a hit, and `hits` both
-        # orders the cache and shows blast radius in /admin/cache.
+        # Credit the entries this turn leaned on, and only now: an entry that
+        # fed a query which never ran has not earned a hit.
         if not state.get("error"):
             await store.bump_hits(
                 conn,
@@ -900,17 +818,11 @@ def route_after_execute(state: TurnState) -> str:
 
 
 async def stream_turn(compiled, session_id: str, question: str, connection_id: str):
-    """Drive one turn, yielding UI events. Never raises.
+    """Drive one turn, yielding UI events. Never raises — a model timeout is one
+    failed turn, not a traceback and a turn row left open.
 
-    A model timeout or a dropped connection would otherwise surface as a
-    traceback and leave the turn row open. On stage that reads as the demo
-    crashing; here it reads as one turn that failed, and the next question
-    still works.
-
-    This is also the turn boundary for tracing, and the `with` sits *outside* the
-    `try` deliberately: app/api.py breaks out of this generator when the client
-    disconnects, so the span has to close on `aclose()` too and not only on the
-    paths that reach the end.
+    The tracing `with` sits *outside* the `try`: app/api.py breaks out of this
+    generator on client disconnect, so the span has to close on `aclose()` too.
     """
     with tracing.turn(
         session_id=session_id, question=question, connection_id=connection_id
@@ -927,9 +839,8 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
                 config={"configurable": {"thread_id": session_id}},
             ):
                 if mode == "custom" and isinstance(chunk, dict):
-                    # The turn's own output, taken off the event stream rather
-                    # than out of the final state — `answer` computes the totals
-                    # and this is where they arrive already assembled.
+                    # Off the event stream rather than the final state, because
+                    # `answer` computes the totals and they arrive assembled.
                     if chunk.get("type") == "answer":
                         trace.update(output=chunk)
                     yield chunk
@@ -939,8 +850,8 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
                     for ev in to_events(mode, chunk):
                         yield ev
         except Exception as e:
-            # Transport errors often stringify to nothing (httpx.ReadTimeout), so
-            # the class name has to carry the meaning.
+            # Transport errors often stringify to nothing (httpx.ReadTimeout),
+            # so the class name has to carry the meaning.
             detail = str(e).strip()
             message = f"{type(e).__name__}{': ' + detail if detail else ''}"
             trace.update(level="ERROR", status_message=message)
@@ -961,16 +872,9 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
 def traced(node):
     """A node, wrapped in a span named after it.
 
-    The nesting the trace shows is just Python's call stack, so nothing here
-    needs to know about the generations and tool spans that open underneath it.
-    Written by hand rather than taken from `langfuse.langchain.CallbackHandler`,
-    which needs the whole `langchain` package: this project has langgraph and
-    langchain-core only, and a meta-package pulled in to draw a box on a diagram
-    would be the largest dependency in the lock file.
-
-    The span's output is the node's returned *delta* — the same thing LangGraph
-    streams as an `updates` chunk, and the smallest honest answer to "what did
-    this node do".
+    Hand-rolled rather than `langfuse.langchain.CallbackHandler`, which needs
+    the whole `langchain` meta-package; this project has langchain-core only.
+    The span's output is the node's returned delta.
     """
 
     @functools.wraps(node)
@@ -988,7 +892,7 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None):
     for node in (
         load_cache, plan, explore, generate_sql, execute, fix, extract, answer
     ):
-        # functools.wraps keeps __name__, which is what names the node — the
+        # functools.wraps keeps __name__, which is what names the node, so the
         # graph's shape does not change because it is being watched.
         g.add_node(node.__name__, traced(node))
 

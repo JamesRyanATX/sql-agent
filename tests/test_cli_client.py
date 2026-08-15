@@ -1,11 +1,11 @@
-"""SSE framing in sql_agent_cli/http.py.
+"""SSE framing in cli/sql_agent/http.py.
 
 The CLI renders whatever comes out of here, so a dropped or mis-split frame is a
 turn that looks like it never finished. Driven through a mock transport rather
 than a live turn: the framing is the thing under test, not the agent.
 
 This file imports both sides on purpose — `app.events.sse` builds the fixtures
-and `sql_agent_cli.http` parses them. It is the contract test for the split, and
+and `sql_agent.http` parses them. It is the contract test for the split, and
 the one place in the suite where the two halves are allowed to meet.
 """
 
@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from app.events import sse
-from sql_agent_cli import http as _client
+from sql_agent import http as _client
 
 
 def stream_of(*chunks: str) -> httpx.MockTransport:

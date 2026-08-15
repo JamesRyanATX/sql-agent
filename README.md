@@ -188,38 +188,6 @@ make optim-apply     # write it into config/prompts/extract.md
 turns have to have happened. `optim-probe` and `optim-run` call a model and cost
 real tokens.
 
-**Why it is cheap.** `llm.complete()` is the only function that talks to a model,
-and it records every call under a name that is the graph node. Langfuse therefore
-already holds a per-node dataset of exact inputs and outputs — and `extract` is
-very nearly a pure function of three recorded strings, so scoring one candidate
-is one `low`-effort model call against no database at all. A whole turn is 11.5k
-tokens and half a minute; this is neither.
-
-**What it optimises against, and what it cannot.** Five weighted terms, because
-every cheap metric here is self-defeating alone: the verification gate accepts a
-token subsequence, so a prompt optimised purely for "recipes verified" learns to
-emit fragments that verify against anything. The metric is a compromise and is
-treated as one.
-
-**The probes are the part that says never.** Four authored cases in
-[tests/probes/extract/](tests/probes/extract/) assert the invariants the prompt
-is the only home for — no census, recipes grounded in the SQL that ran, no scope
-creep, no near-collision with an already-filed name. They are deliberately *not*
-GEPA's validation set: they run afterwards, against every candidate in the pool,
-and one that regresses a probe the seed passed is discarded whatever it scored.
-Weights cannot express "never" — a mean-maximising search trades a rare
-catastrophic failure for a broad small gain whenever the arithmetic allows, and
-these failures surface turns later, in a poisoned cache, where no metric here can
-see them.
-
-**Nothing promotes itself.** `optim-apply` writes
-`config/prompts/extract.md` and stops — nothing staged, nothing committed — so
-what you review is a diff of prose in a tracked file. It refuses a candidate with
-no recorded gate, a target with uncommitted changes, and one that scored below
-the prompt it would replace. That last one is not hypothetical: a run here scored
-the seed 0.959 and its best survivor 0.928. Clearing every probe does not make a
-candidate better than what it replaces.
-
 ## Design
 
 See [PLAN.md](PLAN.md) for architecture details and the build plan.

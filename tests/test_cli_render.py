@@ -15,8 +15,8 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from sql_agent_cli import events
-from sql_agent_cli import render as render_mod
+from sql_agent import events
+from sql_agent import render as render_mod
 
 ANSWER = {
     "type": "answer",

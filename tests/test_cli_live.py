@@ -24,7 +24,7 @@ import pytest
 from httpx import AsyncClient
 
 from app import store
-from sql_agent_cli import config, connections, http, memory
+from sql_agent import config, connections, http, memory
 from tests.conftest import DEFAULT_CONNECTION as CID
 
 

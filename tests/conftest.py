@@ -393,7 +393,7 @@ def dialect(request) -> str:
 def cli_env(monkeypatch, tmp_path):
     """The CLI's two environment variables, and a state file per test.
 
-    Autouse because `sql_agent_cli.config` reads the real environment and the
+    Autouse because `sql_agent.config` reads the real environment and the
     real `~/.local/state`, and a suite that wrote to a developer's actual
     selected connection would be rude as well as flaky. Tests about a *missing*
     variable delete it themselves.

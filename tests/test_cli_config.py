@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from sql_agent_cli import config
-from sql_agent_cli.http import ApiError
+from sql_agent import config
+from sql_agent.http import ApiError
 
 NO_CONNECTION = (
     "no connection selected — pick one with 'sql-agent connect <id>' "

@@ -4,23 +4,16 @@ The cache is the product (PLAN.md §6.2), so this layer holds the two rules that
 protect it: a human's correction is never silently overwritten, and every entry
 records a fingerprint of the schema it was learned against.
 
-**Two servers, and the functions here are not interchangeable about which** —
-and now they are not even the same *type*. Everything takes a
-`psycopg.AsyncConnection` against the agent's own database except
+**Two servers, and the functions here are not interchangeable about which.**
+Everything takes a `psycopg.AsyncConnection` to the agent's own database except
 `reflect_columns`, `schema_fingerprint`, `fingerprint_entries` and `stale_ids`,
-which take a **SQLAlchemy** connection to a target. An entry is agent state
-describing target shape, and those are the only places the two meet. Handing one
-kind where the other belongs used to be a quiet bug; it is now an
-`AttributeError` on the first line.
+which take a **SQLAlchemy** connection to a target — and it must be *the entry's
+own* connection's target, or every entry reports stale, or coincidentally not.
 
-**And now N targets.** Everything that reads or writes what the agent has
-learned is scoped to one `connection_id`, and **none of these functions has a
-default for it**. A default is how one warehouse's cache ends up answering
-another warehouse's question, and nothing about that failure is loud: the
-answer looks right, the SQL looks right, and the numbers come from the wrong
-database. The three fingerprint functions keep their signatures, but their
-caller now owes them a target connection belonging to *the entry's own*
-connection.
+**Everything touching learned state is scoped to one `connection_id`, and none
+of these functions has a default for it.** A default is how one warehouse's
+cache answers another warehouse's question: the answer looks right, the SQL
+looks right, and the numbers come from the wrong database.
 """
 
 from __future__ import annotations
@@ -74,20 +67,19 @@ class CacheEntry:
 
 # ------------------------------------------------------------------- registry
 #
-# A registered database the agent can be pointed at. Note the word: `app/db.py`
-# uses "connection" ~20 times to mean a psycopg connection, and these are not
-# that. Never bind a bare `connection` variable to one of these rows — it is
-# `connection_id: str` or `registered: store.Connection`, always.
+# A registered database the agent can be pointed at. `app/db.py` uses the word
+# "connection" ~20 times to mean a driver connection, so never bind a bare
+# `connection` variable to one of these rows — it is `connection_id: str` or
+# `registered: store.Connection`, always.
 
 
-# The drivers a connection may name. Async-capable only: a sync driver would
-# need every target call to cross into a thread pool, and a thread pool under an
-# asyncio graph is how a demo hangs on stage. Mirrored by a CHECK in
-# migrations/003 — a row edited by hand at psql never sees a validator.
+# Async-capable drivers only: a sync one would put a thread pool under the
+# asyncio graph. Mirrored by a CHECK in migrations/003, since a row edited by
+# hand at psql never sees a validator.
 DRIVERS = ("postgresql+psycopg", "mysql+asyncmy", "sqlite+aiosqlite")
 
-# What a user may reasonably type, and what it means. `postgresql://` on its own
-# resolves to psycopg2 in SQLAlchemy, which is not installed and not wanted.
+# What a user may reasonably type. `postgresql://` alone resolves to psycopg2 in
+# SQLAlchemy, which is not installed.
 _ALIASES = {
     "postgres": "postgresql+psycopg",
     "postgresql": "postgresql+psycopg",
@@ -119,9 +111,8 @@ class Connection:
     port: int | None = None
     database: str | None = None  # the file path, when the driver is sqlite
     username: str | None = None
-    # **Plaintext**, unsealed on read. It exists to be handed to a driver and
-    # nothing else; the wire model in app/schemas.py has no password field at
-    # all, so this can never be leaked by serialising the wrong object.
+    # **Plaintext**, unsealed on read, and only ever handed to a driver. The wire
+    # model in app/schemas.py has no password field at all.
     password: str | None = None
     sslmode: str = "prefer"  # postgres only; ignored elsewhere
     options: dict[str, Any] = field(default_factory=dict)
@@ -136,24 +127,20 @@ class Connection:
     @property
     def dialect(self) -> str:
         """`postgresql` | `mysql` | `sqlite` — the half of `driver` that changes
-        the SQL. The other half only changes who dials the socket, and nothing
-        above app/db.py should care which."""
+        the SQL. Nothing above app/db.py should care about the other half."""
         return self.driver.split("+", 1)[0]
 
     def _url(self, *, password: str | None, query: bool = True) -> URL:
         """The address as SQLAlchemy sees it.
 
-        `URL.create`, never an f-string — the same reason this was never an
-        f-string when it built a libpq DSN: a password containing `@`, `/` or
-        `%` produces a wrong-and-confusing URL under string formatting, and the
-        resulting authentication failure points at the password rather than at
-        the quoting. `URL.create` takes the parts as objects and percent-encodes
-        on render, so there is nothing to get wrong.
+        `URL.create`, never an f-string: a password containing `@`, `/` or `%`
+        formats into a wrong URL whose authentication failure blames the
+        password rather than the quoting.
         """
         if self.dialect == "sqlite":
             # host/port/username are NULL for sqlite by construction (the CHECK
-            # in 003). Passing them anyway renders a URL whose authority section
-            # aiosqlite quietly treats as part of the path.
+            # in 003), and passing them renders an authority section aiosqlite
+            # treats as part of the path.
             return URL.create(self.driver, database=self.database)
         return URL.create(
             self.driver,
@@ -169,11 +156,9 @@ class Connection:
         if self.dialect == "postgresql":
             return {"sslmode": self.sslmode}
         if self.dialect == "mysql":
-            # asyncmy negotiates latin1_swedish_ci by default, and that is not
-            # cosmetic: a CAST or a comparison then runs under the *connection's*
-            # collation rather than the column's, which is case-insensitive and
-            # folds `west`/`West`/`WEST` together. utf8mb4 makes the connection
-            # agree with any server built this decade.
+            # asyncmy negotiates latin1_swedish_ci by default, which is
+            # case-insensitive — a comparison under the connection's collation
+            # then folds `west`/`West`/`WEST` together.
             return {"charset": "utf8mb4"}
         return {}
 
@@ -182,15 +167,11 @@ class Connection:
         return self._url(password=self.password)
 
     def conninfo(self) -> str:
-        """A libpq URL, for the psycopg call sites that have not moved yet.
-
-        Temporary: `app/db.py`'s target pools and `app/api.py::_probe` still
-        dial with psycopg, and they are replaced together in the phase that
-        makes `db.target()` return a SQLAlchemy connection. Deleted with them.
+        """A libpq URL, for dialing this address with psycopg rather than
+        SQLAlchemy. Postgres only.
         """
         assert self.dialect == "postgresql", (
-            f"{self.id!r} is {self.driver} — psycopg cannot dial it. "
-            "This path exists only until db.target() moves to SQLAlchemy."
+            f"{self.id!r} is {self.driver} — psycopg cannot dial it."
         )
         return self._url(password=self.password).set(
             drivername="postgresql"
@@ -199,18 +180,8 @@ class Connection:
     def safe_dsn(self) -> str:
         """The address, renderable. Never carries the password.
 
-        Rendered from a URL built *without* one rather than from a real URL with
-        `hide_password=True`. SQLAlchemy 2.0's masking is sound — `__repr__` and
-        `__str__` both hide it — but masking is the weaker promise: it is one
-        flipped keyword from leaking, and this string goes to the API, the CLI
-        and error messages. A password that was never put in the object cannot
-        come out of it.
-
-        The query string is dropped too — `sslmode` has its own line in
-        `sql-agent connections get`, and an address a human reads should not
-        repeat it.
-
-        What `GET /v1/connections` shows.
+        Built from a URL with no password rather than masking a real one, which
+        is one flipped keyword from leaking. The query string is dropped too.
         """
         return self._url(password=None, query=False).render_as_string(
             hide_password=False
@@ -218,16 +189,8 @@ class Connection:
 
 
 def connection_from_url(url: str, *, id: str, origin: str = "api") -> Connection:
-    """Parse a URL into a registry row.
-
-    Used for the env-owned `default` row, whose address is TARGET_DATABASE_URL,
-    and by the test harness — which has to agree with the lifespan about how a
-    URL becomes a row, or the two disagree in exactly the way that is hardest
-    to see.
-
-    Note this reads URLs only. It used to go through `psycopg.conninfo`, which
-    also accepted libpq keyword form (`host=x dbname=y`); a TARGET_DATABASE_URL
-    in that spelling now fails at startup rather than being silently reparsed.
+    """Parse a URL into a registry row. URLs only — libpq keyword form
+    (`host=x dbname=y`) fails here rather than being reparsed.
     """
     parsed = make_url(url)
     driver = normalise_driver(parsed.drivername)
@@ -262,11 +225,7 @@ async def list_connections(conn: AsyncConnection) -> list[Connection]:
 
 
 async def connection_stats(conn: AsyncConnection) -> dict[str, dict[str, int]]:
-    """Cache and turn counts per connection, in one query.
-
-    Kept off `Connection` deliberately: the dataclass is the registry row, and
-    these are facts about other tables that happen to point at it.
-    """
+    """Cache and turn counts per connection, in one query."""
     cur = await conn.execute(
         """
         SELECT c.id,
@@ -318,13 +277,9 @@ async def update_connection(
 ) -> Connection | None:
     """Change the named fields and nothing else. None if there is no such row.
 
-    Partial by construction: a caller that passes no fields gets the row back
-    untouched, and a field absent from `fields` is never confused with a field
-    set to NULL. `password` is sealed on the way in.
+    An absent field is never confused with one set to NULL. `password` is sealed.
     """
-    # `driver` is deliberately absent — see the 409 in app/api.py. A cached
-    # recipe is SQL in a dialect, so changing the driver under one silently
-    # invalidates every entry, and schema_fp would not catch it.
+    # No `driver` — see the 409 in app/api.py.
     allowed = ("label", "host", "port", "database", "username", "password",
                "sslmode", "options")
     unknown = set(fields) - set(allowed)
@@ -351,10 +306,8 @@ async def update_connection(
 async def delete_connection(conn: AsyncConnection, connection_id: str) -> dict[str, int]:
     """Remove a connection and everything learned about it.
 
-    The counted deletes run here rather than being left to the foreign keys'
-    `ON DELETE CASCADE`, so the caller can report what it destroyed. The cascade
-    stays as a backstop for a `DELETE FROM connection` typed at psql, where
-    there is nobody to report to.
+    Counted deletes rather than the foreign keys' cascade, so the caller can
+    report what it destroyed.
     """
     wiped = await reset_learned(conn, connection_id=connection_id)
     await conn.execute("DELETE FROM connection WHERE id = %s", (connection_id,))
@@ -367,13 +320,7 @@ async def delete_connection(conn: AsyncConnection, connection_id: str) -> dict[s
 async def reflect_columns(
     conn: TargetConnection, tables: Sequence[str]
 ) -> dict[str, Any]:
-    """One reflection pass over `tables`. **Takes a target connection.**
-
-    Batched deliberately. This used to be one `information_schema` query per
-    entry, which was merely wasteful; through reflection it would be one whole
-    table reflection per entry, on somebody else's warehouse, per page load of
-    `GET /connections/{id}/cache`.
-    """
+    """One batched reflection pass over `tables`. **Takes a target connection.**"""
     from sqlalchemy import inspect
 
     def work(sync_conn: Any) -> dict[str, Any]:
@@ -399,10 +346,9 @@ def fingerprint(shapes: dict[str, Any], tables: Sequence[str]) -> str:
     """Hash `tables`' shape out of an already-reflected map. Pure."""
     lines = [
         # The dialect leads, so an entry fingerprinted against Postgres cannot
-        # compare equal to the same table on MySQL. The PATCH that refuses a
-        # driver change is what actually closes that door; this catches the case
-        # it cannot see — the address stayed the same and the database behind it
-        # did not.
+        # compare equal to the same table on MySQL — which catches the case the
+        # PATCH refusing a driver change cannot see: the address stayed the same
+        # and the database behind it did not.
         f"dialect:{shapes.get('__dialect__', '')}"
     ]
     for t in sorted(tables):
@@ -416,17 +362,10 @@ async def schema_fingerprint(
 ) -> str:
     """Hash the live shape of `tables`. **Takes a target connection.**
 
-    Stored on an entry at write time; recomputed on load. A mismatch means the
-    schema moved under a recipe that was learned against the old shape, so the
-    entry can no longer be trusted (§5).
-
-    Catches renames, drops, additions and type changes. Does not catch a column
-    keeping its name and changing its meaning — that one is in §10 for a reason.
-
-    The type strings come from the dialect's own reflection, so a fingerprint is
-    comparable only within one connection. That was always true and is now
-    visibly so; `migrations/003` NULLs every fingerprint written before the port
-    for exactly this reason.
+    Stored at write time and recomputed on load; a mismatch means the schema
+    moved under a recipe learned against the old shape (§5). The type strings
+    come from the dialect's own reflection, so a fingerprint is comparable only
+    within one connection.
     """
     return fingerprint(await reflect_columns(conn, tables), tables)
 
@@ -436,14 +375,8 @@ async def fingerprint_entries(
 ) -> None:
     """Stamp each entry with the shape of the tables it describes, in place.
 
-    **Takes a target connection**, and has to be called before `write_entries`,
-    which takes an agent one. Splitting them is what the two servers force: the
-    fingerprint is a fact about the business schema, the entry it lands on is
-    the agent's own memory, and no single connection can reach both.
-
-    An entry naming no tables gets no fingerprint. That is honest — there is
-    nothing to hash — and `stale_ids` reads a missing fingerprint as "unknown"
-    rather than "fine".
+    **Takes a target connection**, so it must run before `write_entries`. An
+    entry naming no tables gets no fingerprint.
     """
     pending = [e for e in entries if e.schema_fp is None and e.tables]
     if not pending:
@@ -462,13 +395,8 @@ async def load_cache(
     """One connection's entries, not disabled, ordered by hits.
 
     All of it, every turn — it fits in context, and retrieval would only add a
-    way to miss the entry you needed (§4). "All of it" now means all of *this
-    connection's*: what the agent knows about one warehouse is not evidence
-    about another, and handing the model both is how a recipe crosses over.
-
-    Tombstones are included deliberately. A tombstone *is* the useful content:
-    a visible negative constraint that stops exploration rediscovering the same
-    wrong thing next session (§5).
+    way to miss the entry you needed (§4). Tombstones included: a visible
+    negative constraint stops exploration rediscovering the same wrong thing (§5).
     """
     cur = await conn.execute(
         f"SELECT {_COLUMNS} FROM cache_entry "
@@ -479,11 +407,7 @@ async def load_cache(
 
 
 async def count_disabled(conn: AsyncConnection, *, connection_id: str) -> int:
-    """How many of this connection's entries `load_cache` filtered out.
-
-    The one number a caller cannot derive from the entries themselves, and the
-    cache listing shows it so a disabled entry never goes quietly missing.
-    """
+    """How many of this connection's entries `load_cache` filtered out."""
     cur = await conn.execute(
         "SELECT count(*) AS n FROM cache_entry "
         "WHERE connection_id = %s AND disabled",
@@ -498,15 +422,9 @@ async def stale_ids(
 ) -> set[int]:
     """Which entries were learned against a schema that has since moved?
 
-    **Takes a target connection**, and it must be *this entry's* connection's
-    target — asking a different one reports every entry stale, or worse,
-    coincidentally not stale.
-
-    An entry with no fingerprint or no tables can't be checked, so it is never
-    reported stale — silence here means "unknown", not "fine", which is why
-    `infer_tables` in the graph works so hard to keep `tables` populated.
-
-    Reporting only, for now. §5's invalidation is phase 6 and will use this.
+    **Takes a target connection**, and it must be *this entry's* connection's.
+    An entry with no fingerprint or no tables is never reported stale, so
+    silence means "unknown" rather than "fine". Reporting only, for now (§5).
     """
     checkable = [e for e in entries if e.id is not None and e.schema_fp and e.tables]
     if not checkable:
@@ -530,22 +448,11 @@ async def write_entries(
     """Insert or refresh learned entries. Returns the ids actually written.
 
     **Takes an agent connection**, and does not compute fingerprints — that is
-    `fingerprint_entries`, which needs the target. This function used to fall
-    back to hashing on its own connection, which quietly became wrong the day
-    the two databases split: it would have fingerprinted the *agent* schema and
-    stamped the answer onto an entry describing business tables, permanently
-    stale from the moment it was written.
+    `fingerprint_entries`, which needs the target.
 
-    Named entries upsert **within a connection**, so re-learning `revenue`
-    refines one row instead of accumulating near-duplicates for compaction to
-    clean up later — while `revenue` on another warehouse stays a separate
-    entry, because it is a separate fact.
-
-    **A human's pinned entry is never overwritten.** That is the whole point of
-    the admin surface: correcting a recipe fixes every future question that
-    composes it (§6.2), and an extraction quietly reverting that correction on
-    the next turn is the worst bug this system can have. Such an entry is
-    skipped and its id is absent from the return value.
+    Named entries upsert **within a connection**, so `revenue` on another
+    warehouse stays a separate entry. **A human's pinned entry is never
+    overwritten**: it is skipped, and its id is absent from the return value.
     """
     written: list[int] = []
     for e in entries:
@@ -606,14 +513,9 @@ async def bump_hits(
 ) -> None:
     """Mark the entries a turn actually used.
 
-    `hits` orders the cache and shows blast radius in the admin list;
-    `last_used_turn` is what lets compaction drop entries nothing has needed.
-
-    The `connection_id` clause is belt and braces — the ids come from an
-    already-scoped `load_cache`. It earns its place on the resumed-checkpoint
-    path: a checkpointed TurnState carries entry ids, and a thread replayed
-    against another connection would otherwise silently credit that
-    connection's entries to this one's turn.
+    `hits` orders the cache; `last_used_turn` is what lets compaction drop
+    entries nothing has needed. The `connection_id` clause guards the resumed
+    path, where a checkpointed TurnState carries another connection's entry ids.
     """
     if not ids:
         return
@@ -651,27 +553,13 @@ async def reset_learned(
 ) -> dict[str, int]:
     """Forget what the agent learned about *one* connection. Rows-per-table.
 
-    The stage recovery button (PLAN.md §9), and the only destructive operation
-    the API exposes. It takes the cache, the turn log *and* LangGraph's
-    checkpoints together: an empty cache beside a turn log that says the
-    questions were already asked is a state nothing knows how to read.
+    The stage recovery button (PLAN.md §9). Cache, turn log and LangGraph's
+    checkpoints go together, because a checkpointed TurnState holds a `turn_id`
+    and cache-entry ids that would otherwise dangle.
 
-    The checkpoint tables are LangGraph's and are keyed by `thread_id` — the
-    session UUID — with no idea a connection exists. `turn` records both, so it
-    is the mapping, and **the order below is load-bearing**: the turn rows are
-    what the mapping is made of, so they go last.
-
-    Leaving the checkpoints alone would be wrong rather than untidy. A
-    checkpointed TurnState holds a `turn_id` and a list of cache-entry ids;
-    after this runs, both dangle, and the next question on that thread resumes
-    into a state describing rows that no longer exist.
-
-    `checkpoint_migrations` is deliberately absent — it is LangGraph's schema
-    version table, not turn state.
-
-    The business data is on another server and this connection cannot reach it.
-    That used to be a promise kept by a list of table names; now it is a promise
-    kept by the network.
+    `turn` is the only mapping from a connection to LangGraph's `thread_id`, so
+    **the order below is load-bearing** — those rows go last.
+    `checkpoint_migrations` is excluded: it is a schema version, not turn state.
     """
     threads = "SELECT DISTINCT session_id::text FROM turn WHERE connection_id = %s"
     wiped = {}
@@ -699,20 +587,11 @@ async def reset_learned(
 async def reset_everything(conn: AsyncConnection) -> dict[str, int]:
     """Empty the agent's database. Every connection, every turn, every thread.
 
-    **Not exposed on the API** — the destructive operation a user gets is scoped
-    to a connection they named. This exists for the test suite and for a `make`
-    target, where "start over" means all of it.
+    **Not exposed on the API** — this is for the test suite and a `make` target.
+    `connection` is excluded: the registry is configuration, not learned state.
 
-    `connection` is deliberately excluded: the registry is configuration, not
-    learned state, and wiping it would delete the address of every warehouse
-    somebody registered. It also cannot be truncated alongside these anyway —
-    the foreign keys cascade the other way.
-
-    Written out rather than driven from a list: these six tables *are* the
-    agent's database. The cost is that a `langgraph-checkpoint-postgres` release
-    adding a seventh has to be added here by hand — and the failure mode is
-    quiet, `make reset-all` no longer resetting, so it is worth checking after
-    an upgrade.
+    A `langgraph-checkpoint-postgres` release adding a seventh table has to be
+    added here by hand, and the failure is quiet, so check after an upgrade.
     """
     return {
         "cache_entry": await _wipe(conn, "cache_entry"),
@@ -727,11 +606,8 @@ async def reset_everything(conn: AsyncConnection) -> dict[str, int]:
 async def start_turn(
     conn: AsyncConnection, *, connection_id: str, session_id: str | UUID, question: str
 ) -> int:
-    """Open the turn row and return its id.
-
-    Split from finish_turn because entries written by `extract` mid-turn need a
-    `created_turn` to point at, and the turn's results aren't known until it
-    ends.
+    """Open the turn row and return its id. Split from `finish_turn` because
+    `extract` writes entries mid-turn that need a `created_turn` to point at.
     """
     cur = await conn.execute(
         "INSERT INTO turn (connection_id, session_id, question) "
@@ -752,9 +628,8 @@ async def fail_open_turn(
 ) -> int | None:
     """Close the most recent unfinished turn for a session.
 
-    A turn row is opened before any model call, so anything that throws between
-    then and `answer` would otherwise leave it open forever — invisible in
-    /stats, and indistinguishable from a turn still in flight.
+    The row is opened before any model call, so without this anything that
+    throws leaves it indistinguishable from a turn still in flight.
     """
     cur = await conn.execute(
         """
@@ -777,9 +652,8 @@ async def session_connection(
 ) -> str | None:
     """Which connection this session has been asking about, if any.
 
-    A thread's history is checkpointed, so reusing a session id against a second
-    warehouse would hand the model warehouse A's conversation while it answers
-    about B. The caller refuses that; this is how it finds out.
+    How the caller's 409 finds out: a thread's history is checkpointed, so
+    reusing a session id would hand the model another warehouse's conversation.
     """
     cur = await conn.execute(
         "SELECT connection_id FROM turn WHERE session_id = %s "
@@ -800,13 +674,8 @@ async def read_turns(
     """The demo chart, as rows: what each turn asked and what it cost.
 
     Queried newest-first with a LIMIT so a long-lived connection paginates, and
-    returned **ascending** so it reads left-to-right like the chart. The
-    reversal is deliberate — this endpoint exists to replace `make turns`, which
-    ordered by id.
-
-    `finished` defaults to true for the same reason: `make turns` filtered
-    `answer IS NOT NULL`, so a turn still in flight never appeared. Passing
-    false shows those, and the failed ones, which the old query could not.
+    returned **ascending** so it reads left to right. `finished=False` also
+    shows the turns still in flight and the ones that failed.
     """
     cur = await conn.execute(
         f"""

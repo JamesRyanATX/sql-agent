@@ -1,9 +1,7 @@
 """The CLI's side of the API. The only module here that is not a renderer.
 
-Moved from `scripts/_client.py`, which this replaces. Everything in it exists
-because something failed once, so it came across intact; what changed is where
-the configuration comes from — the old module read `app.settings`, which is what
-made it a component of the server rather than a client of it.
+Configuration comes from `sql_agent.config` and never from `app.settings`,
+which is what keeps this a client of the server rather than a component of it.
 """
 
 from __future__ import annotations
@@ -15,10 +13,9 @@ from typing import Any
 
 import httpx
 
-# A turn takes minutes — a T1 against a local model has been measured near 300s.
-# httpx's default 5s read timeout would kill every one of them. Connect still
-# fails fast, because a server that isn't listening should say so immediately
-# rather than hang for the length of a turn.
+# A turn takes minutes — a T1 against a local model runs near 300s — and httpx's
+# default 5s read timeout would kill every one. Connect still fails fast, so a
+# server that isn't listening says so immediately.
 STREAM_TIMEOUT = httpx.Timeout(None, connect=5.0)
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
@@ -31,7 +28,7 @@ def _config():
     # Imported here, not at module scope: config imports ApiError from this
     # module, and the CLI's one hard rule is that neither of them reaches for
     # `app`.
-    from sql_agent_cli import config
+    from sql_agent import config
 
     return config
 
@@ -69,8 +66,8 @@ def _raise_for_status(resp: httpx.Response, body: str | None = None) -> None:
 def parse_sse(lines: list[str]) -> dict[str, Any] | None:
     """One SSE frame's `data:` payload, or None if the frame carried none.
 
-    The payloads are the same dicts the graph yielded — `app.events.sse` only
-    serialised them — so a caller gets back exactly what the nodes emitted.
+    The payloads are the dicts the graph yielded; `app.events.sse` only
+    serialised them.
     """
     data = "\n".join(
         line.removeprefix("data:").lstrip() for line in lines if line.startswith("data:")
@@ -104,9 +101,8 @@ async def stream_events(path: str, payload: dict[str, Any]) -> AsyncIterator[dic
                     if ev is not None:
                         seen += 1
                         yield ev
-                # A stream cut mid-frame leaves no blank line behind it. The
-                # last event is worth having: it is usually the one that says
-                # what went wrong.
+                # A stream cut mid-frame leaves no blank line behind it, and the
+                # last event is usually the one saying what went wrong.
                 ev = parse_sse(frame)
                 if ev is not None:
                     seen += 1
@@ -114,14 +110,9 @@ async def stream_events(path: str, payload: dict[str, Any]) -> AsyncIterator[dic
     except httpx.ConnectError as e:
         raise ApiError(_unreachable(e)) from e
     except httpx.TransportError as e:
-        # A reload mid-turn, or a dropped connection. A turn runs for minutes
-        # with no read timeout, so this arrives long after anyone could guess
-        # what happened — and a traceback out of aiter_lines says nothing
-        # actionable. The count is worth carrying: "nothing arrived" and "it
-        # died three minutes in" are different problems.
-        #
-        # Ordered after ConnectError deliberately: ConnectError *is* a
-        # TransportError, so swapping these would swallow the better message.
+        # A reload mid-turn, or a dropped connection. The count matters:
+        # "nothing arrived" and "it died three minutes in" are different
+        # problems. After ConnectError, which is itself a TransportError.
         raise ApiError(
             f"stream ended after {seen} events — the server closed the "
             f"connection ({type(e).__name__})"
@@ -135,11 +126,8 @@ async def request(method: str, path: str, **kw) -> Any:
     except httpx.ConnectError as e:
         raise ApiError(_unreachable(e)) from e
     except httpx.TransportError as e:
-        # The same clause `stream_events` has, and for the same reason: a server
-        # that accepts the connection and then dies — a container restarting, a
-        # crash on startup — is not a bug in this client, and a traceback out of
-        # httpx says nothing anyone can act on. Ordered after ConnectError,
-        # which is itself a TransportError.
+        # A server that accepts the connection and then dies is not a bug in
+        # this client. After ConnectError, which is itself a TransportError.
         raise ApiError(
             f"no reply from {_config().base_url()} — the server accepted the "
             f"connection and then closed it ({type(e).__name__}). "
@@ -174,8 +162,8 @@ def _unreachable(e: Exception) -> str:
 def run(coro) -> None:
     """Entry point for every command: run it, and report ApiError as a message.
 
-    A client that can't reach the server should say so in one line. A traceback
-    here is noise — there is no bug to read in it.
+    A client that cannot reach the server should say so in one line; there is no
+    bug to read in a traceback here.
     """
     import asyncio
 

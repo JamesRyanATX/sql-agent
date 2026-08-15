@@ -8,21 +8,15 @@ Two backends behind one `complete()`:
   development when the Anthropic key isn't available.
 
 Which of the two a call uses is `config/config.yaml`, resolved per `node=`: a
-global `model:` block, and an optional override on any node. That is why
-`assistant_turn()` and `tool_results()` take a `node` — they pick a wire format,
-and the wire format is a property of the node's backend, not of the process.
-Reading the global provider there was correct only while there was one.
+global `model:` block, and an optional override on any node. Nodes never see the
+difference, but they must build messages with `assistant_turn()` and
+`tool_results()` rather than literal dicts — the two wire formats disagree about
+tool results, and both take a `node` because an override can change the backend.
 
-Nodes never see the difference. Messages are built with `assistant_turn()` and
-`tool_results()` rather than literal dicts, because the two wire formats
-disagree about how a tool result is represented.
-
-Structured output differs by backend and the difference is not cosmetic:
-Anthropic constrains the response directly, while on an OpenAI-compatible
-endpoint we ask for a single forced tool call whose parameters *are* the schema.
-The tool channel is already JSON-shaped, so it works even where grammar-
-constrained decoding isn't available — which is the case on Ollama's MLX runner,
-where both `response_format` and the native `format` parameter are ignored.
+Structured output also differs: Anthropic constrains the response directly, while
+an OpenAI-compatible endpoint gets a single forced tool call whose parameters are
+the schema. The tool channel is JSON-shaped by construction, so it works where
+grammar-constrained decoding is unavailable.
 """
 
 from __future__ import annotations
@@ -39,10 +33,9 @@ from app import tracing
 from app.config import Model, config
 from app.settings import settings
 
-# Generous, and deliberately so: on Opus 5 max_tokens caps thinking *plus*
-# response text together, and thinking is on by default. Sized tight, answers
-# truncate mid-sentence. 16k also keeps non-streaming requests inside the SDK's
-# HTTP timeout.
+# On Opus 5 max_tokens caps thinking *plus* response text, and thinking is on by
+# default — sized tight, answers truncate mid-sentence. 16k also keeps
+# non-streaming requests inside the SDK's HTTP timeout.
 MAX_TOKENS = 16_000
 
 # The name of the synthetic tool used to carry structured output on
@@ -52,9 +45,8 @@ _EMIT = "respond"
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 _anthropic_client: anthropic.AsyncAnthropic | None = None
-# Keyed by (url, timeout), because a per-node override may name another endpoint
-# and httpx binds base_url and timeout to the client. Two nodes on one endpoint
-# still share one connection pool, which is the reason not to build these per call.
+# Keyed by (url, timeout): a per-node override may name another endpoint, and
+# httpx binds both to the client. Two nodes on one endpoint share a pool.
 _http: dict[tuple[str, float], httpx.AsyncClient] = {}
 
 
@@ -76,8 +68,8 @@ class ToolUse:
 class LlmError(Exception):
     """A model server said no, with the reason it gave.
 
-    `stream_turn` renders this as one fatal error event, so whatever is in the
-    message is what a user sees — which is why the server's own body goes in it.
+    `stream_turn` renders this as one fatal error event, so the message is what
+    a user sees — hence the server's own body goes in it.
     """
 
 
@@ -102,11 +94,7 @@ class Result:
 def assistant_turn(result: Result, *, node: str) -> dict[str, Any]:
     """The assistant turn to append before handing back tool results.
 
-    `node` for the same reason `complete()` takes one: it decides the backend,
-    and the two backends disagree about the shape of an assistant turn. Reading
-    a global provider here would build Anthropic's shape for a node overridden
-    to openai_compat, and the explore loop is the only caller — so the failure
-    would be the loop, every time, on the second iteration.
+    `node` decides the backend, and the two disagree about this shape.
     """
     if config().model_for(node).provider == "anthropic":
         return {"role": "assistant", "content": result.raw}
@@ -168,11 +156,9 @@ def _anthropic() -> anthropic.AsyncAnthropic:
 
 
 def _strip_pre_fallback(content: list[Any]) -> list[Any]:
-    """Make an assistant turn safe to echo back after a mid-output fallback.
-
-    Thinking and tool_use blocks from before the boundary belong to a model that
-    is no longer answering, and replaying them is rejected. No fallback block
-    means nothing to do, which is the overwhelmingly common case.
+    """Make an assistant turn safe to echo back after a mid-output fallback:
+    blocks from before the boundary belong to a model that is no longer
+    answering, and replaying them is rejected.
     """
     last = max(
         (i for i, b in enumerate(content) if getattr(b, "type", None) == "fallback"),
@@ -201,10 +187,9 @@ async def _complete_anthropic(
     if schema is not None:
         output_config["format"] = {"type": "json_schema", "schema": schema}
 
-    # The cached path re-sends the same system prompt and the whole cache on
-    # every turn, which is exactly the shape prompt caching is for. Breakpoint
-    # goes on the system block: it is the stable prefix, and the question after
-    # it is the only part that varies.
+    # The cached path re-sends the same system prompt and the whole cache every
+    # turn. The breakpoint goes on the system block because it is the stable
+    # prefix; the question after it is the only part that varies.
     system_param: Any = system
     if cache_system:
         system_param = [
@@ -221,10 +206,9 @@ async def _complete_anthropic(
     if tools:
         kwargs["tools"] = tools
 
-    # Thinking is left unset — on Opus 5 that runs adaptive, which is what we
-    # want. Cost is controlled with effort, never by disabling thinking: with
-    # thinking off the model can write a tool call into its visible text instead
-    # of emitting a tool_use block, and in the explore loop it would never run.
+    # Thinking is left unset, which runs adaptive on Opus 5. Cost is controlled
+    # with effort, never by disabling thinking: with it off the model can write a
+    # tool call into visible text, and in the explore loop it would never run.
     if settings().use_fallbacks:
         resp = await _anthropic().beta.messages.create(
             betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs
@@ -232,8 +216,8 @@ async def _complete_anthropic(
     else:
         resp = await _anthropic().messages.create(**kwargs)
 
-    # Check this before touching content: a refusal is a successful HTTP
-    # response whose content is empty or partial.
+    # Before touching content: a refusal is a successful HTTP response whose
+    # content is empty or partial.
     if resp.stop_reason == "refusal":
         details = getattr(resp, "stop_details", None)
         raise Refusal(
@@ -265,8 +249,8 @@ def _http_client(spec: Model) -> httpx.AsyncClient:
     if client is None:
         client = httpx.AsyncClient(
             base_url=spec.url or "",
-            # A 27B model on consumer hardware takes minutes per call, not
-            # seconds. The default 5s read timeout would fail every request.
+            # A 27B model on consumer hardware takes minutes per call, and the
+            # default 5s read timeout would fail every request.
             timeout=httpx.Timeout(spec.timeout, connect=10.0),
             headers={"authorization": f"Bearer {settings().openai_api_key}"},
         )
@@ -301,23 +285,15 @@ async def _complete_openai(
         "max_tokens": min(max_tokens, spec.max_tokens),
         "messages": [{"role": "system", "content": system}, *messages],
     }
-    # Per-node effort applies here too. Without it a reasoning model has no
-    # brake: the `plan` node is configured `low` precisely because a cached
-    # turn should be cheap, and a live run that ignored it spent 14,339 output
-    # tokens deliberating — making the cached path *more* expensive than the
-    # exploration it replaced.
-    #
-    # There used to be an OPENAI_REASONING_EFFORT that overrode every node at
-    # once. It is gone: the per-node values in config/config.yaml are what it
-    # was reaching for, and a global override of a per-node setting can only
-    # ever be a way to lose the distinction.
+    # Per-node effort applies here too — without it a reasoning model has no
+    # brake, and `plan` is configured `low` precisely so a cached turn is cheap.
     body["reasoning_effort"] = _EFFORT.get(effort, "medium")
 
     if schema is not None:
         # Structured output as a forced tool call. `response_format` and the
         # native `format` parameter are both silently ignored on Ollama's MLX
-        # runner — they need grammar-constrained decoding, which MLX doesn't
-        # implement — but the tool channel is JSON by construction.
+        # runner, which has no grammar-constrained decoding; the tool channel is
+        # JSON by construction.
         body["tools"] = [
             {
                 "type": "function",
@@ -328,16 +304,9 @@ async def _complete_openai(
                 },
             }
         ]
-        # `"required"` — the string — rather than OpenAI's named-function form
-        # `{"type": "function", "function": {"name": ...}}`. The two mean the
-        # same thing here, because the tools list above holds exactly one entry:
-        # "call some tool" and "call `emit`" are the same instruction. The named
-        # form is not universally implemented — LM Studio answers it with
-        #   400 {"error":"Invalid tool_choice type: 'object'.
-        #        Supported string values: none, auto, required"}
-        # — while `"required"` is accepted by every OpenAI-shaped server tried,
-        # including OpenAI itself. Prefer the spelling that is equivalent and
-        # portable over the one that is more specific and not.
+        # The string, not OpenAI's named-function form — equivalent here, since
+        # the tools list holds exactly one entry, and portable, which the named
+        # form is not: LM Studio rejects it with "Invalid tool_choice type".
         body["tool_choice"] = "required"
     elif tools:
         body["tools"] = [
@@ -354,11 +323,8 @@ async def _complete_openai(
 
     resp = await _http_client(spec).post("/chat/completions", json=body)
     if resp.status_code >= 400:
-        # Not `raise_for_status()`. It reports the status and the URL and throws
-        # the body away — and the body is the entire diagnosis. A local server
-        # rejecting one field answers "400 Bad Request for url ..." plus a link
-        # to MDN, which sends you looking at the network instead of at the one
-        # key it did not like.
+        # Not `raise_for_status()`, which throws away the body — and the body is
+        # the entire diagnosis when a local server rejects one field.
         raise LlmError(
             f"{resp.status_code} from {spec.url}"
             f"/chat/completions: {resp.text[:500]}"
@@ -383,9 +349,8 @@ async def _complete_openai(
     if schema is not None:
         emitted = next((c for c in calls if c.name == _EMIT), None)
         if emitted is None:
-            # finish_reason is the whole diagnosis here: "length" means the
-            # model was still thinking when max_tokens cut it off, so it never
-            # reached the tool call. Without it this is an opaque empty string.
+            # finish_reason is the diagnosis: "length" means max_tokens cut the
+            # model off while it was still thinking, so it never reached the call.
             raise ValueError(
                 f"no {_EMIT!r} tool call: finish_reason="
                 f"{choice.get('finish_reason')!r}, "
@@ -423,19 +388,11 @@ async def complete(
     cache_system: bool = False,
     node: str = "model",
 ) -> Result:
-    """One model call.
+    """One model call. `cache_system` is Anthropic-only.
 
-    `effort` and `cache_system` are Anthropic-only and ignored elsewhere — an
-    OpenAI-compatible endpoint has no equivalent of either.
-
-    `node` names the caller for the trace, selects the prompt in `app/prompts.py`
-    and now selects the model too — it is the one string that ties a graph node
-    to everything configurable about it. Being the one place that talks to a
-    model makes this also the one place a generation is opened: both backends,
-    and every iteration of the explore loop, whose per-call cost is otherwise
-    summed away inside the node before anything can see it. The wrapper goes here
-    rather than in the two `_complete_*` functions so there is one thing to keep
-    in step, not two.
+    `node` names the caller for the trace, selects the prompt and selects the
+    model. This is also the only place a generation is opened, which is what
+    makes each explore-loop iteration visible rather than summed inside the node.
     """
     assert not (tools and schema), "a structured call takes no tools"
     spec = config().model_for(node)
@@ -481,9 +438,8 @@ async def complete(
                 "text": result.text,
                 "tool_uses": [{"name": t.name, "input": t.input} for t in result.tool_uses],
             },
-            # `cache_read` has been on `Result` all along and read by nothing.
-            # The cached `plan` path is exactly what prompt caching is for, so a
-            # regression there is the one this number would catch.
+            # `cache_read` is what catches a regression on the cached `plan`
+            # path, which is what prompt caching is there for.
             usage_details={
                 "input": result.tokens_in,
                 "output": result.tokens_out,

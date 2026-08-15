@@ -1,20 +1,17 @@
 """The valset: authored, adversarial, hard-labelled.
 
 **The trainset is harvested — real, messy, weakly labelled. The valset is
-authored.** They are different kinds of object, and conflating them is how you
-get a prompt that scores eight percent better and deletes the census paragraph.
+authored.** Conflating them is how you get a prompt that scores eight percent
+better and deletes the census paragraph.
 
-Every probe defends an invariant that exists *only as prose*. That test is the
-whole scoping rule: "a human's `pinned` entry is never overwritten" is a `WHERE`
-clause in `store.write_entries` and already has a test in `test_store.py`, so it
-is not here. "Neither kind is a census" is five lines inside `EXTRACT_SYSTEM`
-that a candidate can delete for a token saving, whose failure surfaces turns
-later when a stale count is read back as a fact. That is what a probe is for.
+Every probe defends an invariant that exists *only as prose*, and that is the
+whole scoping rule: an invariant enforced by code belongs in a test instead. A
+line inside `config/prompts/extract.md` is something a candidate can delete for
+a token saving, and its failure surfaces turns later.
 
 A predicate is a predicate, not a rubric: 0 or 1, no partial credit. The probe
-files live in `tests/probes/` and in git, because they are contract in the
-register of `tests/test_traps.py` — the harvested corpus is gitignored, because
-it holds whatever the registered warehouse holds.
+files are tracked in `tests/probes/` because they are contract; the harvested
+corpus is gitignored, because it holds whatever the warehouse holds.
 """
 
 from __future__ import annotations
@@ -95,9 +92,8 @@ def _no_census(r: Replayed, args: dict[str, Any]) -> tuple[bool, str]:
 
 def _recipes_are_grounded(r: Replayed, args: dict[str, Any]) -> tuple[bool, str]:
     if not r.recipes:
-        # Vacuous truth is the first thing an optimiser finds. A query this
-        # substantial establishes at least one recipe; emitting none is a way of
-        # scoring well by doing nothing.
+        # Vacuous truth is the first thing an optimiser finds: a query this
+        # substantial establishes at least one recipe.
         return False, "no recipe at all — the query establishes at least one"
 
     problems: list[str] = []
@@ -123,11 +119,10 @@ def _recipes_are_grounded(r: Replayed, args: dict[str, Any]) -> tuple[bool, str]
 def _no_scope_creep(r: Replayed, args: dict[str, Any]) -> tuple[bool, str]:
     """A general rule must not be overwritten by a special case.
 
-    Not "the protected name is absent" — reusing a name to *refine* it is the
-    documented behaviour and the upsert exists to serve it. What is forbidden is
-    the name acquiring a scope it did not have, because every later question
-    that composed the general rule inherits the narrower one, silently, and the
-    upsert reports success.
+    Not "the protected name is absent" — reusing a name to *refine* it is what
+    the upsert is for. What is forbidden is the name acquiring a scope it did
+    not have, because every later question that composed the general rule
+    silently inherits the narrower one.
     """
     protected = args["name"]
     forbidden = [w.casefold() for w in args["must_not_mention"]]

@@ -1,24 +1,19 @@
 """The GEPA integration point. The only module that imports `gepa`.
 
 GEPA wants three things: run a candidate on a batch and score it, build a
-reflective dataset the teacher model can read, and a language model to do the
-reflecting. Everything else in `optim/` is written so those three are thin.
+reflective dataset the teacher model can read, and a model to do the reflecting.
+Everything else in `optim/` is written so those three are thin.
 
-No DSPy, and that is a decision rather than a shortcut. The reference wiring for
-LangGraph + GEPA converts nodes into DSPy Signatures, which would route model
-calls through litellm and lose what `app/llm.py` carries: Anthropic's
-`output_config` with `effort` and a JSON-schema `format`, thinking left
-deliberately adaptive, the server-side-fallback beta with `_strip_pre_fallback`,
-`cache_control: ephemeral`, the refusal stop-reason path. **Optimising a prompt
-under a different request shape than production uses tunes it for a
-configuration you do not run.** DSPy's adapter also injects its own field
-markers, so harness tokens would stop being production tokens — in a repo whose
-entire claim is a token count. And the four JSON schemas are already the
-contract; Signatures would be a second, lossy description of them.
+**No DSPy.** Its Signatures would route model calls through litellm and lose
+what `app/llm.py` carries — Anthropic's `output_config` with effort and a
+JSON-schema format, adaptive thinking, the server-side-fallback beta,
+`cache_control: ephemeral` — and optimising a prompt under a different request
+shape than production uses tunes it for a configuration you do not run. Its
+field markers would also make harness tokens stop being production tokens, in a
+repo whose claim is a token count.
 
-The concession worth taking: GEPA's reflection model is `app.llm.complete` too,
-at max effort, so the optimiser's own spend lands in the same trace store as the
-agent's and there is still exactly one module that talks to a model.
+GEPA's reflection model is `app.llm.complete` too, so there is still exactly one
+module that talks to a model.
 """
 
 from __future__ import annotations
@@ -49,11 +44,10 @@ REFLECT_SYSTEM = (
 class Loop:
     """One event loop in a daemon thread, for the whole optimisation.
 
-    GEPA's engine is synchronous; `llm.complete` is not, and the module-level
-    Anthropic and httpx clients bind to the loop that first used them. So this
-    is not `asyncio.run()` per metric call: that builds and tears down a loop
-    around a client created on the first one, and the failure is intermittent —
-    the worst kind to debug two hundred rollouts into a run.
+    GEPA's engine is synchronous, `llm.complete` is not, and the module-level
+    Anthropic and httpx clients bind to the loop that first used them. Not
+    `asyncio.run()` per metric call, which would tear down a loop around a
+    client created on the first one and fail intermittently.
     """
 
     def __init__(self) -> None:
@@ -127,9 +121,9 @@ class ExtractAdapter(GEPAAdapter):
                 else None
             ),
             # Grounding and cost genuinely trade off, so the per-term breakdown
-            # is worth carrying: it makes `frontier_type="objective"` available
-            # and a Pareto front over real objectives is more honest than one
-            # scalar pretending the trade-off was already settled.
+            # is worth carrying: it makes `frontier_type="objective"` available,
+            # and a Pareto front is more honest than one scalar pretending the
+            # trade-off was already settled.
             objective_scores=[s.terms for s in scores],
         )
 
@@ -148,11 +142,10 @@ class ExtractAdapter(GEPAAdapter):
     ) -> dict[str, Sequence[dict[str, Any]]]:
         """The prose the teacher model reads, worst cases first.
 
-        This is where most of the value of the whole harness is. GEPA's
-        contribution over a scalar reward is that the reflection step reads
-        *diagnostics* — so the Feedback field names the entry, quotes the
-        offending text and says which invariant it broke, because "0.62" gives
-        a mutation nothing to aim at.
+        GEPA's contribution over a scalar reward is that the reflection step
+        reads *diagnostics*, so the Feedback field names the entry, quotes the
+        offending text and says which invariant it broke — "0.62" gives a
+        mutation nothing to aim at.
         """
         if COMPONENT not in components_to_update:
             return {}
@@ -185,12 +178,9 @@ class ExtractAdapter(GEPAAdapter):
 def reflection_lm(loop: Loop) -> Any:
     """GEPA's teacher, over the same seam every other model call uses.
 
-    Max effort by default, and `config/config.yaml`'s `gepa:` block if it says
-    otherwise: this runs a few dozen times against a whole reflective dataset,
-    and it is the step that decides what the next candidate says. It is the one
-    place in this project where thinking is worth the money — and the one call
-    that is not part of a turn, which is why it gets its own block rather than
-    borrowing a node's.
+    Max effort unless `config/config.yaml`'s `gepa:` block says otherwise: this
+    runs a few dozen times and decides what the next candidate says. Its own
+    block because it is the one call that is not part of a turn.
     """
 
     def call(prompt: str | list[dict[str, Any]]) -> str:

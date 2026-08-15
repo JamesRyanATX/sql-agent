@@ -2,22 +2,16 @@
 
 Nobody labels whether a cache entry was right. What is computable offline is
 whether it is *self-consistent* — grounded in the query that ran, free of counts
-that go stale, filed under a name that will not collide — and those are the
-properties the invariants in EXTRACT_SYSTEM are about, which is the reason this
-is scoreable at all.
+that go stale, filed under a name that will not collide — which is what the
+invariants in `config/prompts/extract.md` are about.
 
-Two things this deliberately does not do.
+Two things this does not do. It does not measure correctness: a prompt can score
+1.0 on a beautifully grounded recipe for the wrong business concept. And it does
+not measure the flywheel, because whether the cache makes turn N+1 cheaper is a
+property of a sequence and one `extract` call is not one.
 
-It does not measure correctness, and no weighting of these terms adds up to it.
-A prompt can score 1.0 and record a beautifully grounded recipe for the wrong
-business concept.
-
-It does not measure the flywheel. Whether the cache makes turn N+1 cheaper is a
-property of a sequence, and one `extract` call is not one. That is a limit of
-the unit of evaluation, not of the weights.
-
-Every weight below is a starting point. They are in one dict so a reader can
-argue with them, which is the only defence a number like 0.35 has.
+The weights are in one dict so a reader can argue with them, which is the only
+defence a number like 0.35 has.
 """
 
 from __future__ import annotations
@@ -56,9 +50,8 @@ CLAIM_LIMIT = 200
 class Score:
     """A scalar for the optimiser and prose for the reflection step.
 
-    GEPA reads both. The scalar decides selection; the feedback is what the
-    reflection model uses to propose a *targeted* mutation rather than a random
-    one, and it is where most of the value of this file is.
+    The scalar decides selection; the feedback is what lets the reflection model
+    propose a targeted mutation rather than a random one.
     """
 
     value: float
@@ -72,15 +65,13 @@ class Score:
 def score(r: Replayed) -> Score:
     """One case, one candidate.
 
-    Two gates before the weighted terms, and the second one is here because the
-    first version of this function scored an *empty* extraction at 0.6: with
-    nothing recorded, census, names and cost are all vacuously perfect and only
-    grounding and shape notice. Three of five terms rewarding a prompt for
-    doing nothing is the single largest hole a cost-sensitive optimiser could
-    have walked into, and it was invisible until a test asked.
+    Two gates before the weighted terms. The empty-extraction gate is the
+    load-bearing one: census, names and cost are all vacuously perfect when
+    nothing was recorded, so without it three of five terms reward a prompt for
+    doing nothing.
     """
-    # A candidate whose output does not fit EXTRACT_SCHEMA scored zero; it did
-    # not end the run. That is GEPA's adapter contract.
+    # A candidate whose output does not fit EXTRACT_SCHEMA scores zero rather
+    # than ending the run. That is GEPA's adapter contract.
     if r.error:
         return Score(0.0, {}, [f"The call did not produce usable output: {r.error}"])
 
@@ -119,13 +110,9 @@ def score(r: Replayed) -> Score:
 def _grounding(r: Replayed) -> tuple[float, str]:
     """Recipes must be copied from the SQL that ran, and must say something.
 
-    The second half is not optional. `grounded_in` accepts an order-preserving
-    token subsequence, so `count(*)` is grounded against any query that counts
-    and `customer` against any query that reads the table. An optimiser told to
-    maximise the verified rate finds that in about four generations — and
-    PLAN_SYSTEM grants a verified recipe authority, so the result is a cache
-    where everything is authoritative and nothing earned it. Optimising the
-    metric derived from the gate is how you destroy the gate.
+    The second half is not optional: `grounded_in` accepts an order-preserving
+    token subsequence, so `count(*)` is grounded against any query that counts.
+    Optimising the metric derived from the gate is how you destroy the gate.
     """
     if not r.recipes:
         return 0.0, (
@@ -182,8 +169,8 @@ def _census(r: Replayed) -> tuple[float, str]:
 def _names(r: Replayed) -> tuple[float, str]:
     """Destructive overwrite, near-collision, self-collision.
 
-    All three are silent in production: `write_entries` upserts and reports
-    success, so the only symptom is a later question composing the wrong recipe.
+    All three are silent in production — `write_entries` upserts and reports
+    success — so the only symptom is a later question composing the wrong recipe.
     """
     if not r.entries:
         return 1.0, ""
@@ -193,10 +180,9 @@ def _names(r: Replayed) -> tuple[float, str]:
 
     for i, e in enumerate(r.entries):
         old = r.case.filed.get(e.name or "")
-        # A refinement should say at least as much as what it replaces. A much
-        # shorter claim landing on a filed name is the general rule being
-        # overwritten by a special case, which destroys it for every later
-        # question that composed it.
+        # A much shorter claim landing on a filed name is the general rule being
+        # overwritten by a special case, destroying it for every later question
+        # that composed it.
         if old and len(e.claim) < 0.6 * len(old):
             penalised.add(i)
             problems.append(
@@ -266,7 +252,7 @@ def _cost(r: Replayed) -> tuple[float, str]:
 
     An unbounded reward for terseness is the same failure as "fewer entries is
     better", and this is the term most likely to delete a paragraph whose payoff
-    is a failure no metric here can see.
+    no metric here can see.
     """
     baseline = r.case.baseline_tokens_out
     if not baseline:

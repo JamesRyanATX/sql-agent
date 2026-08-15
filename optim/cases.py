@@ -6,12 +6,10 @@ case is a probe: a situation constructed to make one invariant testable, built
 through `graph.extract_message` so it exercises the real assembly rather than a
 hand-typed imitation of it.
 
-The verbatim rule matters for the harvested half. Re-deriving the message from
-its parts would mean this module reimplements graph.py's f-string, and the two
-would drift silently — the model would be replayed a message production never
-sends, and the score would be reported with a straight face. Only the SQL is
-split back out, because the verification gate needs it, and it is split on an
-anchor graph.py owns.
+The verbatim rule matters for the harvested half: re-deriving the message would
+mean reimplementing graph.py's f-string, and the two would drift silently until
+the model was being replayed a message production never sends. Only the SQL is
+split back out, on an anchor graph.py owns, because the verification gate needs it.
 """
 
 from __future__ import annotations
@@ -24,15 +22,9 @@ from typing import Any, Iterator
 from app import graph
 
 # Bumped by hand when `graph.extract_message` or this dataclass changes shape,
-# with a comment saying what moved. A corpus recorded under an older assembly is
-# not wrong so much as answering a different question, and `optimize` refuses a
-# stale one: tuning a prompt against a message the product no longer sends is
-# the kind of result that reproduces perfectly and means nothing.
-#
-# 2: dropped `turn_id`, added `prompt_fp`. The harvest stopped joining to the
-#    `turn` table — see optim/harvest.py for why — so provenance is the trace,
-#    not the row, and the fingerprint is what keeps round two of an
-#    optimisation off round one's output.
+# with a comment saying what moved. `optimize` refuses a stale corpus: tuning a
+# prompt against a message the product no longer sends is a result that
+# reproduces perfectly and means nothing.
 FORMAT_VERSION = 2
 
 
@@ -53,14 +45,12 @@ class ExtractCase:
     obs_id: str | None = None
     trace_id: str | None = None
     connection_id: str | None = None
-    # The 8-char fingerprint of the `extract` prompt that produced this case,
-    # off the turn span's metadata. Once a candidate ships, new traces come from
-    # the thing being optimised — without this a second round trains on the
-    # first round's output and the improvement it measures is its own echo.
+    # The 8-char fingerprint of the `extract` prompt that produced this case.
+    # Once a candidate ships, new traces come from the thing being optimised, and
+    # without this a second round trains on the first round's output.
     prompt_fp: str | None = None
-    # The recorded run's output tokens. The cost term is a one-sided penalty
-    # against this, so a candidate is measured against what production paid
-    # rather than against an absolute nobody chose.
+    # The recorded run's output tokens, so the cost term measures a candidate
+    # against what production paid rather than an absolute nobody chose.
     baseline_tokens_out: int = 0
     format_version: int = FORMAT_VERSION
 
@@ -92,9 +82,8 @@ class ExtractCase:
 def sql_from(user_message: str) -> str | None:
     """Split the executed SQL back out of a recorded message.
 
-    Returns None rather than guessing. A case that will not parse is dropped
-    with a printed count — never silently, because a corpus that quietly halved
-    is a corpus whose scores are about a different population.
+    None rather than a guess. The caller drops such a case with a printed count,
+    because a corpus that quietly halved has scores about a different population.
     """
     _, anchor, rest = user_message.partition(graph.EXTRACT_SQL_ANCHOR)
     if not anchor:
@@ -129,9 +118,9 @@ def write_jsonl(path: Path, cases: list[ExtractCase]) -> None:
 def read_jsonl(path: Path) -> list[ExtractCase]:
     """Load a corpus, refusing one recorded under a different assembly.
 
-    The version is checked on the raw row, before the dataclass is built. A
-    stale corpus usually differs by a *field*, so constructing first turns a
-    legible "re-harvest" into an unexpected-keyword TypeError.
+    Checked on the raw row, before the dataclass is built: a stale corpus usually
+    differs by a field, so constructing first would turn a legible "re-harvest"
+    into an unexpected-keyword TypeError.
     """
     rows = list(_rows(path))
     stale = {r.get("format_version") for r in rows} - {FORMAT_VERSION}

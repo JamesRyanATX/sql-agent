@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import click
 
-from sql_agent_cli import config, http, render
+from sql_agent import config, http, render
 
 
 @click.command()
@@ -116,8 +116,8 @@ def reset(connection: str | None, yes: bool) -> None:
     """
     cid = config.connection(connection)
     if not yes:
-        # Safe unguarded while there was one global cache. Scoped to a name that
-        # a wrong -c can select, it is worth one keystroke.
+        # A wrong -c can select the name this is scoped to, which is worth one
+        # keystroke to guard.
         click.confirm(
             f"wipe everything learned about {cid!r} — cache, turns and checkpoints?",
             abort=True,

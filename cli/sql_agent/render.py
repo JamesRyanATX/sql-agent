@@ -1,13 +1,12 @@
 """Terminal output. Nothing here decides anything.
 
-`click.style` rather than `rich`, deliberately. The demo is a VHS-recorded GIF
-at a fixed 1200x700, and rich re-flows on COLUMNS and re-measures tables on
-every render — a take stops being reproducible across machines. `rich.live` also
-emits cursor-movement escapes that a frame differ renders as flicker. The whole
-surface here is nine event types and three tables.
+`click.style` rather than `rich`: the demo is a VHS-recorded GIF at a fixed
+1200x700, and rich re-flows on COLUMNS and re-measures tables every render, so a
+take stops being reproducible across machines. `rich.live` also emits
+cursor-movement escapes that a frame differ shows as flicker.
 
-The one thing `click.echo` buys over the raw escapes this replaces: it strips
-colour when stdout is not a terminal, so `sql-agent cache | less` is readable.
+`click.echo` strips colour when stdout is not a terminal, so `sql-agent cache |
+less` is readable.
 """
 
 from __future__ import annotations
@@ -19,14 +18,13 @@ from typing import Any
 import click
 
 # Wide enough for a timestamp, an email or a product name; narrow enough that one
-# long value cannot destroy the alignment of every row below it or wrap the
-# tape's awaited line off screen. `--json` is the untruncated view.
+# long value cannot unalign every row below it or wrap the tape's awaited line
+# off screen. `--json` is the untruncated view.
 CELL = 40
 
-# What right-aligns. `isinstance(v, int | float)` is not enough on its own:
-# app/graph.py round-trips rows through `json.dumps(..., default=str)`, so a
-# Postgres numeric arrives as the string "1234.50" and would otherwise sit
-# left-aligned next to the integers it is a column with.
+# What right-aligns. `isinstance(v, int | float)` is not enough: app/graph.py
+# round-trips rows through `json.dumps(..., default=str)`, so a Postgres numeric
+# arrives as the string "1234.50".
 _NUMERIC = re.compile(r"-?\d+(\.\d+)?$")
 
 
@@ -47,11 +45,8 @@ def table(
 ) -> None:
     """Columns sized to their contents, and a psql-shaped row count.
 
-    The `(N rows)` footer earns its place beyond tidiness: `demo/demo.tape`
-    waits for `rows)` to know `sql-agent turns` has finished printing, and VHS
-    times out on a pattern that never appears. Waiting on a header word instead
-    would match the instant the header lands, which is the stale-match failure
-    the tape's own comment warns about.
+    `demo/demo.tape` waits on the `(N rows)` footer to know a command has
+    finished printing, so it is load-bearing rather than tidiness.
 
     `footer` overrides that count for a caller that knows something the row list
     does not — see `result()`, where a full page is not a total.
@@ -102,14 +97,12 @@ def _cell(value: Any) -> str:
 def result(rows: Sequence[dict[str, Any]], *, capped: bool = False) -> None:
     """A query's rows, the way psql would show them.
 
-    Alignment is decided per column by what is *in* it, not by its name the way
-    `table`'s `right=` works — that suits three fixed reports and cannot suit
-    arbitrary SQL, where the column list is whatever the model just wrote.
+    Alignment is decided per column by what is *in* it rather than by its name
+    the way `table`'s `right=` works, which cannot suit SQL the model just wrote.
 
-    `capped` means the result filled `max_rows` and the true total is unknown:
-    `execute` uses `fetchmany`, which cannot tell a full page from a result that
-    happened to be exactly that long. Printing `(50 rows)` there would be a
-    number this program does not have.
+    `capped` means the result filled `max_rows` and the true total is unknown —
+    `fetchmany` cannot tell a full page from a result that happened to be
+    exactly that long, so `(50 rows)` would be a number this program lacks.
     """
     if not rows:
         # No row means no keys, so there is no header to print either.
@@ -117,7 +110,7 @@ def result(rows: Sequence[dict[str, Any]], *, capped: bool = False) -> None:
         return
 
     # `dict(m)` and the JSON round trip both preserve insertion order, so this is
-    # the SELECT's own column order rather than a guess at one.
+    # the SELECT's own column order.
     headers = list(rows[0])
     click.echo()
     table(

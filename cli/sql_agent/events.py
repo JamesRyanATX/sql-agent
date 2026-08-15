@@ -1,18 +1,13 @@
 """Rendering the turn stream.
 
-**Default output has to fit one VHS screenful**, and that is an invariant rather
-than a preference. `demo/demo.tape` waits on `[explored]`, `[no exploration]` and
-`tokens (`; VHS can only see the first screenful, so an awaited line that scrolls
-out of view times the recording out at forty minutes. That used to be stated as
-"byte-identical to what `scripts/ask.py` printed", which was the wrong statement
-of it — what the tape needs is output that is *bounded*, not output that is
-frozen. `render.CELL` bounds the width; the row count is bounded only by
-`max_rows`, so see the tape's own comment for where that ceiling actually bites.
+**Default output has to fit one VHS screenful**, and that is an invariant.
+`demo/demo.tape` waits on `[explored]`, `[no exploration]` and `tokens (`, and
+VHS only sees the first screenful — an awaited line that scrolls out of view
+times the recording out at forty minutes. `render.CELL` bounds the width; the
+row count is bounded only by `max_rows`.
 
-So by default: the rows, an error if there was one, and the token line. What was
-asked for and what it cost, and nothing that explains either — the SQL, the plan
-decision, the exploration trace and the answer's own prose are all -v, because
-they are all the same kind of thing.
+So by default: the rows, an error if there was one, and the token line. The SQL,
+the plan decision, the exploration trace and the answer's own prose are all -v.
 """
 
 from __future__ import annotations
@@ -22,7 +17,7 @@ from typing import Any
 
 import click
 
-from sql_agent_cli import render
+from sql_agent import render
 
 
 def cost(ev: dict[str, Any]) -> str:
@@ -44,18 +39,14 @@ def show(ev: dict[str, Any], *, verbose: bool = False) -> None:
         # A silent failure with no explanation is worse than the noise it costs.
         click.secho(f"error: {ev['message']}", fg="red")
     elif kind == "answer":
-        # One event, split across both views, because it carries two different
-        # kinds of thing. The cost line *is* the turn and is always printed. The
-        # prose explains a result the reader is already looking at — the table is
-        # right there — so it belongs with the SQL, the plan decision and the
-        # exploration trace, which is to say behind -v.
+        # One event across both views: the cost line *is* the turn and is always
+        # printed, while the prose explains a table the reader is already
+        # looking at, so it sits behind -v.
         #
-        # Below the table rather than above it, and that is forced rather than
-        # chosen: `rows` comes from `execute` and this comes from `answer`, with
-        # `extract` — a model call — in between. Printing the sentence first
-        # would mean holding the result until extract returned, which is several
-        # seconds of blank screen at the end of a turn the user already waited
-        # 45 seconds for.
+        # Below the table because the order is forced: `rows` comes from
+        # `execute` and this from `answer`, with `extract` — a model call — in
+        # between. Printing the sentence first would hold the result back for
+        # several seconds at the end of a turn the user already waited out.
         if verbose and (text := ev.get("text")):
             click.echo()
             click.echo(text)
@@ -100,9 +91,8 @@ def _verbose(ev: dict[str, Any], kind: str | None) -> None:
     elif kind == "learned":
         _learned(ev)
 
-    # `usage` is deliberately unrendered even here. It fires per node, for a
-    # live counter widget; in a scrolling terminal it is noise, and the `answer`
-    # event carries the totals. --json still emits it — that is what raw is for.
+    # `usage` is unrendered even here: it fires per node for a live counter
+    # widget, and the `answer` event already carries the totals. --json emits it.
 
 
 def _learned(ev: dict[str, Any]) -> None:
@@ -116,9 +106,9 @@ def _learned(ev: dict[str, Any]) -> None:
         click.secho(f"learned: {ev['count']} entries{skipped}", dim=True)
         for e in ev.get("entries") or []:
             tick = click.style("✓", fg="green") if e["verified"] else " "
-            # Styled substrings concatenated, not nested: click.style(dim=True)
-            # wrapped around an already-styled span puts its reset in the middle
-            # and the rest of the line loses the dim.
+            # Concatenated, not nested: click.style(dim=True) wrapped around an
+            # already-styled span puts its reset in the middle, and the rest of
+            # the line loses the dim.
             body = click.style(
                 f"[{e['kind']}] {e['name'] or '(unnamed)'}: {e['claim']}", dim=True
             )

@@ -1,8 +1,7 @@
 """What the API accepts and returns.
 
-`store.CacheEntry` is not the wire format. It carries fields that exist for the
-graph's benefit — `schema_fp`, `created_turn`, `last_used_turn` — and putting
-them on the wire would make internal bookkeeping part of a versioned contract.
+`store.CacheEntry` is not the wire format: `schema_fp` and the turn pointers are
+the graph's bookkeeping, not part of a versioned contract.
 """
 
 from __future__ import annotations
@@ -27,9 +26,8 @@ Driver = Literal["postgresql+psycopg", "mysql+asyncmy", "sqlite+aiosqlite"]
 
 class AskBody(BaseModel):
     question: str = Field(..., min_length=1)
-    # Optional: the CLI has no conversation to name, and a caller that doesn't
-    # supply one still gets a distinct thread rather than sharing a default.
-    # The value used comes back on the X-Session-Id response header.
+    # A caller that supplies none gets a distinct thread rather than a shared
+    # default. The value used comes back on the X-Session-Id response header.
     session_id: UUID = Field(default_factory=uuid4)
 
 
@@ -86,10 +84,8 @@ class ConnectionCreate(BaseModel):
     id: ConnectionId
     driver: Driver = "postgresql+psycopg"
     label: str | None = None
-    # host, port and username lost their `min_length` and their defaults
-    # because SQLite has none of them — `database` is the whole address there.
-    # The requirement did not go away; it moved into the validator below, which
-    # is where a rule that depends on another field has to live.
+    # Optional here because SQLite has none of them — `database` is the whole
+    # address. Required per driver by the validator below.
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     database: str = Field(..., min_length=1)  # the file path, for sqlite
@@ -120,19 +116,15 @@ class ConnectionCreate(BaseModel):
 class ConnectionPatch(BaseModel):
     """Change some fields. An absent field is left alone.
 
-    **No `driver`.** A cached recipe is SQL in a dialect, so repointing a
-    connection at another engine silently invalidates everything learned about
-    it — and `schema_fp` would not catch it, because it hashes types and
-    nullability and both survive the move. `PATCH` refuses one with a 409, the
-    same way it refuses editing the env-owned row: the wrong state is made
-    unrepresentable rather than detected.
+    **`driver` cannot be changed** — a cached recipe is SQL in a dialect, and
+    `schema_fp` would not catch the repointing because types and nullability
+    survive it. `PATCH` refuses one with a 409. Delete and re-register instead.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # Accepted only so the refusal can explain itself. `extra="forbid"` would
-    # reject it as an unknown field with a 422 that says nothing about why, and
-    # "why" is the whole content of this rule.
+    # Accepted only so the refusal can explain itself; `extra="forbid"` would
+    # reject it as an unknown field with a 422 that says nothing about why.
     driver: Driver | None = None
     label: str | None = None
     host: str | None = Field(default=None, min_length=1)
@@ -148,9 +140,7 @@ class ConnectionOut(BaseModel):
     """A registered connection, as anyone outside this process may see it.
 
     **There is no `password` field** — not `None`, not `"***"`. A field that does
-    not exist on this model cannot be leaked by a future `**row` splat or by
-    dumping the wrong object, which is a stronger guarantee than remembering to
-    blank one out. `dsn` is the address without it.
+    not exist cannot be leaked by a future `**row`. `dsn` is the address without it.
     """
 
     id: str
@@ -182,11 +172,8 @@ class ConnectionListOut(BaseModel):
 class ConnectionTestOut(BaseModel):
     """What a probe found. `ok: false` is a successful diagnostic, not an error.
 
-    `read_only` and `warnings` are advisory and never gate: a legitimate
-    warehouse role holding INSERT on one unrelated staging table is common, and
-    refusing it would mean the feature does not work. The enforcement is
-    `readonly_tier`, and how strong that is depends on the dialect — see
-    app/dialects.py.
+    `read_only` and `warnings` are advisory and never gate a registration; the
+    enforcement is `readonly_tier`. See app/dialects.py.
     """
 
     ok: bool
@@ -209,9 +196,7 @@ class ConnectionTestOut(BaseModel):
 
 class ConnectionCreatedOut(BaseModel):
     connection: ConnectionOut
-    # None when ?probe=false. A failed probe does not block the create — a typo
-    # should be visible now, but refusing to save because the warehouse is down
-    # for maintenance is worse than saving it with a warning.
+    # None when ?probe=false. A failed probe does not block the create.
     test: ConnectionTestOut | None = None
 
 
@@ -225,15 +210,13 @@ class TurnOut(BaseModel):
     cache_entries: int
     tokens_in: int
     tokens_out: int
-    # in + out, precomputed: it is the chart's y value, and every client would
-    # otherwise add the two together itself.
+    # in + out, precomputed: the chart's y value.
     tokens: int
     latency_ms: int | None
     sql: str | None
     answer: str | None
     created_at: datetime
-    # The Langfuse trace, when the turn was taken with tracing on. None is the
-    # common case and means "not recorded", not "lost".
+    # None means the turn was taken with tracing off, which is the common case.
     trace_id: str | None = None
 
 

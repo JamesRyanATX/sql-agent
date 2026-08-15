@@ -11,7 +11,7 @@ import sys
 
 import click
 
-from sql_agent_cli import config, http, render
+from sql_agent import config, http, render
 
 
 @click.command()
@@ -30,9 +30,8 @@ async def _connect(connection_id: str | None) -> None:
     if connection_id is None:
         click.echo(config.connection(None))
         return
-    # Validated before it is written. One cheap request stops a typo surfacing
-    # on the *next* command, where it reads like a server problem rather than a
-    # misspelling — and it gives `connect` something worth printing back.
+    # Validated before it is written, so a typo does not surface on the *next*
+    # command, where it reads like a server problem rather than a misspelling.
     body = await http.get(f"/connections/{connection_id}")
     config.select(connection_id)
     click.echo(f"connected to {click.style(body['id'], bold=True)} — {body['dsn']}")
@@ -90,8 +89,8 @@ async def _get(connection_id: str) -> None:
             ("username", body["username"]),
             ("sslmode", body["sslmode"]),
             ("read-only", body["readonly_tier"]),
-            # Never the value, and never a masked length either — a length is a
-            # fact about the password.
+            # Never the value, and never a masked length — a length is a fact
+            # about the password.
             ("password", "(set)" if body["has_password"] else "(unset)"),
             ("owner", "the environment" if body["origin"] == "env" else "you"),
             ("cache", f"{body['cache_entries']} entries"),
@@ -127,12 +126,9 @@ def _password_options(f):
 def resolve_password(value, from_stdin, prompt, *, required: bool) -> str | None:
     """None means "leave it alone" — only `update` may get that back.
 
-    Three flags for one field looks like a lot until you try to fold them: the
-    literal has to exist because it was asked for, stdin has to exist because
-    scripts have no terminal, and the prompt has to exist because it is the only
-    one of the three that does not write the password down somewhere. `psql`
-    resolves this by refusing the literal outright, which is the better design
-    and not the one specified.
+    Three flags for one field, and none folds into another: scripts have no
+    terminal, so stdin is required, and the prompt is the only one of the three
+    that does not write the password down somewhere.
     """
     given = [
         flag
@@ -188,7 +184,7 @@ def create_connection(
     your shell history and out of everyone else's `ps`.
     """
     # SQLite has no host, user or password, and the server rejects them rather
-    # than ignoring them — so do not prompt for a password it cannot use.
+    # than ignoring them, so do not prompt for one it cannot use.
     sqlite = driver.startswith("sqlite")
     secret = (
         None if sqlite

@@ -1,29 +1,16 @@
 """The one module that knows Langfuse exists.
 
-Same rule [app/dialects.py](app/dialects.py) has for dialect names and
-[app/secrets.py](app/secrets.py) has for encryption: `import langfuse` appears
-here and nowhere else, so the rest of `app/` sees three context managers, a
-reader and a boolean. That is what makes "tracing off" cost nothing to prove —
-there is one `enabled()` to read rather than a scattering of `if` at every call
-site. (`turn`, `generation` and `span`; a tool observation is `span` with
-`as_type="tool"`, which is why the trace diagram in CLAUDE.md shows four kinds.)
+`import langfuse` appears here and nowhere else. The rest of `app/` sees three
+context managers — `turn`, `generation`, `span` — plus `observations()` and a
+boolean. A tool observation is a `span` with `as_type="tool"`.
 
-The reader is newer than the rest and inverts the module's old one-way
-character: `observations()` pulls recorded calls back out, which is what
-lets `optim/` build a prompt corpus from what the agent has already done. It
-lives here rather than where it is wanted for exactly the reason above.
+**Off is the default, and off is free.** With no keys set no client is
+constructed, `langfuse` is never imported, and every helper yields the same
+do-nothing handle, so no call site branches on it.
 
-**Off is the default, and off must be free.** With no keys set no client is ever
-constructed, `langfuse` is never even imported, and every helper yields the same
-do-nothing handle. `make up`, `make test` and the demo behave exactly as they did
-before this file existed.
-
-**On means the prompts, the SQL and the result rows are captured**, because that
-is the entire point of looking at a trace and there is no half-measure that stays
-useful. The trace store is self-hosted (`make langfuse-up`), so "captured" means
-written to a container on this machine — but it holds whatever the registered
-warehouse holds, and that is a fact worth knowing before pointing a connection at
-a real one.
+**On captures the prompts, the SQL and the result rows.** The store is
+self-hosted, so nothing leaves the machine — but it holds whatever the
+registered warehouse holds.
 """
 
 from __future__ import annotations
@@ -39,20 +26,14 @@ from app.settings import settings
 
 log = logging.getLogger(__name__)
 
-# Lazily constructed on first use, like llm._anthropic(). `_broken` is separate
-# from `_client is None` so a client that failed to build is not retried on
-# every model call for the rest of the process's life.
+# `_broken` is separate from `_client is None` so a client that failed to build
+# is not retried on every model call for the rest of the process's life.
 _client: Any = None
 _broken = False
 
 
 def enabled() -> bool:
-    """Both keys, or nothing.
-
-    Deliberately not a separate `LANGFUSE_TRACING_ENABLED` flag: a flag is a
-    third state that can disagree with the keys, and "enabled but unconfigured"
-    is a startup warning nobody reads.
-    """
+    """Both keys, or nothing. No third flag that could disagree with them."""
     s = settings()
     return bool(s.langfuse_public_key and s.langfuse_secret_key)
 
@@ -67,10 +48,9 @@ def client() -> Any:
 
         s = settings()
         try:
-            # Credentials passed explicitly rather than left to the SDK's own
-            # environment lookup. `.env` is read by pydantic-settings and never
-            # reaches os.environ on the host, so implicit resolution would work
-            # inside the container and silently not work outside it.
+            # Explicit rather than the SDK's own env lookup: `.env` is read by
+            # pydantic-settings and never reaches os.environ on the host, so
+            # implicit resolution works in the container and not outside it.
             _client = Langfuse(
                 public_key=s.langfuse_public_key,
                 secret_key=s.langfuse_secret_key,
@@ -85,9 +65,8 @@ def client() -> Any:
 def shutdown() -> None:
     """Flush what is buffered and stop the exporter thread.
 
-    Called from the lifespan's `finally`. The suite's `client` fixture runs that
-    lifespan on every test, so this also has to be cheap and idempotent when
-    tracing was never on.
+    Called from the lifespan's `finally`, which the suite runs on every test —
+    so it has to be cheap and idempotent when tracing was never on.
     """
     global _client, _broken
     _broken = False
@@ -100,11 +79,7 @@ def shutdown() -> None:
 
 
 class _Null:
-    """What every helper yields when tracing is off.
-
-    A real handle's `update()` takes only keywords, so ignoring them all is the
-    whole implementation. Callers never branch on whether tracing is on.
-    """
+    """What every helper yields when tracing is off, so callers never branch."""
 
     __slots__ = ()
 
@@ -120,10 +95,8 @@ _NULL = _Null()
 def _serialisable(obj: Any) -> Any:
     """Anything, as plain JSON types.
 
-    Not decoration: the Anthropic path echoes raw SDK content blocks back
-    through `llm.assistant_turn()`, so a message list handed to `complete()` is
-    not made of dicts. `default=str` is the same fallback app/events.py already
-    uses to get graph output onto the wire.
+    Required: the Anthropic path echoes raw SDK content blocks back through
+    `llm.assistant_turn()`, so a message list is not made of dicts.
     """
     try:
         return json.loads(json.dumps(obj, default=str))
@@ -135,13 +108,12 @@ def _serialisable(obj: Any) -> Any:
 def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]:
     """One turn: the root span every generation and tool call hangs off.
 
-    The handle's `.trace_id` is minted here rather than read back out of the
-    ambient context inside a node, so `turn.trace_id` can be written to the turn
-    row without depending on OpenTelemetry context reaching LangGraph's tasks.
+    `.trace_id` is minted here rather than read out of the ambient context inside
+    a node, so writing it to the turn row does not depend on OpenTelemetry
+    context reaching LangGraph's tasks.
 
     `session_id` is the agent's session, LangGraph's `thread_id` and Langfuse's
-    session all at once — they were always the same identifier, and a trace store
-    that grouped them differently would be describing a different program.
+    session at once — one identifier throughout.
     """
     lf = client()
     if lf is None:
@@ -156,21 +128,14 @@ def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]
         as_type="span",
         trace_context={"trace_id": trace_id},
         input=_serialisable({"question": question, "connection_id": connection_id}),
-        # Which prose produced this turn. The one thing Langfuse's own prompt
-        # management would have given for free, and the reason it is worth
-        # having: a harvest that cannot tell a run under the seed from a run
-        # under a candidate will train round two on round one's output. Read
-        # after the `lf is None` return, so off still costs nothing.
-        #
-        # Eight hex characters per node, which is 124 for the whole dict —
-        # under the 200 a metadata value is truncated at, so reading it back
-        # needs no `expand_metadata`. A longer hash would silently lose its tail
-        # and every fingerprint would start comparing equal.
+        # Which prose produced this turn, so a harvest can tell a run under the
+        # seed from a run under a candidate. Eight hex characters per node is
+        # 124 for the whole dict, under the 200 a metadata value truncates at —
+        # a longer hash would lose its tail and compare equal every time.
         metadata=_serialisable({"prompts": prompts.fingerprint()}),
     ) as span:
-        # The connection as a tag, not just metadata: "everything this warehouse
-        # was ever asked" is the question you actually want to filter on, and it
-        # is the same scoping rule the cache and the API routes already use.
+        # The connection as a tag, so "everything this warehouse was ever asked"
+        # is filterable.
         with propagate_attributes(
             session_id=str(session_id),
             trace_name="turn",
@@ -203,20 +168,16 @@ def generation(
         try:
             yield gen
         except Exception as e:
-            # A refusal and a 400 from a local server are both successful-looking
-            # control flow elsewhere; on the trace they have to read as failures.
+            # A refusal and a 400 from a local server are successful-looking
+            # control flow elsewhere; on the trace they must read as failures.
             gen.update(level="ERROR", status_message=f"{type(e).__name__}: {e}")
             raise
 
 
 # --------------------------------------------------------------- the read half
 #
-# Everything above writes. This reads, and it lives here for the same reason the
-# writes do: `import langfuse` appears in this module and nowhere else, so a
-# second module wanting its own client is the failure the rule exists to
-# prevent. It is one function returning plain dicts — if it grows past that,
-# the signal is to split this file into write and read halves, not to relax the
-# rule. tests/test_cli_isolation.py now enforces it.
+# Everything above writes; this reads. Here rather than in `optim/`, because
+# `import langfuse` belongs to one module. tests/test_cli_isolation.py enforces it.
 
 
 def observations(
@@ -229,22 +190,13 @@ def observations(
 ) -> Iterator[dict[str, Any]]:
     """Everything recorded under one observation name, oldest page first.
 
-    This is what makes an offline prompt corpus possible at all. Because
-    `llm.complete()` is the only place a generation is opened, and it records
-    `input={"system", "messages"}` under a `name=` that is the graph node,
-    Langfuse already holds a per-node dataset of exact inputs and outputs. The
-    architecture built the harvester by accident; this reads it back.
+    Two shapes are used. `kind="GENERATION"` with a node name is `optim/`'s
+    per-node dataset of exact inputs and outputs. `name="turn", kind="SPAN"` is
+    the scope: the turn span's `input.connection_id` says which warehouse a
+    recorded call was about, which cannot come from a join to `turn.trace_id`
+    because `make reset` empties that table by design.
 
-    Two shapes are used. `kind="GENERATION"` with a node name is the dataset.
-    `name="turn", kind="SPAN"` is the *scope*: the turn span records
-    `input={"question", "connection_id"}` and the prompt fingerprint in its
-    metadata, which is the only way to say which warehouse a recorded call was
-    about. It has to come from here rather than from a join to `turn.trace_id`,
-    because `make reset` empties that table by design and Langfuse keeps the
-    trace — and v4 removed the trace-list endpoint, so an observation cannot be
-    filtered by the `connection:` tag either.
-
-    Yields nothing at all when tracing is off, which is the common case.
+    Yields nothing when tracing is off, which is the common case.
     """
     lf = client()
     if lf is None:
@@ -252,11 +204,10 @@ def observations(
 
     cursor = None
     while True:
-        # `fields` defaults to core,basic — input and output are *absent*
-        # without `io`, and the call succeeds, so the symptom is a corpus of
-        # empty prompts rather than an error. `parse_io_as_json` is deprecated
-        # and returns 400 if set at all: input arrives as a raw string, which
-        # is why `_as_json` below is required rather than defensive.
+        # `fields` defaults to core,basic, where input and output are absent and
+        # the call still succeeds — the symptom is a corpus of empty prompts.
+        # `parse_io_as_json` returns 400 if set at all, so input arrives as a raw
+        # string and `_as_json` below is required rather than defensive.
         response = lf.api.observations.get_many(
             name=name,
             type=kind,
