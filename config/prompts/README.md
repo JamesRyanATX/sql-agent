@@ -41,10 +41,9 @@ a harvest can tell which prose produced which trace.
 Edit the file and commit it. The commit message is where the reason goes — which
 failure the new wording addresses — because the file body cannot carry a comment.
 
-`make optim-run` searches for a better `extract` prompt and writes the winner to
-`optim/out/`; `make optim-diff` shows it beside the invariant checklist; `make
-optim-apply` writes it into `extract.md` and leaves it uncommitted for you to
-read. Nothing promotes itself.
+`make gepa-extract` searches for better prose and prints the winner on stdout,
+with the diff and the invariant checklist on stderr. It writes nothing here:
+what you paste in, you read first, and nothing promotes itself.
 
 ## Notes
 
@@ -63,15 +62,20 @@ say is what was counted and what the shape means, and that is the whole job left
 for prose.
 
 Its only cheap automatic proxy is length, and that trade was measured here and
-decided the other way, which is why `optim/` will never search this one.
+decided the other way, which is why `make gepa-answer` refuses to search rather
+than searching badly.
 
 ### `extract.md`
 
 The four invariants this prompt is the only home for are asserted by
-`tests/probes/extract/*.json`, and `make optim-probe` runs them: no census,
-recipes grounded in the SQL that ran, no scope creep, no near-collision with an
-already-filed name. A candidate that regresses one the seed passed is discarded
-whatever it scored — see `optim/run.py`.
+`tests/probes/extract/*.json`: no census, recipes grounded in the SQL that ran,
+no scope creep, no near-collision with an already-filed name. A candidate that
+regresses one the seed passed is discarded whatever it scored — see
+`tools/gepa/cli.py`. To run them against the current prose without a search:
+
+```bash
+uv run --group gepa python -m tools.gepa extract --probe-only
+```
 
 ### `plan.md`
 
@@ -81,7 +85,8 @@ sufficiency without SQL is downgraded to insufficient in `graph.py`.
 
 ## Promotion log
 
-Appended by `make optim-apply`. A line here is a machine's claim about a score;
-the commit beside it is the human's claim about why.
-
-<!-- optim-apply: append below -->
+There isn't one, and there was. It was appended to by `make optim-apply`, which
+wrote a winning candidate into the file beside it — a machine's claim about a
+score, kept next to the human's claim about why. `make gepa-extract` writes
+nothing here, so the only record of a promotion is the commit that made it, and
+`git log -p config/prompts/` is the log.

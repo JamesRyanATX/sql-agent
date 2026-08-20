@@ -2,7 +2,7 @@
 
 GEPA wants three things: run a candidate on a batch and score it, build a
 reflective dataset the teacher model can read, and a model to do the reflecting.
-Everything else in `optim/` is written so those three are thin.
+Everything else in `tools/gepa/` is written so those three are thin.
 
 **No DSPy.** Its Signatures would route model calls through litellm and lose
 what `app/llm.py` carries — Anthropic's `output_config` with effort and a
@@ -27,9 +27,9 @@ from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 
 from app import llm
 from app.config import config
-from optim import metric_extract as metric
-from optim.cases import ExtractCase
-from optim.replay import Replayed, replay
+from tools.gepa import metric_extract as metric
+from tools.gepa.cases import ExtractCase
+from tools.gepa.replay import Replayed, replay
 
 # The component name GEPA mutates. One component, because this optimises one
 # node; `candidate` is `{"extract": "<the prompt>"}` throughout.
@@ -53,7 +53,7 @@ class Loop:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            target=self._loop.run_forever, name="optim-loop", daemon=True
+            target=self._loop.run_forever, name="gepa-loop", daemon=True
         )
         self._thread.start()
 

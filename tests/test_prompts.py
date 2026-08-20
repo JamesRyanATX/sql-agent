@@ -159,7 +159,7 @@ def test_the_fingerprint_moves_only_when_the_prose_does(prompt_dir):
 
 
 def test_the_extract_message_carries_its_anchors():
-    """`optim/` replays a recorded message verbatim and splits the SQL back out
+    """`tools/gepa/` replays a recorded message verbatim and splits the SQL back out
     of it with these. Duplicating the literals there is how they drift."""
     message = graph.extract_message(
         question="how many customers do we have?",

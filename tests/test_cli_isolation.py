@@ -14,8 +14,8 @@ so out loud in the place where it would be broken.
 Two more live here now, on the same argument. `langfuse` is import-legal in
 `app/tracing.py` alone — that was documentation only until `tracing` grew a read
 half and gave a second module a reason to want its own client. And nothing that
-ships imports `optim/`, which is a development tool in the same category as
-pytest: it reads the app, the app never reads it.
+ships imports `tools/`, where `tools/gepa/` is a development tool in the same
+category as pytest: it reads the app, the app never reads it.
 """
 
 from __future__ import annotations
@@ -79,14 +79,18 @@ def test_only_tracing_imports_langfuse(path):
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: f"{p.parent.name}/{p.name}")
-def test_nothing_that_ships_imports_the_optimiser(path):
-    """`optim/` reads the app; the app never reads `optim/`.
+def test_nothing_that_ships_imports_a_dev_tool(path):
+    """`tools/` reads the app; the app never reads `tools/`.
 
     It is a development tool, `gepa` is a dependency group the image does not
     install, and an `app/` module importing it would turn a missing dev
     dependency into a server that will not boot.
+
+    Forbidding the top-level `tools` rather than `tools.gepa` is deliberate and
+    not a weakening: *nothing* under `tools/` may be imported by something that
+    ships, so the coarse name is the whole rule.
     """
-    assert "optim" not in imported_names(path), (
-        f"{path.name} imports `optim` — the arrow points the other way. "
-        "The optimiser is a dev tool, like pytest."
+    assert "tools" not in imported_names(path), (
+        f"{path.name} imports `tools` — the arrow points the other way. "
+        "Everything under tools/ is a dev tool, like pytest."
     )

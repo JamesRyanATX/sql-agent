@@ -17,7 +17,7 @@ from typing import Any
 
 from app import graph, llm, store
 from app.config import config
-from optim.cases import ExtractCase
+from tools.gepa.cases import ExtractCase
 
 # Not "extract": the generation name is what `tracing.observations()` filters
 # on, so sharing it would let round two train on round one's output.

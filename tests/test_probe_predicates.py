@@ -16,9 +16,9 @@ from __future__ import annotations
 import pytest
 
 from app import store
-from optim import detect, probes
-from optim.cases import ExtractCase
-from optim.replay import Replayed
+from tools.gepa import detect, probes
+from tools.gepa.cases import ExtractCase
+from tools.gepa.replay import Replayed
 
 CASE = ExtractCase.authored(
     name="t",

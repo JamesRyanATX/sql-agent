@@ -4,7 +4,7 @@ Same bargain as `tests/test_coldpath.py`: the model is canned, so these prove
 the *harness* — the sync/async bridge, the adapter contract, the reflective
 dataset, the probe gate, and that `gepa.optimize` actually turns over — without
 spending tokens or depending on what a real model happens to say. What a real
-model does with a candidate is `make optim-run`, which is a separate and
+model does with a candidate is `make gepa-extract`, which is a separate and
 deliberately manual measurement.
 
 No database either: `extract` is a function of three strings.
@@ -20,12 +20,12 @@ import pytest
 # image) does not have it. Skipping is right rather than adding it to dev: the
 # point of the group is that the optimiser is not part of what ships or of what
 # every contributor installs.
-pytest.importorskip("gepa", reason="uv run --group optim")
+pytest.importorskip("gepa", reason="uv run --group gepa")
 
 from app import llm  # noqa: E402
-from optim import metric_extract as metric  # noqa: E402
-from optim.adapter import COMPONENT, ExtractAdapter, Loop  # noqa: E402
-from optim.cases import ExtractCase  # noqa: E402
+from tools.gepa import metric_extract as metric  # noqa: E402
+from tools.gepa.adapter import COMPONENT, ExtractAdapter, Loop  # noqa: E402
+from tools.gepa.cases import ExtractCase  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -243,7 +243,7 @@ def test_gepa_turns_over_against_the_adapter(loop, scripted):
     """
     import gepa
 
-    from optim.adapter import reflection_lm
+    from tools.gepa.adapter import reflection_lm
 
     scripted["payload"] = CENSUS_OUTPUT
     train, val = cases(4), cases(2)

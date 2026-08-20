@@ -18,9 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from optim import detect
-from optim.probes import graph_tokens
-from optim.replay import Replayed
+from tools.gepa import detect
+from tools.gepa.probes import graph_tokens
+from tools.gepa.replay import Replayed
 
 WEIGHTS = {
     # The production gate, not a re-implementation of it, clamped so that

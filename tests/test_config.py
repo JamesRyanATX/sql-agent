@@ -128,12 +128,12 @@ def test_a_node_may_name_its_own_model():
     "label,node",
     [
         ("explore.summary", "explore"),   # one prompt, two calls
-        ("extract.replay", "extract"),    # optim/'s single-node harness
+        ("extract.replay", "extract"),    # tools/gepa/'s single-node harness
         ("gepa.reflect", "gepa"),         # the teacher, not part of a turn
     ],
 )
 def test_a_dotted_label_resolves_to_its_prefix(label, node):
-    """`optim/`'s harness must run under production's own effort, or it is
+    """`tools/gepa/`'s harness must run under production's own effort, or it is
     measuring a configuration nobody ships."""
     loaded = Config.model_validate(
         {**DEMO, "extract": {"effort": "low"}, "gepa": {"effort": "max"}}

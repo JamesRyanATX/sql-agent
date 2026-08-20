@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from app import prompts
-from optim import probes, replay
+from tools.gepa import probes, replay
 
 PROBES = probes.load("extract")
 

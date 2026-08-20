@@ -1342,7 +1342,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
-optim = [
+gepa = [
     { name = "gepa" },
     { name = "tqdm" },
 ]
@@ -1374,7 +1374,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
 ]
-optim = [
+gepa = [
     { name = "gepa", specifier = ">=0.1.4" },
     { name = "tqdm", specifier = ">=4.70.0" },
 ]

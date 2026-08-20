@@ -21,11 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from optim import detect
-from optim.cases import ExtractCase
-from optim.replay import Replayed
+from tools.gepa import detect
+from tools.gepa.cases import ExtractCase
+from tools.gepa.replay import Replayed
 
-ROOT = Path(__file__).resolve().parent.parent / "tests" / "probes"
+# parents[2] is the repository root: this file is tools/gepa/probes.py. The
+# probes are tracked under tests/ because they are contract, not corpus.
+ROOT = Path(__file__).resolve().parents[2] / "tests" / "probes"
 
 
 @dataclass(frozen=True)

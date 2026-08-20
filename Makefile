@@ -62,8 +62,6 @@ logs-api:  ## the reload log lives here — an edit to app/ restarts in place
 langfuse-up:  ## start the trace stack, UI on :3000 (six containers, ~2GB)
 	$(DC) --profile langfuse up -d --wait
 	@echo "Langfuse at http://localhost:3000 — dev@sql-agent.local / sql-agent-dev"
-	@echo "uncomment LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env, then:"
-	@echo "  $(DC) up -d api    # not 'restart' — that does not re-read .env"
 
 langfuse-down:  ## stop it. The volumes survive, so traces do too.
 	$(DC) --profile langfuse stop langfuse-web langfuse-worker \
@@ -112,34 +110,18 @@ test:
 test-live:  ## includes tests that call the Anthropic API and cost tokens
 	uv run pytest -q -m live
 
-# --- prompts: evaluation and search -----------------------------------------
+# --- prompts: GEPA ----------------------------------------------------------
 #
-# `optim/` is a development tool, so `gepa` is a dependency group rather than a
-# dependency — `uv sync --no-dev` already excludes groups, which is the same
-# mechanism that keeps pytest out of the image. Nothing here runs in the
-# container.
+# One target per node: `make gepa-extract`. A node with no metric gets a target
+# that says so. `gepa` is a dependency group, so none of this is in the image.
 #
-# `optim-apply` writes config/prompts/$(NODE).md and stops — it stages nothing
-# and commits nothing. Promotion is the commit you make after reading the diff,
-# and its message is where the reason goes: no run can produce that.
+# `@` because make echoes recipes to stdout, and stdout is the new prompt.
+# Not `.PHONY`: make skips pattern rules for phony targets, and nothing named
+# `gepa-*` is ever a file.
+GEPA = uv run --group gepa python -m tools.gepa
 
-NODE ?= extract
-OPTIM = uv run --group optim python -m optim.run
-
-optim-probe:  ## do the current prompts still honour their invariants? (costs tokens)
-	$(OPTIM) probe --node $(NODE)
-
-optim-harvest:  ## pull recorded extract calls out of Langfuse into optim/out/
-	$(OPTIM) harvest --conn $(CONN)
-
-optim-run:  ## GEPA over one node's prompt, gated on the probes (costs tokens)
-	$(OPTIM) optimize --node $(NODE)
-
-optim-diff:  ## what the winner changed, beside the invariant checklist
-	$(OPTIM) diff --node $(NODE)
-
-optim-apply:  ## write the gated winner into config/prompts/$(NODE).md (nothing is committed)
-	$(OPTIM) apply --node $(NODE)
+gepa-%:  ## GEPA over one node's prompt: new prose on stdout, progress on stderr
+	@$(GEPA) $* $(GEPA_ARGS)
 
 # --- demo: presentation & recording -----------------------------------------
 

@@ -1,6 +1,6 @@
 """The probe gate: the thing standing between a good score and a bad prompt.
 
-This is the most load-bearing code in `optim/`, and it is the part GEPA cannot
+This is the most load-bearing code in `tools/gepa/`, and it is the part GEPA cannot
 do for us. Weights cannot express "never": a mean-maximising search will trade a
 rare catastrophic failure for a broad small gain whenever the arithmetic allows,
 and the failures the probes defend are exactly the ones the trainset metric
@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
-# See tests/test_optim_adapter.py — `gepa` is a dependency group, not a dev dep.
-pytest.importorskip("gepa", reason="uv run --group optim")
+# See tests/test_gepa_adapter.py — `gepa` is a dependency group, not a dev dep.
+pytest.importorskip("gepa", reason="uv run --group gepa")
 
 from app import llm  # noqa: E402
-from optim.adapter import COMPONENT, Loop  # noqa: E402
-from optim.run import _gate  # noqa: E402
-from tests.test_optim_adapter import CENSUS_OUTPUT, GOOD_OUTPUT  # noqa: E402
+from tools.gepa.adapter import COMPONENT, Loop  # noqa: E402
+from tools.gepa.cli import _gate  # noqa: E402
+from tests.test_gepa_adapter import CENSUS_OUTPUT, GOOD_OUTPUT  # noqa: E402
 
 SEED = "the seed instruction, which honours every invariant"
 DEGENERATE = "DEGENERATE: record the row counts you were told"
@@ -68,8 +68,8 @@ def test_the_seed_passes_every_probe_under_a_well_behaved_model(loop, scripted, 
     disqualify anything — it would be excluded from `seed_passing` and every
     candidate would inherit the failure for free."""
     _gate(loop, FakeResult([{COMPONENT: SEED}], [1.0]), SEED, "extract")
-    out = capsys.readouterr().out
-    assert "seed passes 4/4" in out
+    err = capsys.readouterr().err
+    assert "seed passes 4/4" in err
 
 
 def test_a_candidate_that_regresses_a_probe_is_discarded(loop, scripted, capsys):
@@ -86,11 +86,11 @@ def test_a_candidate_that_regresses_a_probe_is_discarded(loop, scripted, capsys)
     )
 
     assert survivors == [], "a probe regression is disqualifying at any score"
-    out = capsys.readouterr().out
-    assert "DISCARDED" in out
-    assert "census" in out
+    err = capsys.readouterr().err
+    assert "DISCARDED" in err
+    assert "census" in err
     # The reason has to be readable, because a human decides what to do next.
-    assert "Neither kind is a census" in out
+    assert "Neither kind is a census" in err
 
 
 def test_a_good_candidate_survives_and_carries_its_score(loop, scripted):
@@ -134,46 +134,69 @@ def test_a_much_shorter_candidate_is_flagged_for_reading(loop, scripted, capsys)
     )
 
     assert survivors, "brevity alone is not disqualifying"
-    assert "read the diff closely" in capsys.readouterr().out
+    assert "read the diff closely" in capsys.readouterr().err
 
 
-# ------------------------------------------------------- the resume guard
+# --------------------------------------------------- one command, needing none
 
 
-def test_a_leftover_run_dir_is_refused_rather_than_silently_resumed(tmp_path, monkeypatch):
+def test_a_leftover_run_dir_is_wiped_rather_than_refused(tmp_path, monkeypatch):
     """GEPA resumes from run_dir without saying so, and its state is keyed to
-    the seed it started from. A resume after editing app/prompts.py or
-    re-harvesting would report a candidate as descended from a seed that never
-    produced it — a result you would believe."""
+    the seed and trainset it started from — so the leftovers of one run are
+    never what the next one wants. Refusing made `make gepa-extract` a target
+    that hands you a `rm -rf` and stops."""
     from click.testing import CliRunner
 
-    from optim import run
+    from app import tracing
+    from tools.gepa import cli as gepa
 
-    monkeypatch.setattr(run, "RUN_DIR", tmp_path / "run")
-    monkeypatch.setattr(run, "CORPUS", tmp_path / "extract.jsonl")
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setattr(tracing, "enabled", lambda: False)
+    stale = tmp_path / "run" / "extract"
+    stale.mkdir(parents=True)
+    (stale / "state.bin").write_text("a previous run")
+
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert not stale.exists(), "the previous run's state must not survive"
+    # Then straight on to the corpus, which is the next thing it does itself.
+    assert "nothing to harvest" in result.output
+
+
+def test_resume_keeps_the_run_dir_and_the_corpus_it_belongs_to(tmp_path, monkeypatch):
+    """The one escape hatch, and it has to keep both: GEPA's state references
+    its trainset, so resuming onto a re-harvested corpus would be a run made of
+    two different populations."""
+    from click.testing import CliRunner
+
+    from app import tracing
+    from tools.gepa import cli as gepa
+
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setattr(
+        tracing, "enabled", lambda: pytest.fail("--resume must not harvest")
+    )
+    kept = tmp_path / "run" / "extract"
+    kept.mkdir(parents=True)
     (tmp_path / "extract.jsonl").write_text("")
-    (tmp_path / "run").mkdir()
-    (tmp_path / "run" / "state.bin").write_text("a previous run")
 
-    result = CliRunner().invoke(run.cli, ["optimize", "--node", "extract"])
+    CliRunner().invoke(gepa.cli, ["extract", "--resume"])
 
-    assert result.exit_code != 0
-    assert "would resume from it" in result.output
-    assert "--resume" in result.output
+    assert kept.exists()
 
 
-def test_an_empty_run_dir_is_not_a_previous_run(tmp_path, monkeypatch):
-    """The other direction: a directory GEPA created and left empty must not
-    block the next run forever."""
+def test_nothing_reaches_the_search_before_there_is_a_corpus(tmp_path, monkeypatch):
+    """Whatever it refuses over, it refuses before a token is spent: `apply`
+    used to check its preconditions at the end of a ten-minute search."""
     from click.testing import CliRunner
 
-    from optim import run
+    from app import tracing
+    from tools.gepa import cli as gepa
 
-    monkeypatch.setattr(run, "RUN_DIR", tmp_path / "run")
-    monkeypatch.setattr(run, "CORPUS", tmp_path / "missing.jsonl")
-    (tmp_path / "run").mkdir()
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setattr(tracing, "enabled", lambda: False)
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("the search was reached")
+    )
 
-    result = CliRunner().invoke(run.cli, ["optimize", "--node", "extract"])
-
-    # Falls through to the corpus check, which is the *next* guard.
-    assert "run `harvest` first" in result.output
+    assert CliRunner().invoke(gepa.cli, ["extract"]).exit_code != 0

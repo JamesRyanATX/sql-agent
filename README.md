@@ -177,16 +177,28 @@ prose that produced them. It is built for the `extract` node only, it is manual,
 and a human commits the result.
 
 ```bash
-make optim-harvest   # recorded extract calls -> optim/out/extract.jsonl
-make optim-probe     # do the current prompts still honour their invariants?
-make optim-run       # GEPA over one node's prompt, gated on the probes
-make optim-diff      # what the winner changed, beside the invariant checklist
-make optim-apply     # write it into config/prompts/extract.md
+make gepa-extract              # read the new prompt
+make gepa-extract > new.md     # keep it
 ```
 
-`optim-harvest` reads Langfuse, so [Telemetry](#telemetry) has to be on and some
-turns have to have happened. `optim-probe` and `optim-run` call a model and cost
-real tokens.
+**One command, needing no other.** It harvests the telemetry, searches, gates
+the pool on the probes and prints the winner — fresh corpus and fresh run dir
+every time, so a run is never partly made of the last one. `--resume` is the
+only way to continue one, and keeps both.
+
+One target per node — `make gepa-answer`, `make gepa-plan` and the rest exist
+too, and exit saying what a search for that node would need first.
+
+**stdout is the new prompt and nothing else.** The harvest, the search, the probe
+gate and the diff all report on stderr, so the redirect stays readable while it
+runs and the file it leaves holds prose with no commentary. Nothing is written
+into `config/prompts/` and nothing is committed: you paste the winner in, and
+the commit message says which failure the new wording addresses — the one thing
+no run can produce.
+
+It reads Langfuse for its corpus, so [Telemetry](#telemetry) has to be on and
+some turns have to have happened. It calls a model many times and costs real
+tokens.
 
 ## Design
 

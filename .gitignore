@@ -25,4 +25,4 @@ demo/*.mp4
 # so committing a harvest commits customer data by construction. The *authored*
 # probes in tests/probes/ are the opposite — those are contract, like
 # tests/test_traps.py.
-optim/out/
+tools/gepa/out/

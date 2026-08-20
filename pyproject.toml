@@ -70,7 +70,12 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
 ]
-optim = [
+# `tools/gepa/` is a development tool, so this is a group rather than a
+# dependency: `uv sync --no-dev` leaves it out by the same mechanism that leaves
+# out pytest, and nothing in the image imports it. A group named `gepa` holding
+# a distribution named `gepa` is not a collision — groups and distributions are
+# separate namespaces.
+gepa = [
     "gepa>=0.1.4",
     "tqdm>=4.70.0",
 ]

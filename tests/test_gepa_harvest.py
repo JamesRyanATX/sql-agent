@@ -19,8 +19,8 @@ from __future__ import annotations
 import pytest
 
 from app import graph, tracing
-from optim import harvest
-from optim.replay import NODE as REPLAY_NODE
+from tools.gepa import harvest
+from tools.gepa.replay import NODE as REPLAY_NODE
 
 SQL = "SELECT count(*) FROM customer WHERE deleted_at IS NULL"
 

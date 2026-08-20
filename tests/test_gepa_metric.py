@@ -14,9 +14,9 @@ import pytest
 
 from app import store
 from app.graph import grounded_in
-from optim import metric_extract as metric
-from optim.cases import ExtractCase
-from optim.replay import Replayed
+from tools.gepa import metric_extract as metric
+from tools.gepa.cases import ExtractCase
+from tools.gepa.replay import Replayed
 
 SQL = (
     "SELECT sum(oi.qty * oi.price) AS revenue FROM order_item oi "
