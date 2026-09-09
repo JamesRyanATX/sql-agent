@@ -6,6 +6,10 @@
 
 `plan` is the branch the demo rests on: it answers from cache without exploring,
 which is what makes T2 cheap.
+
+`execute ⇄ fix` is the smallest flywheel here: the SQL is the artifact, the
+database's error text is the data, and each turn of the wheel feeds one into
+the other until the query runs or `max_fix_attempts` stops it.
 """
 
 from __future__ import annotations
@@ -448,7 +452,11 @@ def driver_message(e: BaseException) -> str:
 
 
 async def execute(state: TurnState) -> TurnState:
-    """Run the generated SQL under a read-only transaction with a timeout."""
+    """Run the generated SQL under a read-only transaction with a timeout.
+
+    On failure the driver's one sentence comes back as `error`: the data the
+    flywheel turns on.
+    """
     emit = get_stream_writer()
     try:
         with tracing.span(name="sql.execute", input=state["sql"]) as sp:
@@ -497,7 +505,13 @@ async def execute(state: TurnState) -> TurnState:
 
 
 async def fix(state: TurnState) -> TurnState:
-    """Error text plus SQL back to the model, ≤3 attempts."""
+    """The SQL that failed and what the database said, back to the model.
+
+    A flywheel rather than a retry: nothing is resent as it was. Every pass
+    carries data the last one produced, and the model returns a new artifact
+    plus `what_was_wrong`, so the wheel gains on each turn. Bounded because a
+    wheel that spins on a bad question would otherwise spend tokens forever.
+    """
     emit = get_stream_writer()
     attempt = state.get("fix_attempts", 0) + 1
     result = await llm.complete(
@@ -655,7 +669,8 @@ async def extract(state: TurnState) -> TurnState:
     # Nothing was learned: `plan` answering from cache without exploring means
     # the cache already held what the question needed, and re-deriving it writes
     # near-duplicates at a model call per turn, forever. A turn that needed a fix
-    # did learn something, so it still runs.
+    # did learn something, so it still runs: one flywheel's output is the
+    # other's input.
     if state.get("sufficient") and not state.get("fix_attempts"):
         emit({"type": "learned", "count": 0, "skipped": 0, "entries": [], "cached": True})
         return {}
@@ -810,6 +825,9 @@ def route_after_plan(state: TurnState) -> str:
 
 
 def route_after_execute(state: TurnState) -> str:
+    """The flywheel's axle: error with attempts left, turn again; error with
+    none left, stop and say so; no error, hand what was learned to `extract`.
+    """
     if state.get("error"):
         if state.get("fix_attempts", 0) < config().max_fix_attempts:
             return "fix"
