@@ -78,6 +78,40 @@ def shutdown() -> None:
         _client = None
 
 
+def score(
+    *,
+    trace_id: str,
+    name: str,
+    value: float,
+    comment: str | None = None,
+) -> bool:
+    """Attach a verdict to a turn that has already finished.
+
+    False when tracing is off, which is how a caller tells "recorded" from
+    "nowhere to record it" without importing anything from here.
+
+    `create_score` enqueues rather than sends, and Langfuse's own docstring
+    warns that ingestion is asynchronous — a score is delivered at flush and
+    readable some seconds after that. So True means accepted, not stored.
+
+    No try/except: `create_score` wraps its whole body in one and logs, so a
+    second here would be unreachable. It is worth saying, because the absence
+    reads as an oversight beside `client()`, which does catch.
+    """
+    lf = client()
+    if lf is None:
+        return False
+    lf.create_score(
+        name=name,
+        value=value,
+        trace_id=trace_id,
+        # 1 or 0 and nothing else; the API rejects any other value at this type.
+        data_type="BOOLEAN",
+        comment=comment,
+    )
+    return True
+
+
 class _Null:
     """What every helper yields when tracing is off, so callers never branch."""
 

@@ -19,7 +19,7 @@ from sqlalchemy.pool import NullPool
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 
-from app import db, dialects, store
+from app import db, dialects, store, tracing
 from app.config import config, overlay, overrides
 from app.events import sse
 from app.graph import stream_turn
@@ -35,12 +35,18 @@ from app.schemas import (
     ConnectionOut,
     ConnectionPatch,
     ConnectionTestOut,
+    FeedbackBody,
+    FeedbackOut,
     Kind,
     ResetOut,
     TurnListOut,
     TurnOut,
 )
 from app.settings import settings
+
+# The name every verdict is filed under, so a harvest has one thing to filter
+# on. Here rather than in `tracing`, which does not know what is being scored.
+SCORE = "correct"
 
 
 async def require_token(authorization: str = Header(default="")) -> None:
@@ -539,6 +545,52 @@ async def read_turns(
             TurnOut(**r, tokens=r["tokens_in"] + r["tokens_out"]) for r in rows
         ]
     )
+
+
+@scoped.post(
+    "/turns/{turn_id}/feedback",
+    response_model=FeedbackOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def leave_feedback(
+    body: FeedbackBody,
+    turn_id: int = Path(...),
+    registered: store.Connection = Depends(connection_dep),
+) -> FeedbackOut:
+    """What a person thought of one answer, onto that turn's trace.
+
+    The verdict belongs with the inputs that produced it, and only the trace
+    store has those: `make reset` empties the turn log by design, so a column
+    here would hold labels that outlive nothing. A later harvest reads the score
+    and the SQL the turn ran from the same trace.
+
+    202, not 200: the client buffers the score and flushes it later, so what
+    this route can honestly report is that the verdict was accepted.
+    """
+    async with db.agent() as conn:
+        turn = await store.get_turn(conn, turn_id, connection_id=registered.id)
+    if turn is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail=f"connection {registered.id!r} has no turn {turn_id}",
+        ) from None
+
+    trace_id = turn["trace_id"] or ""
+    value = 1.0 if body.correct else 0.0
+    # Both halves of "there is nowhere to put this": the turn ran with tracing
+    # off, or it is off now. A 202 in either case would be a lie a user only
+    # discovers when the corpus comes back empty.
+    if not trace_id or not tracing.score(
+        trace_id=trace_id, name=SCORE, value=value, comment=body.comment
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"turn {turn_id} has no trace to score — tracing was off when it "
+                "ran, or is off now. Set both Langfuse keys and ask again."
+            ),
+        )
+    return FeedbackOut(trace_id=trace_id, name=SCORE, value=value)
 
 
 # Registered last so every scoped route carries `connection_dep`.

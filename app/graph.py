@@ -811,6 +811,12 @@ async def answer(state: TurnState) -> TurnState:
             "total_tokens": total_in + total_out,
             "latency_ms": latency,
             "explored": state.get("explored", False),
+            # Which turn this was, so a client can say what it thought of it.
+            # `trace_id` is None rather than "" when tracing is off, matching
+            # what the row was given: it is the client's cue that a verdict has
+            # nowhere to go, taken without a second request.
+            "turn_id": state["turn_id"],
+            "trace_id": state.get("trace_id") or None,
         }
     )
     return {"answer": text, "tokens_in": tokens_in, "tokens_out": tokens_out}

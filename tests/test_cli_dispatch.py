@@ -84,7 +84,12 @@ def test_the_connection_flag_works_on_either_side_of_the_question(spy, argv):
 def test_ask_is_how_you_ask_a_question_that_is_a_command(spy):
     """Same string, two meanings, and the only way to pick the other one."""
     assert invoke(["ask", "cache"])[0] == 0
-    assert spy == {"command": "ask", "args": ("cache", None, False, False), "kwargs": {}}
+    # question, connection, verbose, as_json, no_feedback
+    assert spy == {
+        "command": "ask",
+        "args": ("cache", None, False, False, False),
+        "kwargs": {},
+    }
 
     assert invoke(["cache"])[0] == 0
     assert spy["command"] == "cache"

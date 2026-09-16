@@ -109,3 +109,30 @@ async def test_limit_keeps_the_most_recent(client: AsyncClient, agent_conn):
 async def test_a_nonsense_limit_is_422(client: AsyncClient, limit):
     resp = await client.get(f"/v1/connections/{A}/turns", params={"limit": limit})
     assert resp.status_code == 422
+
+
+# --------------------------------------------------------------- one turn, scoped
+
+
+async def test_get_turn_finds_it_by_id_and_connection(agent_conn: AsyncConnection):
+    turn_id = await ask(agent_conn, A, "how many customers?", answer="1,840",
+                        trace_id="d" * 32)
+
+    row = await store.get_turn(agent_conn, turn_id, connection_id=A)
+
+    assert row is not None
+    assert row["answer"] == "1,840"
+    assert row["trace_id"] == "d" * 32
+
+
+async def test_get_turn_will_not_cross_connections(agent_conn: AsyncConnection):
+    """The same reason `bump_hits` carries the clause: turn ids are global and
+    warehouses are not, so an unscoped lookup would let a verdict about one
+    warehouse's turn arrive through another's route."""
+    turn_id = await ask(agent_conn, A, "how many customers?", answer="1,840")
+
+    assert await store.get_turn(agent_conn, turn_id, connection_id=B) is None
+
+
+async def test_get_turn_is_none_for_a_turn_that_never_existed(agent_conn: AsyncConnection):
+    assert await store.get_turn(agent_conn, 10**9, connection_id=A) is None

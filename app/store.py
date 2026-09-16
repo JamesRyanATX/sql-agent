@@ -692,6 +692,24 @@ async def read_turns(
     return list(reversed(await cur.fetchall()))
 
 
+async def get_turn(
+    conn: AsyncConnection, turn_id: int, *, connection_id: str
+) -> dict[str, Any] | None:
+    """One turn, or None when this connection has no such turn.
+
+    Scoped for the reason `bump_hits` is: turn ids are global and warehouses are
+    not, so an unscoped lookup would let a verdict about one warehouse's turn
+    arrive through another's route. None rather than a raise — the caller turns
+    it into a 404, and "not yours" and "not there" are the same answer.
+    """
+    cur = await conn.execute(
+        "SELECT id, question, answer, trace_id FROM turn "
+        "WHERE id = %s AND connection_id = %s",
+        (turn_id, connection_id),
+    )
+    return await cur.fetchone()
+
+
 async def finish_turn(
     conn: AsyncConnection,
     turn_id: int,

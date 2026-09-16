@@ -115,6 +115,7 @@ sql-agent connect warehouse
 # Ask. The subcommand is optional — a bare argument is a question.
 sql-agent "how many customers do we have?"
 sql-agent -v "how many customers are in the west region?"   # show the work
+sql-agent --no-feedback "how many customers do we have?"    # don't ask me
 
 # What it learned and what each turn cost.
 sql-agent cache
@@ -127,6 +128,12 @@ sql-agent reset
 # What the server is running: config.yaml under config.local.yaml, overrides marked
 sql-agent config
 ```
+
+With tracing on, an answered question ends in a two-line menu asking whether that
+was right, and a wrong one asks what could be improved. Both go onto the turn's
+trace as a score, which is what a later optimisation reads as a label: an
+approved answer says the SQL behind it was worth keeping. `--no-feedback` skips
+it, and nothing is asked when tracing is off or when either stream is redirected.
 
 Every command about a database takes `-c/--connection` to override the connected one. Give the
 agent a role holding `SELECT` and nothing else: it only ever reads, and the

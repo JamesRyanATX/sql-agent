@@ -125,11 +125,14 @@ gepa-%:  ## GEPA over one node's prompt: new prose on stdout, progress on stderr
 
 # --- demo: presentation & recording -----------------------------------------
 
+# `--no-feedback` on both: these two are what demo.tape types, VHS records
+# through a pty, and a pty is a terminal — so the verdict menu would appear and
+# the tape would sit on it until the Wait timed out. Ask by hand, not on stage.
 customer-count:  ## ask the cold-path question and print the token cost
-	uv run sql-agent -c $(CONN) "how many customers do we have?"
+	uv run sql-agent -c $(CONN) --no-feedback "how many customers do we have?"
 
 west-coast-customer-count:  ## ask a new question the cache can compose an answer to
-	uv run sql-agent -c $(CONN) "how many customers do we have in the west region?"
+	uv run sql-agent -c $(CONN) --no-feedback "how many customers do we have in the west region?"
 
 connections:  ## every database the agent can be pointed at
 	@uv run sql-agent connections ls

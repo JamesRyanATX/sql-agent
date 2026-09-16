@@ -87,6 +87,11 @@ def test_the_helpers_are_no_ops_when_off():
     with tracing.span(name="tool.list_tables", input={}, as_type="tool") as s:
         s.update(output="[]")
 
+    # The one helper that answers rather than yielding: False is how the route
+    # tells "recorded" from "nowhere to record it" and returns a 409 instead of
+    # accepting a verdict into a void.
+    assert tracing.score(trace_id="t", name="correct", value=1.0) is False
+
     assert tracing._client is None
 
 
@@ -367,3 +372,56 @@ async def test_a_turn_taken_without_tracing_has_no_trace_id(agent_conn):
     rows = await store.read_turns(agent_conn, connection_id=DEFAULT_CONNECTION)
     row = next(r for r in rows if r["id"] == turn_id)
     assert row["trace_id"] is None
+
+
+# ----------------------------------------------------------------- the verdict
+
+
+class FakeClient:
+    """Stands in for the Langfuse client, keeping what `create_score` was told.
+
+    The suite's other fakes replace a `tracing` helper; this one replaces the
+    client underneath, because the helper is the thing under test. Nothing here
+    imports langfuse — a fake with the same one method is the whole contract
+    `score()` depends on.
+    """
+
+    def __init__(self) -> None:
+        self.scores: list[dict] = []
+
+    def create_score(self, **kwargs) -> None:
+        self.scores.append(kwargs)
+
+
+def test_a_verdict_lands_on_the_turns_trace(monkeypatch):
+    """1 or 0 against the trace id, with the prose as the comment.
+
+    BOOLEAN rather than NUMERIC: the API rejects any value but 1 and 0 at that
+    type, so a later `4` is a 400 at the boundary instead of a score nobody can
+    interpret.
+    """
+    fake = FakeClient()
+    monkeypatch.setattr(tracing, "client", lambda: fake)
+
+    assert tracing.score(trace_id="abc", name="correct", value=0.0,
+                         comment="counted the cancelled orders") is True
+    assert fake.scores == [
+        {
+            "name": "correct",
+            "value": 0.0,
+            "trace_id": "abc",
+            "data_type": "BOOLEAN",
+            "comment": "counted the cancelled orders",
+        }
+    ]
+
+
+def test_an_approved_answer_needs_no_comment(monkeypatch):
+    """The common verdict is one keystroke, and None is what "nothing to add"
+    looks like on the wire."""
+    fake = FakeClient()
+    monkeypatch.setattr(tracing, "client", lambda: fake)
+
+    assert tracing.score(trace_id="abc", name="correct", value=1.0) is True
+    assert fake.scores[0]["value"] == 1.0
+    assert fake.scores[0]["comment"] is None

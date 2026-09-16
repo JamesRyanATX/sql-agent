@@ -8,15 +8,17 @@ Requires Postgres up (`make up`).
 """
 
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
 from psycopg import AsyncConnection
 
-from app import store
+from app import api, store
 from app.settings import settings
 from tests.conftest import DEFAULT_CONNECTION as CID
 from tests.conftest import DEMO
+from tests.conftest import OTHER_CONNECTION as OTHER
 
 # Every route about learned state hangs off the connection it is about, so the
 # unscoped path does not exist to be reached by accident.
@@ -37,10 +39,16 @@ async def clean(
     agent_conn: AsyncConnection, target_conn: AsyncConnection
 ) -> AsyncIterator[None]:
     """An empty cache each side. The graph reads the cache in full, so a leftover
-    entry from one test is an input to the next."""
+    entry from one test is an input to the next.
+
+    The turn log too, since the feedback tests below write turns: the chart is
+    "every turn this connection took", so a leftover row is an extra line in
+    somebody else's assertion about what the demo prints.
+    """
     await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
     yield
     await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
+    await agent_conn.execute("DELETE FROM turn WHERE connection_id = %s", (CID,))
     # The probe table is on the demo server — that is where the schemas cache
     # entries describe actually live.
     await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
@@ -315,3 +323,125 @@ async def test_delete_leaves_the_business_data_alone(client: AsyncClient, target
 
     cur = await target_conn.execute("SELECT count(*) AS n FROM customer")
     assert (await cur.fetchone())["n"] == before
+
+
+# ------------------------------------------------- POST .../turns/{id}/feedback
+
+
+@pytest.fixture
+def scores(monkeypatch):
+    """`tracing.score` as a recorder. Nothing here reaches Langfuse — the suite
+    runs with tracing off, so the real one would refuse and the route would 409
+    on every case below."""
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        api.tracing, "score", lambda **kw: bool(recorded.append(kw) or True)
+    )
+    return recorded
+
+
+async def a_turn(conn: AsyncConnection, *, connection_id=CID, trace_id=None) -> int:
+    turn_id = await store.start_turn(
+        conn,
+        connection_id=connection_id,
+        session_id=uuid4(),
+        question="how many customers do we have?",
+    )
+    await store.finish_turn(conn, turn_id, answer="1,840", trace_id=trace_id)
+    return turn_id
+
+
+def feedback(turn_id: int, cid: str = CID) -> str:
+    return f"/v1/connections/{cid}/turns/{turn_id}/feedback"
+
+
+async def test_a_wrong_answer_files_the_prose_with_the_verdict(
+    client: AsyncClient, conn, scores
+):
+    """The comment is the point of a 0: it is what a later optimisation reads,
+    and a bare 0 says only that something was wrong."""
+    turn_id = await a_turn(conn, trace_id="0123456789abcdef" * 2)
+
+    resp = await client.post(
+        feedback(turn_id),
+        json={"correct": False, "comment": "counted the cancelled orders"},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {
+        "trace_id": "0123456789abcdef" * 2,
+        "name": "correct",
+        "value": 0.0,
+    }
+    assert scores == [
+        {
+            "trace_id": "0123456789abcdef" * 2,
+            "name": "correct",
+            "value": 0.0,
+            "comment": "counted the cancelled orders",
+        }
+    ]
+
+
+async def test_an_approved_answer_needs_no_prose(client: AsyncClient, conn, scores):
+    turn_id = await a_turn(conn, trace_id="f" * 32)
+
+    resp = await client.post(feedback(turn_id), json={"correct": True})
+
+    assert resp.status_code == 202, resp.text
+    assert scores[0]["value"] == 1.0
+    assert scores[0]["comment"] is None
+
+
+async def test_a_turn_with_no_trace_has_nowhere_to_put_a_verdict(
+    client: AsyncClient, conn, scores
+):
+    """Tracing was off when it ran. 409 rather than a quiet 202: the verdict is
+    lost either way, and only one of those says so."""
+    turn_id = await a_turn(conn, trace_id=None)
+
+    resp = await client.post(feedback(turn_id), json={"correct": True})
+
+    assert resp.status_code == 409
+    assert "no trace" in resp.json()["detail"]
+    assert scores == []
+
+
+async def test_tracing_off_now_is_the_same_answer(client: AsyncClient, conn, monkeypatch):
+    """The row has a trace id, but this process cannot reach Langfuse. The real
+    `tracing.score` returns False, and the route must not report success."""
+    turn_id = await a_turn(conn, trace_id="a" * 32)
+
+    resp = await client.post(feedback(turn_id), json={"correct": True})
+
+    assert resp.status_code == 409
+
+
+async def test_a_verdict_cannot_reach_another_connections_turn(
+    client: AsyncClient, conn, scores
+):
+    """Turn ids are global and warehouses are not. Routed through `other`, a
+    turn belonging to `default` does not exist."""
+    turn_id = await a_turn(conn, trace_id="b" * 32)
+
+    resp = await client.post(feedback(turn_id, OTHER), json={"correct": True})
+
+    assert resp.status_code == 404
+    assert str(turn_id) in resp.json()["detail"]
+    assert scores == []
+
+
+async def test_an_unknown_turn_is_a_404(client: AsyncClient, scores):
+    assert (await client.post(feedback(10**9), json={"correct": True})).status_code == 404
+    assert scores == []
+
+
+async def test_a_misspelled_field_is_refused(client: AsyncClient, conn, scores):
+    """`extra="forbid"`, so a client sending `verdict` learns it here rather
+    than by watching the corpus never fill up."""
+    turn_id = await a_turn(conn, trace_id="c" * 32)
+
+    resp = await client.post(feedback(turn_id), json={"verdict": "ok"})
+
+    assert resp.status_code == 422
+    assert scores == []

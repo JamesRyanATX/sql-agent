@@ -33,6 +33,30 @@ class AskBody(BaseModel):
     session_id: UUID = Field(default_factory=uuid4)
 
 
+class FeedbackBody(BaseModel):
+    """What a person thought of one answer.
+
+    `extra="forbid"`, so a client sending `verdict` or `correct_sql` learns that
+    here rather than by watching a corpus never fill up.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    correct: bool
+    # Free text, and only worth asking for when the answer was wrong. It is the
+    # side information a later optimisation reads, so it is prose rather than an
+    # enum of reasons somebody guessed in advance.
+    comment: str | None = None
+
+
+class FeedbackOut(BaseModel):
+    """Where the verdict went. The trace is the record, not a row here."""
+
+    trace_id: str
+    name: str
+    value: float
+
+
 class CacheEntryOut(BaseModel):
     """One entry, as the model sees it plus what a human needs to judge it."""
 

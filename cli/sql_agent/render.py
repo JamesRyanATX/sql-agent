@@ -167,6 +167,71 @@ def tree(
             click.echo(f"{_indent}{key}: {_scalar(value)}{tail}")
 
 
+# ------------------------------------------------------------------- choosing
+#
+# A menu on `click.getchar`, rather than questionary or prompt_toolkit. The one
+# comment in pyproject.toml defending a dependency says click "resolves nothing
+# new" — it was already a transitive of uvicorn. prompt_toolkit would be the
+# opposite: a megabyte in the shipped wheel to move a `>` up and down.
+
+# What arrives for one arrow press. A terminal sends the whole sequence and
+# click reads up to 32 bytes at once, so it comes back as one string; under
+# CliRunner stdin is read a character at a time, so the same press arrives as
+# three reads. `_key` handles both, and a menu that assumes either one works in
+# exactly one of the two places.
+_UP = ("\x1b[A", "\x1bOA", "k")
+_DOWN = ("\x1b[B", "\x1bOB", "j")
+_ENTER = ("\r", "\n")
+
+
+def _key(read=click.getchar) -> str:
+    """One keypress, with a split escape sequence put back together."""
+    ch = read()
+    if ch != "\x1b":
+        return ch
+    # `[` or `O`, then the letter. A lone Escape blocks here until the next key,
+    # which is what every terminal menu does and why Escape is not a binding.
+    return ch + read() + read()
+
+
+def choose(question: str, options: Sequence[str], *, read=click.getchar) -> int:
+    """A one-line-per-option menu. Returns the index chosen.
+
+    Arrows or `j`/`k` move, Enter takes the highlighted line, and a digit takes
+    that line outright, so anyone who read "1. OK" and typed 1 is right. Ctrl-C
+    raises through click's own reader.
+
+    The redraw is bare cursor movement, which `click.echo` does not know to
+    strip, so the caller owns the decision to use this at all: `sql-agent ask`
+    asks only when stdin and stdout are both terminals.
+    """
+    click.echo(question)
+    selected = 0
+    for _ in options:
+        click.echo()
+    while True:
+        # Up over the options, then rewrite each line in place.
+        click.echo(f"\x1b[{len(options)}A", nl=False)
+        for i, option in enumerate(options):
+            line = f"{i + 1}. {option}"
+            line = (
+                click.style(f"❯ {line}", fg="cyan", bold=True)
+                if i == selected
+                else dim(f"  {line}")
+            )
+            click.echo(f"\r\x1b[2K{line}")
+
+        press = _key(read)
+        if press in _ENTER:
+            return selected
+        if press in _UP:
+            selected = (selected - 1) % len(options)
+        elif press in _DOWN:
+            selected = (selected + 1) % len(options)
+        elif press.isdigit() and 1 <= int(press) <= len(options):
+            return int(press) - 1
+
+
 def _scalar(value: Any) -> str:
     if value is None:
         return "null"

@@ -14,10 +14,11 @@ Configured by two environment variables:
 from __future__ import annotations
 
 import difflib
+import sys
 
 import click
 
-from sql_agent import config, events, http
+from sql_agent import config, events, http, render
 
 __version__ = "0.1.0"
 
@@ -75,7 +76,12 @@ def cli() -> None:
 @config.option
 @click.option("-v", "--verbose", is_flag=True, help="Show planning, exploration and what was learned.")
 @click.option("--json", "as_json", is_flag=True, help="One raw event per line, unstyled.")
-def ask(question, connection, verbose, as_json) -> None:
+@click.option(
+    "--no-feedback",
+    is_flag=True,
+    help="Don't ask what you thought of the answer.",
+)
+def ask(question, connection, verbose, as_json, no_feedback) -> None:
     """Ask a question. This is what you get by default, so `ask` is optional."""
     if verbose and as_json:
         raise click.UsageError("--json and --verbose are two renderers; pick one")
@@ -95,15 +101,25 @@ def ask(question, connection, verbose, as_json) -> None:
             f"(to ask it as a question: sql-agent ask {joined!r})"
         )
 
-    http.run(_ask(joined, connection, verbose, as_json))
+    http.run(_ask(joined, connection, verbose, as_json, no_feedback))
 
 
-async def _ask(question: str, connection: str | None, verbose: bool, as_json: bool) -> None:
+VERDICTS = ("OK", "Not OK")
+
+
+async def _ask(
+    question: str,
+    connection: str | None,
+    verbose: bool,
+    as_json: bool,
+    no_feedback: bool = False,
+) -> None:
     cid = config.connection(connection)
     if not as_json:
         click.secho(question, fg="yellow", bold=True)
 
     fatal = False
+    answered: dict | None = None
     # No session_id: the server mints one per turn, which is what a one-shot
     # question wants. Turns share the connection's cache regardless.
     async for ev in http.stream_events(
@@ -114,12 +130,59 @@ async def _ask(question: str, connection: str | None, verbose: bool, as_json: bo
         else:
             events.show(ev, verbose=verbose)
         fatal = fatal or (ev.get("type") == "error" and ev.get("fatal"))
+        if ev.get("type") == "answer":
+            answered = ev
 
     # A recoverable SQL error carries no `fatal` key — that is the fix loop
     # working, not a failed turn. Exiting 0 on a genuinely failed one would let
     # `make demo` record a crash as a good take.
     if fatal:
         raise SystemExit(1)
+
+    if not no_feedback and not as_json and _askable(answered):
+        await _feedback(cid, answered)
+
+
+def _askable(answered: dict | None) -> bool:
+    """Whether there is anything to ask about, and anywhere to put the answer.
+
+    No `trace_id` means the turn ran with tracing off, so the verdict has
+    nowhere to go and the question would be a keystroke spent on nothing.
+
+    Both streams, not just stdin: the menu redraws with cursor movement, which
+    `click.echo` does not strip from a redirected stdout. `sql-agent ask q >
+    answer.txt` is a pipeline, not a conversation.
+    """
+    return bool(
+        answered
+        and answered.get("turn_id")
+        and answered.get("trace_id")
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+
+
+async def _feedback(cid: str, answered: dict) -> None:
+    """Ask what that answer was worth, and file it against the turn's trace.
+
+    The moment is the point. Asked here, the person still has the answer in
+    front of them and is the one who wanted it; asked later, in another tool,
+    against twenty traces, it is a chore nobody does. A recipe learned from a
+    turn nobody judged is a guess the next turn inherits.
+    """
+    click.echo()
+    correct = render.choose("Was that right?", VERDICTS) == 0
+    comment = None
+    if not correct:
+        # Prose, not a menu of reasons: this text is read by the optimiser as
+        # side information, and "wrong table" chosen from a list says less than
+        # the sentence the person would have typed anyway.
+        comment = click.prompt("What could be improved", default="", show_default=False)
+    await http.post(
+        f"/connections/{cid}/turns/{answered['turn_id']}/feedback",
+        json={"correct": correct, "comment": comment or None},
+    )
+    click.echo(render.dim("  thanks — filed on this turn's trace"))
 
 
 # Registered here rather than imported at the top: the command modules import
