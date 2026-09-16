@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -62,9 +62,12 @@ class Node(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # PLAN.md §7.1. Lowering effort is how a node is made cheap; disabling
-    # thinking is not, and no value here does it — on Opus 5 that can turn a tool
-    # call into visible text that never runs, breaking the explore loop.
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    # thinking is not — on Opus 5 that can turn a tool call into visible text
+    # that never runs, breaking the explore loop. `none` exists because OpenAI's
+    # chat completions endpoint refuses function tools on a reasoning model at
+    # any other setting, and structured output is a forced tool call. It is an
+    # openai_compat value only; Config rejects it on an Anthropic node.
+    effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     model: Model | None = None
 
 
@@ -97,6 +100,27 @@ class Config(BaseModel):
     # is the one call that is not part of a turn, and usually wants a stronger
     # model. `optim/adapter.py` calls it with node="gepa.reflect".
     gepa: Node = Field(default_factory=lambda: Node(effort="max"))
+
+    NODES: ClassVar[tuple[str, ...]] = (
+        "plan", "explore", "generate_sql", "fix", "extract", "answer", "gepa",
+    )
+
+    @model_validator(mode="after")
+    def _no_thinking_only_where_it_is_the_endpoints_rule(self) -> Config:
+        """`effort: none` is an OpenAI constraint, not a cost lever (PLAN.md §7.1)."""
+        offenders = [
+            name
+            for name in self.NODES
+            if self.node(name).effort == "none"
+            and self.model_for(name).provider == "anthropic"
+        ]
+        if offenders:
+            raise ValueError(
+                f"effort: none on {', '.join(offenders)} — the Anthropic backend "
+                f"has no such level, and disabling thinking on Opus 5 breaks tool "
+                f"calls. Lower the effort instead."
+            )
+        return self
 
     # --- resolution --------------------------------------------------------
 

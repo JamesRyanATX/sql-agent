@@ -155,6 +155,33 @@ def test_openai_compat_must_name_its_endpoint():
         Model.model_validate({"provider": "openai_compat", "model": "qwen3"})
 
 
+OPENAI = {"provider": "openai_compat", "model": "gpt-5.6-luna",
+          "url": "https://api.openai.com/v1"}
+
+
+def test_effort_none_is_allowed_on_an_openai_compat_node():
+    """OpenAI's chat completions endpoint refuses function tools on a reasoning
+    model unless `reasoning_effort` is `none` — and structured output is a
+    forced tool call, so every node but `answer` hits it."""
+    loaded = Config.model_validate({**DEMO, "model": OPENAI,
+                                    "explore": {"effort": "none"}})
+    assert loaded.effort_for("explore") == "none"
+
+
+def test_effort_none_is_refused_on_an_anthropic_node():
+    """PLAN.md §7.1: on Opus 5 disabling thinking can turn a tool call into
+    visible text that never runs. `none` is the endpoint's rule, not a cost
+    lever, and the check is per node — a global `none` with one Anthropic
+    override is still an error."""
+    with pytest.raises(ValidationError, match="effort: none on explore"):
+        Config.model_validate({**DEMO, "explore": {"effort": "none"}})
+    with pytest.raises(ValidationError, match="effort: none on gepa"):
+        Config.model_validate({
+            **DEMO, "model": OPENAI,
+            "gepa": {"effort": "none", "model": DEMO["model"]},
+        })
+
+
 def test_a_statement_timeout_is_milliseconds():
     """It was the string "5s" — a Postgres interval literal, which MySQL parses
     as neither a number nor an error. See app/dialects.py."""
@@ -164,10 +191,11 @@ def test_a_statement_timeout_is_milliseconds():
     assert Config.model_validate(DEMO).statement_timeout_ms == 5_000
 
 
-def test_effort_cannot_be_turned_off():
+def test_effort_cannot_be_turned_off_on_anthropic():
     """PLAN.md §7.1: on Opus 5, thinking disabled can turn a tool call into
     plain visible text that never runs, which silently breaks the explore
-    loop. Cost is controlled with effort, so there is no value here for none."""
+    loop. Cost is controlled with effort there. `none` exists for OpenAI's
+    endpoint, which demands it — see the openai_compat tests above."""
     with pytest.raises(ValidationError):
         Config.model_validate({**DEMO, "plan": {"effort": "none"}})
 

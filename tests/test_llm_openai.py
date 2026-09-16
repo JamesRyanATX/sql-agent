@@ -93,6 +93,83 @@ async def test_a_forced_schema_call_uses_the_string_tool_choice(monkeypatch):
     assert [t["function"]["name"] for t in sent["tools"]] == [llm._EMIT]
 
 
+async def test_the_output_cap_is_max_tokens_by_default(monkeypatch):
+    """The old spelling, because Ollama's OpenAI layer knows only that one and
+    silently ignores `max_completion_tokens` — an uncapped 27B model is a turn
+    that never ends."""
+    use_openai(monkeypatch)
+    monkeypatch.setattr(llm, "_CAP_FIELD", {})
+    sent = capture(monkeypatch, httpx.Response(200, json={
+        "choices": [{"message": {"content": "hi"}}], "usage": {},
+    }))
+    await llm.complete(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        effort="low", max_tokens=100,
+    )
+    assert sent["max_tokens"] == 100
+    assert "max_completion_tokens" not in sent
+
+
+async def test_an_endpoint_that_rejects_max_tokens_gets_the_new_name(monkeypatch):
+    """OpenAI's reasoning models answer `max_tokens` with `400 Unsupported
+    parameter: 'max_tokens' is not supported with this model. Use
+    'max_completion_tokens' instead.` — and reject a body carrying both, so the
+    only move is to resend with the other spelling and remember the endpoint."""
+    use_openai(monkeypatch)
+    monkeypatch.setattr(llm, "_CAP_FIELD", {})
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "max_tokens" in body:
+            return httpx.Response(400, json={"error": {"message": (
+                "Unsupported parameter: 'max_tokens' is not supported with "
+                "this model. Use 'max_completion_tokens' instead."
+            )}})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "hi"}}], "usage": {},
+        })
+
+    monkeypatch.setattr(
+        llm,
+        "_http_client",
+        lambda spec: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://test/v1"
+        ),
+    )
+    call = {
+        "system": "s", "messages": [{"role": "user", "content": "q"}],
+        "effort": "low", "max_tokens": 100,
+    }
+    await llm.complete(**call)
+    assert [sorted(k for k in b if k.startswith("max_")) for b in bodies] == [
+        ["max_tokens"], ["max_completion_tokens"],
+    ]
+    assert bodies[1]["max_completion_tokens"] == 100
+
+    # Remembered: the next call goes straight to the accepted spelling.
+    await llm.complete(**call)
+    assert len(bodies) == 3
+    assert "max_tokens" not in bodies[2]
+    assert bodies[2]["max_completion_tokens"] == 100
+
+
+async def test_effort_none_is_sent_through(monkeypatch):
+    """Not mapped to the `medium` fallback for unknown levels: `none` is the one
+    value OpenAI's chat completions endpoint takes alongside function tools on
+    a reasoning model."""
+    use_openai(monkeypatch)
+    sent = capture(monkeypatch, httpx.Response(200, json=OK))
+    await llm.complete(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        schema=graph.PLAN_SCHEMA, effort="none", max_tokens=100,
+    )
+    assert sent["reasoning_effort"] == "none"
+
+
 async def test_ordinary_tool_calls_do_not_force_anything(monkeypatch):
     """`explore` offers four tools and must be free to answer without calling
     one — that is how the loop ends."""

@@ -258,8 +258,19 @@ def _http_client(spec: Model) -> httpx.AsyncClient:
     return client
 
 
-# Our five effort levels onto the three an OpenAI-compatible server accepts.
+# Which spelling of the output cap an endpoint takes, keyed by url. OpenAI's
+# reasoning models reject `max_tokens` with a 400 that names
+# `max_completion_tokens`; Ollama's OpenAI layer knows only `max_tokens` and
+# drops the other on the floor, which would silently uncap a local model. No
+# server takes both, so: the old name first, and the new one after an endpoint
+# has rejected it once.
+_CAP_FIELD: dict[str, str] = {}
+
+# Our effort levels onto the ones an OpenAI-compatible server accepts. `none`
+# is passed through: OpenAI's chat completions endpoint refuses function tools
+# on a reasoning model at any other setting.
 _EFFORT = {
+    "none": "none",
     "low": "low",
     "medium": "medium",
     "high": "high",
@@ -280,11 +291,13 @@ async def _complete_openai(
 ) -> Result:
     body: dict[str, Any] = {
         "model": spec.model,
-        # Local models don't need Opus 5's headroom for adaptive thinking, and
-        # the ceiling on output tokens is the ceiling on wall clock.
-        "max_tokens": min(max_tokens, spec.max_tokens),
         "messages": [{"role": "system", "content": system}, *messages],
     }
+    # Local models don't need Opus 5's headroom for adaptive thinking, and the
+    # ceiling on output tokens is the ceiling on wall clock.
+    cap = min(max_tokens, spec.max_tokens)
+    cap_field = _CAP_FIELD.get(spec.url or "", "max_tokens")
+    body[cap_field] = cap
     # Per-node effort applies here too — without it a reasoning model has no
     # brake, and `plan` is configured `low` precisely so a cached turn is cheap.
     body["reasoning_effort"] = _EFFORT.get(effort, "medium")
@@ -322,6 +335,18 @@ async def _complete_openai(
         ]
 
     resp = await _http_client(spec).post("/chat/completions", json=body)
+    if (
+        resp.status_code == 400
+        and cap_field == "max_tokens"
+        and "max_completion_tokens" in resp.text
+    ):
+        # The endpoint wants the other spelling. Remember, and go again — a
+        # rejected request costs no tokens, and this happens once per endpoint
+        # per process.
+        _CAP_FIELD[spec.url or ""] = "max_completion_tokens"
+        del body["max_tokens"]
+        body["max_completion_tokens"] = cap
+        resp = await _http_client(spec).post("/chat/completions", json=body)
     if resp.status_code >= 400:
         # Not `raise_for_status()`, which throws away the body — and the body is
         # the entire diagnosis when a local server rejects one field.
