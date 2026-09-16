@@ -35,10 +35,17 @@ projects two quarters forward, without opening the schema again.
 ## Quickstart
 
 ```bash
-make up && make migrate && make seed   # two databases + API, then 2,000 customers
-make demo                              # generate demo video
-make cache                             # what it learned, as the model sees it
-make turns                             # tokens per turn
+# Bring up environment, including demo database with 2k customers
+make up && make migrate && make seed
+
+# Re-generate video demo
+make demo
+
+# Display recipe cache / memory
+make cache
+
+# Display tokens-per-turn table
+make turns
 ```
 
 Copy `.env.example` to `.env` and put your `ANTHROPIC_API_KEY` in it. That file
@@ -69,7 +76,8 @@ model:
 
 Any node may take its own `model:` block on the same keys. The server says at
 startup when an overlay is in effect, because what is answering questions should
-never be a surprise.
+never be a surprise — and `sql-agent config` prints the merged result, shaped
+like the file, with every line the overlay decided marked.
 
 ## The CLI
 
@@ -115,9 +123,12 @@ sql-agent cache
 sql-agent turns
 # Erase memory
 sql-agent reset
+
+# What the server is running: config.yaml under config.local.yaml, overrides marked
+sql-agent config
 ```
 
-Every command takes `-c/--connection` to override the connected one. Give the
+Every command about a database takes `-c/--connection` to override the connected one. Give the
 agent a role holding `SELECT` and nothing else: it only ever reads, and the
 session it opens is read-only regardless, but that is a guarantee about the
 agent rather than about the credentials you handed it.

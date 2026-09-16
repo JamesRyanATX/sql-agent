@@ -1,7 +1,7 @@
 .PHONY: up down build migrate seed reset reset-all test test-live connections \
         psql-agent psql-demo logs logs-agent logs-demo logs-api health \
-        customer-count west-coast-customer-count cache turns demo demo-verify \
-        langfuse-up langfuse-down langfuse-logs
+        customer-count west-coast-customer-count cache turns config demo \
+        demo-verify langfuse-up langfuse-down langfuse-logs
 
 SHELL := /bin/bash
 DC ?= docker compose
@@ -139,6 +139,9 @@ cache:  ## show what the agent has learned, as the model sees it
 
 turns:  ## tokens per turn — the demo chart, as a table
 	@uv run sql-agent turns -c $(CONN)
+
+config:  ## what the server is running — config.yaml under config.local.yaml
+	@uv run sql-agent config
 
 demo: health reset  ## record the terminal demo — live, 20-30 min of real model time
 	$(VHS) demo/demo.tape

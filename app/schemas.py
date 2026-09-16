@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.config import Config
+
 Kind = Literal["schema_fact", "recipe"]
 
 # Matches the CHECK in migrations/002_connections.sql. The id is a path segment
@@ -222,3 +224,16 @@ class TurnOut(BaseModel):
 
 class TurnListOut(BaseModel):
     turns: list[TurnOut]
+
+
+class ConfigOut(BaseModel):
+    """What the server is running, and which of it the local overlay decided.
+
+    `config` is the validated merge, nulls included: an unset node effort is
+    `null` on the wire so the shape never changes with the file. The CLI is
+    what omits them.
+    """
+
+    overlay: str | None  # config.local.yaml's path, or null when there is none
+    overridden: list[str]  # dotted keys the overlay set, sorted
+    config: Config

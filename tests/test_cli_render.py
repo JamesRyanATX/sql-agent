@@ -243,3 +243,58 @@ def test_json_emits_one_parseable_object_per_event():
     parsed = [json.loads(line) for line in out.splitlines()]
     # `usage` is dropped by every other renderer and kept here — raw is raw.
     assert [p["type"] for p in parsed] == ["usage", "answer", "done"]
+
+
+# ----------------------------------------------------------------------- tree
+
+
+def tree(data: dict, marked: frozenset[str] = frozenset()) -> str:
+    runner = CliRunner()
+
+    @click.command()
+    def show():
+        render_mod.tree(data, marked=marked, note="# local")
+
+    result = runner.invoke(show, color=False)
+    assert result.exception is None, result.exception
+    return result.output
+
+
+def test_tree_prints_the_file_the_user_knows():
+    """`sql-agent config` output is the yaml the user edits: key order kept,
+    unset nodes absent, `900.0` back to the `900` the file says."""
+    out = tree(
+        {
+            "model": {"provider": "openai_compat", "url": "http://h/v1", "timeout": 900.0},
+            "max_rows": 50,
+            "plan": {"effort": None, "model": None},
+            "explore": {"effort": "low", "model": None},
+            "flag": True,
+        },
+        marked=frozenset({"model.provider", "explore.effort"}),
+    )
+    assert out == (
+        "model:\n"
+        "  provider: openai_compat  # local\n"
+        "  url: http://h/v1\n"
+        "  timeout: 900\n"
+        "max_rows: 50\n"
+        "explore:\n"
+        "  effort: low  # local\n"
+        "flag: true\n"
+    )
+
+
+def test_tree_shows_a_null_the_overlay_set_on_purpose():
+    """Unset is silence; set-to-null by the overlay is a fact, and gets a line.
+    A block the overlay replaced wholesale carries the mark on its header."""
+    out = tree(
+        {"plan": {"effort": None, "model": None}, "explore": {"effort": "high", "model": None}},
+        marked=frozenset({"plan.effort", "explore"}),
+    )
+    assert out == (
+        "plan:\n"
+        "  effort: null  # local\n"
+        "explore:  # local\n"
+        "  effort: high\n"
+    )

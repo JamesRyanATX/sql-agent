@@ -16,6 +16,7 @@ from psycopg import AsyncConnection
 from app import store
 from app.settings import settings
 from tests.conftest import DEFAULT_CONNECTION as CID
+from tests.conftest import DEMO
 
 # Every route about learned state hangs off the connection it is about, so the
 # unscoped path does not exist to be reached by accident.
@@ -94,9 +95,11 @@ async def test_v1_rejects_anything_but_the_token(client: AsyncClient, monkeypatc
     monkeypatch.setenv("API_TOKEN", "s3cret")
     settings.cache_clear()
     try:
-        resp = await client.get(CACHE, headers=header)
-        assert resp.status_code == 401
-        assert resp.headers["www-authenticate"] == "Bearer"
+        # Scoped and unscoped alike: the dependency is on the router.
+        for path in (CACHE, "/v1/config"):
+            resp = await client.get(path, headers=header)
+            assert resp.status_code == 401, path
+            assert resp.headers["www-authenticate"] == "Bearer"
     finally:
         settings.cache_clear()
 
@@ -116,6 +119,47 @@ async def test_an_unset_token_leaves_v1_open(client: AsyncClient):
     startup rather than leaving it silent."""
     assert settings().api_token == ""
     assert (await client.get(CACHE)).status_code == 200
+
+
+# --------------------------------------------------------------- GET /v1/config
+
+
+@pytest.fixture
+async def config_client(config_dir, client):
+    """`config_dir` first, so the lifespan's `config()` reads the scratch dir
+    and not whatever overlay the developer happens to have."""
+    return config_dir, client
+
+
+async def test_config_is_the_tracked_file_when_there_is_no_overlay(config_client):
+    _, client = config_client
+    body = (await client.get("/v1/config")).json()
+    assert body["overlay"] is None
+    assert body["overridden"] == []
+    assert body["config"]["model"]["provider"] == "anthropic"
+    assert body["config"]["explore"]["effort"] == "high"
+    # Nulls stay on the wire, so the shape never changes with the file.
+    assert body["config"]["explore"]["model"] is None
+    assert body["config"]["plan"] == {"effort": None, "model": None}
+
+
+async def test_config_reports_what_the_overlay_decided(config_client):
+    write, client = config_client
+    write(DEMO, local={
+        "model": {"provider": "openai_compat", "model": "qwen3:32b",
+                  "url": "http://10.0.0.1:11434/v1"},
+        "explore": {"effort": "low"},
+    })
+    body = (await client.get("/v1/config")).json()
+    assert body["overlay"].endswith("config.local.yaml")
+    assert body["overridden"] == [
+        "explore.effort", "model.model", "model.provider", "model.url",
+    ]
+    assert body["config"]["model"]["model"] == "qwen3:32b"
+    assert body["config"]["explore"]["effort"] == "low"
+    # The layer underneath survives, key by key.
+    assert body["config"]["extract"]["effort"] == "low"
+    assert body["config"]["model"]["max_tokens"] == 16_000
 
 
 # ---------------------------------------------------------------- GET /v1/cache

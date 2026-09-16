@@ -126,3 +126,52 @@ def detail(pairs: Sequence[tuple[str, Any]]) -> None:
     width = max((len(k) for k, _ in pairs), default=0)
     for key, value in pairs:
         click.echo(f"  {dim(key.ljust(width))}  {'' if value is None else value}")
+
+
+def tree(
+    data: dict[str, Any],
+    *,
+    marked: frozenset[str] = frozenset(),
+    note: str = "",
+    _prefix: str = "",
+    _indent: str = "",
+) -> None:
+    """A nested mapping as the YAML file it came from, `note` after every line
+    whose dotted key is in `marked`.
+
+    Not `yaml.safe_dump`: it sorts keys, quotes on rules of its own and cannot
+    annotate a line. The values here are str/int/float/bool/None and mappings —
+    what config.yaml can hold — so this is the whole grammar.
+
+    A None leaf is omitted, so an unset node prints the way the file has it: not
+    at all. Unless it is marked — an overlay that set a key to null is a fact
+    worth a line.
+    """
+    for key, value in data.items():
+        path = f"{_prefix}{key}"
+        tail = dim(f"  {note}") if path in marked else ""
+        if isinstance(value, dict):
+            if not any(
+                v is not None or f"{path}.{k}" in marked for k, v in value.items()
+            ):
+                continue  # a block with nothing in it is not in the file either
+            click.echo(f"{_indent}{key}:{tail}")
+            tree(
+                value,
+                marked=marked,
+                note=note,
+                _prefix=f"{path}.",
+                _indent=_indent + "  ",
+            )
+        elif value is not None or path in marked:
+            click.echo(f"{_indent}{key}: {_scalar(value)}{tail}")
+
+
+def _scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):  # before int — a bool is one
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))  # the file says `timeout: 900`; pydantic made it 900.0
+    return str(value)

@@ -17,7 +17,8 @@ make reset                             # clear learned state, reseed
 - `app/settings.py`: reads environment + `.env` (secret/addresses).  
 - `app/config.py`: reads `config/config.yaml` (behaviour) merged with `config/config.local.yaml` (git‑ignored).  
   - `config.yaml` provides model, per‑node effort, tool limits, etc.  
-  - `extra="forbid"` enforces strict keys.
+  - `extra="forbid"` enforces strict keys.  
+  - `GET /v1/config` / `sql-agent config`: the effective merge, with the overlay's keys listed (`config.overrides()`).
 
 ## Architecture
 - **API** (`/v1/*`): only entry point; all logic lives in the server process.  

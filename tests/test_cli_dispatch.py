@@ -29,7 +29,7 @@ def spy(monkeypatch):
 
         return fake
 
-    from sql_agent import connections, main, memory
+    from sql_agent import connections, main, memory, server
 
     monkeypatch.setattr(main, "_ask", record("ask"))
     monkeypatch.setattr(connections, "_connect", record("connect"))
@@ -37,6 +37,7 @@ def spy(monkeypatch):
     monkeypatch.setattr(memory, "_cache", record("cache"))
     monkeypatch.setattr(memory, "_turns", record("turns"))
     monkeypatch.setattr(memory, "_reset", record("reset"))
+    monkeypatch.setattr(server, "_config", record("config"))
     return seen
 
 
@@ -89,14 +90,22 @@ def test_ask_is_how_you_ask_a_question_that_is_a_command(spy):
     assert spy["command"] == "cache"
 
 
-def test_a_near_miss_for_a_command_is_a_typo_not_a_question(spy):
+@pytest.mark.parametrize("typo, meant", [("cahce", "cache"), ("confg", "config")])
+def test_a_near_miss_for_a_command_is_a_typo_not_a_question(spy, typo, meant):
     """A question costs a model call and minutes of wall clock, so discovering
     `cahce` that way is expensive. Multi-word questions are never guessed at."""
-    code, output = invoke(["cahce"])
+    code, output = invoke([typo])
     assert code == 2
-    assert "did you mean 'cache'" in output
-    assert "sql-agent ask 'cahce'" in output
+    assert f"did you mean '{meant}'" in output
+    assert f"sql-agent ask '{typo}'" in output
     assert spy == {}
+
+
+def test_config_is_a_command_not_a_question(spy):
+    """Not about a database, so it takes no -c."""
+    assert invoke(["config"])[0] == 0
+    assert spy == {"command": "config", "args": (), "kwargs": {}}
+    assert invoke(["config", "-c", "prod"])[0] == 2
 
 
 def test_an_unambiguous_one_word_question_is_still_asked(spy):

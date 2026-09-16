@@ -126,6 +126,7 @@ async def _ask(question: str, connection: str | None, verbose: bool, as_json: bo
 # `config.option`, so the group has to exist first.
 from sql_agent import connections as _connections  # noqa: E402
 from sql_agent import memory as _memory  # noqa: E402
+from sql_agent import server as _server  # noqa: E402
 
 for _command in (
     _connections.connect,
@@ -133,6 +134,7 @@ for _command in (
     _memory.cache,
     _memory.turns,
     _memory.reset,
+    _server.show_config,
 ):
     cli.add_command(_command)
 

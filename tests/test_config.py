@@ -15,36 +15,9 @@ import yaml
 from pydantic import ValidationError
 
 from app import config as config_module
-from app.config import Config, Model, config
+from app.config import Config, Model, config, leaves, overrides
 from app.settings import settings
-
-DEMO = {
-    "model": {"provider": "anthropic", "model": "claude-opus-5"},
-    "max_tool_calls": 24,
-    "extract": {"effort": "low"},
-    "explore": {"effort": "high"},
-}
-
-
-@pytest.fixture
-def config_dir(tmp_path, monkeypatch):
-    """A scratch CONFIG_DIR. `write` puts a config.yaml or an overlay in it."""
-
-    def write(data: dict, *, local: dict | None = None) -> None:
-        (tmp_path / config_module.FILE).write_text(yaml.safe_dump(data))
-        if local is not None:
-            (tmp_path / config_module.LOCAL).write_text(yaml.safe_dump(local))
-        config.cache_clear()
-
-    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
-    settings.cache_clear()
-    config.cache_clear()
-    write(DEMO)
-    yield write
-    monkeypatch.delenv("CONFIG_DIR", raising=False)
-    settings.cache_clear()
-    config.cache_clear()
-
+from tests.conftest import DEMO, clear_config
 
 # ----------------------------------------------------------------- the layers
 
@@ -93,14 +66,14 @@ def test_a_missing_config_is_an_error_not_a_fallback(tmp_path, monkeypatch):
     nobody chose."""
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     settings.cache_clear()
-    config.cache_clear()
+    clear_config()
     try:
         with pytest.raises(ValueError, match="no config at"):
             config()
     finally:
         monkeypatch.delenv("CONFIG_DIR", raising=False)
         settings.cache_clear()
-        config.cache_clear()
+        clear_config()
 
 
 # ------------------------------------------------------------- the resolution
@@ -199,9 +172,34 @@ def test_effort_cannot_be_turned_off():
         Config.model_validate({**DEMO, "plan": {"effort": "none"}})
 
 
+# ---------------------------------------------------------- what the overlay set
+
+
+def test_leaves_are_the_paths_the_merge_would_write():
+    assert sorted(leaves({"model": {"provider": "x", "url": None}, "max_rows": 1})) == [
+        "max_rows", "model.provider", "model.url",
+    ]
+    # A block replaced wholesale is a leaf: that is what `_merge` does with it.
+    assert leaves({"explore": None}) == ["explore"]
+    assert leaves({"explore": {}}) == ["explore"]
+    assert leaves({}) == []
+
+
+def test_overrides_are_the_overlay_keys_sorted(config_dir):
+    write = config_dir
+    assert overrides() == ()
+
+    write(DEMO, local={"model": {"model": "qwen3", "provider": "openai_compat",
+                                 "url": "http://h/v1"},
+                       "explore": {"effort": "low"}})
+    assert overrides() == (
+        "explore.effort", "model.model", "model.provider", "model.url",
+    )
+
+
 def test_a_yaml_that_is_not_a_mapping_says_so(config_dir, tmp_path):
     (tmp_path / config_module.FILE).write_text("- just\n- a list\n")
-    config.cache_clear()
+    clear_config()
 
     with pytest.raises(ValueError, match="not a mapping"):
         config()

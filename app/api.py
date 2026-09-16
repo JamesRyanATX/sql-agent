@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Requ
 from fastapi.responses import Response, StreamingResponse
 
 from app import db, dialects, store
+from app.config import config, overlay, overrides
 from app.events import sse
 from app.graph import stream_turn
 from app.schemas import (
@@ -27,6 +28,7 @@ from app.schemas import (
     CacheEntryOut,
     CacheListOut,
     CacheSummary,
+    ConfigOut,
     ConnectionCreate,
     ConnectionCreatedOut,
     ConnectionListOut,
@@ -233,6 +235,25 @@ def _sanitise(e: Exception, registered: store.Connection) -> str:
     if registered.password and registered.password in detail:
         detail = ""
     return f"{type(orig).__name__}: {detail}" if detail else type(orig).__name__
+
+
+# --------------------------------------------------------------------- server
+
+
+@router.get("/config", response_model=ConfigOut)
+async def read_config() -> ConfigOut:
+    """The model configuration this process is running.
+
+    config.yaml with config.local.yaml merged over it, and which keys the
+    overlay decided. `model.url` may be an internal address, which is why this
+    sits behind the token with everything else under /v1.
+    """
+    local = overlay()
+    return ConfigOut(
+        overlay=str(local) if local is not None else None,
+        overridden=list(overrides()),
+        config=config(),
+    )
 
 
 # ------------------------------------------------------------------- registry

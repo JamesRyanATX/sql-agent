@@ -157,6 +157,33 @@ def overlay() -> Path | None:
     return path if path.is_file() else None
 
 
+def leaves(data: dict[str, Any], prefix: str = "") -> list[str]:
+    """Every dotted path in a mapping that `_merge` would write as a value.
+
+    A scalar, or anything that replaces a block wholesale — `explore: null`
+    is a leaf named `explore`, because that is what the merge does with it.
+    """
+    out: list[str] = []
+    for key, value in data.items():
+        if isinstance(value, dict) and value:
+            out.extend(leaves(value, f"{prefix}{key}."))
+        else:
+            out.append(f"{prefix}{key}")
+    return out
+
+
+@lru_cache
+def overrides() -> tuple[str, ...]:
+    """Which keys `config.local.yaml` set, sorted.
+
+    Memoised for the same reason `config()` is: the answer must describe the
+    process, not the disk. An overlay edited since boot would otherwise mark
+    keys the running config never saw.
+    """
+    local = overlay()
+    return tuple(sorted(leaves(_read(local)))) if local is not None else ()
+
+
 @lru_cache
 def config() -> Config:
     """`config/config.yaml`, merged with `config.local.yaml` and validated.

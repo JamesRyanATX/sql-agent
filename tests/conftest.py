@@ -31,12 +31,13 @@ Rebuilt once per session, so they are also always consistent with the current
 import asyncio
 import os
 import pathlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import AsyncIterator
 
 import psycopg
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
@@ -44,7 +45,9 @@ from psycopg.rows import dict_row
 from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app import config as config_module
 from app import store, tracing
+from app.config import config, overrides
 from app.main import app
 from app.secrets import seal
 from app.settings import Settings, settings
@@ -402,6 +405,46 @@ def cli_env(monkeypatch, tmp_path):
     monkeypatch.delenv("SQL_AGENT_API_KEY", raising=False)
     monkeypatch.delenv("SQL_AGENT_CONNECTION", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+# What config.yaml says, minus what these tests are not about.
+DEMO = {
+    "model": {"provider": "anthropic", "model": "claude-opus-5"},
+    "max_tool_calls": 24,
+    "extract": {"effort": "low"},
+    "explore": {"effort": "high"},
+}
+
+
+def clear_config() -> None:
+    """Both memoised readers. Always both: an `overrides()` that outlives the
+    `config()` it described would mark keys the running config never saw."""
+    config.cache_clear()
+    overrides.cache_clear()
+
+
+@pytest.fixture
+def config_dir(tmp_path, monkeypatch):
+    """A scratch CONFIG_DIR. `write` puts a config.yaml or an overlay in it.
+
+    Request it *before* `client` in a test's signature: the lifespan reads
+    `config()` at boot, and what it caches is whatever CONFIG_DIR said then.
+    """
+
+    def write(data: dict, *, local: dict | None = None) -> None:
+        (tmp_path / config_module.FILE).write_text(yaml.safe_dump(data))
+        if local is not None:
+            (tmp_path / config_module.LOCAL).write_text(yaml.safe_dump(local))
+        clear_config()
+
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    settings.cache_clear()
+    clear_config()
+    write(DEMO)
+    yield write
+    monkeypatch.delenv("CONFIG_DIR", raising=False)
+    settings.cache_clear()
+    clear_config()
 
 
 @pytest.fixture
