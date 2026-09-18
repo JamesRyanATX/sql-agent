@@ -1,0 +1,109 @@
+# The corpus. One question per line; `#` and blank lines are skipped.
+#
+#   make corpus     ask each of these cold, and judge the answer
+#
+# Every line here is aimed at something. `demo/demo.sql` is booby-trapped on
+# purpose, and a corpus of questions the agent answers easily would measure
+# nothing: a candidate prompt cannot win where the seed already wins. So most of
+# these can be got wrong, and the note above each one says how.
+#
+# Two kinds of answer live in here, and the split matters to whatever reads the
+# corpus later. Some are fixed by modular arithmetic in demo.sql — 2,000
+# customers, 160 soft-deleted, 500 in the west, 200 products, 6,000 orders — so
+# the number is knowable and will be the same in November. The rest slide,
+# because `orders.created` is anchored to `now()`; those can only be judged on
+# shape. Keep that balance when adding lines.
+
+
+# --- the counts demo.sql pins -------------------------------------------------
+
+# TRAP 1. 160 of 2,000 are soft-deleted, so the honest answer is 1,840 and
+# `SELECT count(*)` is wrong by exactly the rows somebody deleted.
+how many customers do we have?
+
+# The same trap from the other side. A model that missed it above has no reason
+# to find it here, and one that learned it should reuse what it learned.
+how many customers have been deleted?
+
+# TRAP 2. 350 'west', 100 'West', 50 'WEST'. `region = 'west'` silently drops
+# 30% of the region, and the right answer is 500 before soft deletes.
+how many customers are in the west region?
+
+# Both traps at once: mixed casing and soft deletes in one question.
+how many active customers are in the west region?
+
+# Casing again, where the wrong answer looks tidy: four regions, or seven?
+what regions do we have, and how many customers in each?
+
+how many products do we sell?
+
+# TRAP 3 as a plain count. 12.5% of 6,000 orders are cancelled.
+how many orders have been cancelled?
+
+what order statuses exist, and how many orders have each?
+
+
+# --- revenue, where the price trap lives --------------------------------------
+
+# TRAP 4. `order_item.price` is what a line sold for; `product.unit_price` is
+# today's list price. Joining to the product table is the wrong answer that
+# looks right, and `price_history` is a decoy table that looks like the fix.
+what was our total revenue?
+
+# TRAP 4 and TRAP 3 together: revenue that counts cancelled orders is
+# overstated by about an eighth.
+what was our revenue from completed orders?
+
+# Adds TRAP 2, because grouping on a column with three spellings of west
+# reports the region three times.
+what was our revenue by region?
+
+what is the average order value?
+
+# The decoy earns its place here: a question about list prices *should* use
+# product.unit_price, and a model that learned "never use unit_price" from the
+# revenue questions now has to know when that stops being true.
+which products are the most expensive to buy today?
+
+
+# --- dates, which is TRAP 5 ---------------------------------------------------
+
+# The column is `created`. Every model reaches for `created_at` first, which
+# does not exist on orders — so this is the fix loop's question.
+how many orders were placed in the last 30 days?
+
+# Anchored to now(), so the answer moves. Judge the shape: one row per month,
+# most recent last, counts in the hundreds.
+how many orders did we get each month this year?
+
+what was our revenue last quarter?
+
+# Two traps and a date: cancelled orders, historical prices, `created`.
+what was our revenue by region last quarter?
+
+# A date question on a table that *does* have created_at, so the answer to
+# TRAP 5 is not "always use created".
+how many customers signed up in the last year?
+
+
+# --- top-N, where row order is part of the answer -----------------------------
+
+# Ordered: a right set of customers in the wrong order is a wrong answer.
+who are our top 10 customers by revenue?
+
+which 5 products sold the most units?
+
+# Ordered and trapped: regions by revenue, with the casing and the price trap
+# both in play.
+which regions are our biggest by revenue?
+
+
+# --- questions about the shape of the data ------------------------------------
+
+# Deliberately open. The right answer names the soft-delete column and the
+# casing, because those are what anybody would need to know first.
+what should i know about the customer table before i query it?
+
+# 200 products, some discontinued. A question with no trap in it, so the corpus
+# is not all traps — a prompt that only ever hunts for tricks is its own failure.
+how many products have been discontinued?

@@ -261,3 +261,7 @@ class ConfigOut(BaseModel):
     overlay: str | None  # config.local.yaml's path, or null when there is none
     overridden: list[str]  # dotted keys the overlay set, sorted
     config: Config
+    # Not part of the merge — it comes from the environment, not the file — but
+    # it is the other half of "what is this process doing", and a client that
+    # needs a trace to write to can ask before spending a turn finding out.
+    tracing: bool

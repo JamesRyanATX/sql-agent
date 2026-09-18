@@ -14,11 +14,10 @@ Configured by two environment variables:
 from __future__ import annotations
 
 import difflib
-import sys
 
 import click
 
-from sql_agent import config, events, http, render
+from sql_agent import config, http, turn
 
 __version__ = "0.1.0"
 
@@ -104,9 +103,6 @@ def ask(question, connection, verbose, as_json, no_feedback) -> None:
     http.run(_ask(joined, connection, verbose, as_json, no_feedback))
 
 
-VERDICTS = ("OK", "Not OK")
-
-
 async def _ask(
     question: str,
     connection: str | None,
@@ -115,23 +111,7 @@ async def _ask(
     no_feedback: bool = False,
 ) -> None:
     cid = config.connection(connection)
-    if not as_json:
-        click.secho(question, fg="yellow", bold=True)
-
-    fatal = False
-    answered: dict | None = None
-    # No session_id: the server mints one per turn, which is what a one-shot
-    # question wants. Turns share the connection's cache regardless.
-    async for ev in http.stream_events(
-        f"/connections/{cid}/ask", {"question": question}
-    ):
-        if as_json:
-            events.raw(ev)
-        else:
-            events.show(ev, verbose=verbose)
-        fatal = fatal or (ev.get("type") == "error" and ev.get("fatal"))
-        if ev.get("type") == "answer":
-            answered = ev
+    answered, fatal = await turn.take(cid, question, verbose=verbose, as_json=as_json)
 
     # A recoverable SQL error carries no `fatal` key — that is the fix loop
     # working, not a failed turn. Exiting 0 on a genuinely failed one would let
@@ -139,61 +119,21 @@ async def _ask(
     if fatal:
         raise SystemExit(1)
 
-    if not no_feedback and not as_json and _askable(answered):
-        await _feedback(cid, answered)
-
-
-def _askable(answered: dict | None) -> bool:
-    """Whether there is anything to ask about, and anywhere to put the answer.
-
-    No `trace_id` means the turn ran with tracing off, so the verdict has
-    nowhere to go and the question would be a keystroke spent on nothing.
-
-    Both streams, not just stdin: the menu redraws with cursor movement, which
-    `click.echo` does not strip from a redirected stdout. `sql-agent ask q >
-    answer.txt` is a pipeline, not a conversation.
-    """
-    return bool(
-        answered
-        and answered.get("turn_id")
-        and answered.get("trace_id")
-        and sys.stdin.isatty()
-        and sys.stdout.isatty()
-    )
-
-
-async def _feedback(cid: str, answered: dict) -> None:
-    """Ask what that answer was worth, and file it against the turn's trace.
-
-    The moment is the point. Asked here, the person still has the answer in
-    front of them and is the one who wanted it; asked later, in another tool,
-    against twenty traces, it is a chore nobody does. A recipe learned from a
-    turn nobody judged is a guess the next turn inherits.
-    """
-    click.echo()
-    correct = render.choose("Was that right?", VERDICTS) == 0
-    comment = None
-    if not correct:
-        # Prose, not a menu of reasons: this text is read by the optimiser as
-        # side information, and "wrong table" chosen from a list says less than
-        # the sentence the person would have typed anyway.
-        comment = click.prompt("What could be improved", default="", show_default=False)
-    await http.post(
-        f"/connections/{cid}/turns/{answered['turn_id']}/feedback",
-        json={"correct": correct, "comment": comment or None},
-    )
-    click.echo(render.dim("  thanks — filed on this turn's trace"))
+    if not no_feedback and not as_json and turn.askable(answered):
+        await turn.judge(cid, answered)
 
 
 # Registered here rather than imported at the top: the command modules import
 # `config.option`, so the group has to exist first.
 from sql_agent import connections as _connections  # noqa: E402
+from sql_agent import corpus as _corpus  # noqa: E402
 from sql_agent import memory as _memory  # noqa: E402
 from sql_agent import server as _server  # noqa: E402
 
 for _command in (
     _connections.connect,
     _connections.connections,
+    _corpus.record,
     _memory.cache,
     _memory.turns,
     _memory.reset,

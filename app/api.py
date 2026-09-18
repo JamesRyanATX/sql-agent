@@ -253,12 +253,17 @@ async def read_config() -> ConfigOut:
     config.yaml with config.local.yaml merged over it, and which keys the
     overlay decided. `model.url` may be an internal address, which is why this
     sits behind the token with everything else under /v1.
+
+    `tracing` rides along although it is environment rather than file: it is
+    what a client asks before a run that only pays off if the turns are
+    recorded.
     """
     local = overlay()
     return ConfigOut(
         overlay=str(local) if local is not None else None,
         overridden=list(overrides()),
         config=config(),
+        tracing=tracing.enabled(),
     )
 
 

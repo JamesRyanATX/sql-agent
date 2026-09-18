@@ -170,6 +170,25 @@ async def test_config_reports_what_the_overlay_decided(config_client):
     assert body["config"]["model"]["max_tokens"] == 16_000
 
 
+async def test_config_says_whether_tracing_is_on(config_client, monkeypatch):
+    """Not part of the merge — it is two keys in the environment — but it is the
+    other half of what this process is doing, and the answer a client needs
+    before a run that is only worth taking if the turns are recorded."""
+    _, client = config_client
+    assert (await client.get("/v1/config")).json()["tracing"] is False
+
+    # A context, not `monkeypatch.undo()`: `config_dir` patched CONFIG_DIR
+    # through the same fixture, and undoing everything would take the scratch
+    # prompt directory with it — which surfaces as a ValueError from the prompt
+    # loader in whatever test runs next.
+    with monkeypatch.context() as m:
+        m.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        m.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        settings.cache_clear()
+        assert (await client.get("/v1/config")).json()["tracing"] is True
+    settings.cache_clear()
+
+
 # ---------------------------------------------------------------- GET /v1/cache
 
 

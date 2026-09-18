@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from sql_agent import main
+from sql_agent import turn as turn_mod
 
 ANSWER = {
     "type": "answer",
@@ -44,8 +45,8 @@ def turn(monkeypatch):
         posted.append({"path": path, "json": json})
         return {}
 
-    monkeypatch.setattr(main.http, "stream_events", stream_events)
-    monkeypatch.setattr(main.http, "post", post)
+    monkeypatch.setattr(turn_mod.http, "stream_events", stream_events)
+    monkeypatch.setattr(turn_mod.http, "post", post)
     return posted
 
 
@@ -74,16 +75,16 @@ def streams(monkeypatch, *, stdin: bool, stdout: bool) -> None:
     test runs — and these tests would then all assert the *unasked* path while
     reading as though they cover the asked one.
     """
-    monkeypatch.setattr(main.sys, "stdin", Stream(main.sys.stdin, stdin))
-    monkeypatch.setattr(main.sys, "stdout", Stream(main.sys.stdout, stdout))
+    monkeypatch.setattr(turn_mod.sys, "stdin", Stream(turn_mod.sys.stdin, stdin))
+    monkeypatch.setattr(turn_mod.sys, "stdout", Stream(turn_mod.sys.stdout, stdout))
 
 
 @pytest.fixture
 def answers(monkeypatch):
     """The person at the keyboard: which line they took, and what they typed."""
     said = {"choice": 0, "comment": "counted the cancelled orders"}
-    monkeypatch.setattr(main.render, "choose", lambda *a, **kw: said["choice"])
-    monkeypatch.setattr(main.click, "prompt", lambda *a, **kw: said["comment"])
+    monkeypatch.setattr(turn_mod.render, "choose", lambda *a, **kw: said["choice"])
+    monkeypatch.setattr(turn_mod.click, "prompt", lambda *a, **kw: said["comment"])
     return said
 
 
@@ -175,7 +176,7 @@ async def test_a_turn_that_was_never_traced_is_not_asked_about(turn, answers, mo
 
         return events()
 
-    monkeypatch.setattr(main.http, "stream_events", stream_events)
+    monkeypatch.setattr(turn_mod.http, "stream_events", stream_events)
 
     await ask()
 
@@ -193,7 +194,7 @@ async def test_a_failed_turn_is_not_asked_about(turn, answers, monkeypatch):
 
         return events()
 
-    monkeypatch.setattr(main.http, "stream_events", stream_events)
+    monkeypatch.setattr(turn_mod.http, "stream_events", stream_events)
 
     with pytest.raises(SystemExit):
         await ask()

@@ -135,6 +135,13 @@ trace as a score, which is what a later optimisation reads as a label: an
 approved answer says the SQL behind it was worth keeping. `--no-feedback` skips
 it, and nothing is asked when tracing is off or when either stream is redirected.
 
+`make corpus` is that menu, twenty-odd times in a row. It asks every question in
+`demo/questions.txt` against a separate connection, clearing the cache first so
+each turn explores from nothing, and you judge each answer as it lands. That
+sitting is what fills the corpus the optimiser trains on — the questions are
+aimed at the traps in `demo/demo.sql`, because a corpus the agent already answers
+perfectly measures nothing.
+
 Every command about a database takes `-c/--connection` to override the connected one. Give the
 agent a role holding `SELECT` and nothing else: it only ever reads, and the
 session it opens is read-only regardless, but that is a guarantee about the

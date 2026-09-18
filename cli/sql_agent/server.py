@@ -27,3 +27,8 @@ async def _config() -> None:
         marked=frozenset(body["overridden"]),
         note="# config.local.yaml",
     )
+    # Last, and outside the tree, because it is not in either file — it is the
+    # two Langfuse keys in the server's environment. Printed either way: off is
+    # the answer to "why did my verdict not land", and silence is not.
+    state = "on" if body["tracing"] else "off"
+    click.echo(render.dim(f"\n# tracing is {state}"))

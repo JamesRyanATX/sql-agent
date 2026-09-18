@@ -1,7 +1,7 @@
 .PHONY: up down build migrate seed reset reset-all test test-live connections \
         psql-agent psql-demo logs logs-agent logs-demo logs-api health \
-        customer-count west-coast-customer-count cache turns config demo \
-        demo-verify langfuse-up langfuse-down langfuse-logs
+        customer-count west-coast-customer-count cache turns config corpus \
+        demo demo-verify langfuse-up langfuse-down langfuse-logs
 
 SHELL := /bin/bash
 DC ?= docker compose
@@ -145,6 +145,20 @@ turns:  ## tokens per turn — the demo chart, as a table
 
 config:  ## what the server is running — config.yaml under config.local.yaml
 	@uv run sql-agent config
+
+# --- the corpus: questions, asked cold, judged by hand ----------------------
+#
+# The optimisation downstream needs turns with a label on them, and the label
+# is a person's. This is the sitting where that happens: ~20 questions, a cold
+# turn each, a verdict each. Verdicts land on the traces, so Langfuse has to be
+# up (`make langfuse-up`) and the server restarted with both keys.
+#
+# `CORPUS_CONN` rather than `CONN`: these turns are not the demo's, and mixing
+# twenty of them into `default` buries the chart `make turns` prints.
+CORPUS_CONN ?= golden
+
+corpus:  ## ask demo/questions.txt cold and judge each answer (~20 model turns)
+	uv run sql-agent corpus -c $(CORPUS_CONN) demo/questions.txt
 
 demo: health reset  ## record the terminal demo — live, 20-30 min of real model time
 	$(VHS) demo/demo.tape
