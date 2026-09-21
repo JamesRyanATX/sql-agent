@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import difflib
+import json
 import random
 import shutil
 import sys
@@ -78,6 +79,10 @@ def run_dir(node: str) -> Path:
     return OUT / "run" / node
 
 
+def pareto(node: str) -> Path:
+    return OUT / f"{node}.pareto.json"
+
+
 def say(message: str = "", **kwargs) -> None:
     """Narration. Every print in this module goes through here, so stdout stays
     the artifact — the promise breaks on one `click.echo` written in a hurry."""
@@ -97,6 +102,12 @@ def say(message: str = "", **kwargs) -> None:
 )
 @click.option("--probe-only", is_flag=True, help="check the invariants and stop")
 @click.option("--days", default=30, show_default=True, help="how far back to harvest")
+@click.option(
+    "--pareto",
+    "pareto_to",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="also write the front here, somewhere tracked",
+)
 def cli(
     node: str,
     verbose: bool,
@@ -106,6 +117,7 @@ def cli(
     resume: bool,
     probe_only: bool,
     days: int,
+    pareto_to: Path | None,
 ) -> None:
     """GEPA over one node's prompt. The new prose goes to stdout.
 
@@ -149,6 +161,18 @@ def cli(
         say(
             f"search    {result.total_metric_calls} metric calls, "
             f"{len(result.candidates)} candidates in the pool"
+        )
+
+        # Before the empty-pool check below, not after. A run that ends with
+        # NO_IMPROVEMENT is the one whose evidence is most worth keeping, and
+        # on a pool of one the seed's own five terms are what say whether the
+        # metric is saturated — which is exactly what that message asks you to
+        # go and find out.
+        _pareto(
+            result,
+            node=node,
+            seed_index=_seed_index(result, seed_prompt, COMPONENT),
+            path=pareto_to,
         )
 
         # `skip_perfect_score` means a seed at the top of the metric is never
@@ -327,6 +351,148 @@ def _search(
         )
 
 
+# ----------------------------------------------------------------- the front
+#
+# The metric is five weighted terms collapsed into one number, and the collapse
+# settles a trade-off — grounding against cost — on the reader's behalf. GEPA
+# keeps the per-term scores; `gepa.optimize` never writes them anywhere. These
+# forty lines are the difference between "a Pareto front of prompts" as a
+# sentence and as a file somebody can read.
+
+
+def _front(subscores: list[dict[str, float]], objectives: tuple[str, ...]) -> list[int]:
+    """The candidates no other candidate beats on every term.
+
+    Not `result.per_objective_best_candidates`, which is the strictly smaller
+    set of candidates topping at least one term. The non-dominated set is what
+    "no other candidate is better on everything" means, and showing a file that
+    disagrees with the sentence said over it is the failure this exists to
+    prevent.
+
+    A candidate missing a term is ineligible rather than an error: a rollout
+    that errored on every validation case comes back with no terms at all.
+    """
+    scored = [i for i, s in enumerate(subscores) if all(o in s for o in objectives)]
+
+    def dominates(a: dict[str, float], b: dict[str, float]) -> bool:
+        return all(a[o] >= b[o] for o in objectives) and any(
+            a[o] > b[o] for o in objectives
+        )
+
+    return [
+        i
+        for i in scored
+        if not any(dominates(subscores[j], subscores[i]) for j in scored if j != i)
+    ]
+
+
+def _pareto(result, *, node: str, seed_index: int | None, path: Path | None) -> None:
+    """Write the front, and print it. Always to `out/`, and to `path` as well.
+
+    `out/` is gitignored because a harvested case holds a recorded prompt. The
+    talk needs a file that survives a clone, so `--pareto` makes that write
+    something asked for by name rather than a copy out of the ignored
+    directory. What lands there is candidate prose, which a reflection model
+    wrote after reading harvested cases — the same exposure the promoted
+    prompt already has, and handled the same way: read the diff.
+    """
+    from tools.gepa.metric_extract import WEIGHTS
+
+    # Direct attribute access, not getattr: these are real fields on
+    # `GEPAResult`, and a default here would mean the tests' fake could drift
+    # away from the type without anything noticing.
+    subscores = result.val_aggregate_subscores
+    if not subscores:
+        say("pareto    no per-objective scores on this result — nothing to write")
+        return
+
+    # Weight order, not alphabetical, and the same order in every row and every
+    # run: the file is committed and diffed.
+    objectives = tuple(WEIGHTS)
+    # Sorted, because these arrive as sets and an unsorted set would make the
+    # file diff against itself on nothing.
+    tops = {
+        objective: sorted(indices)
+        for objective, indices in (result.per_objective_best_candidates or {}).items()
+    }
+    front = _front(subscores, objectives)
+    scores = result.val_aggregate_scores or []
+
+    document = {
+        "target": node,
+        "objectives": list(objectives),
+        "weights": dict(WEIGHTS),
+        "pool": {
+            "candidates": len(result.candidates),
+            "on_front": len(front),
+            "metric_calls": result.total_metric_calls,
+            "seed_index": seed_index,
+        },
+        # The best reached on each term anywhere in the pool. One line of code,
+        # and it is the row that proves no single candidate has all of it.
+        "best_per_objective": {
+            o: round(v, 4) for o, v in (result.objective_pareto_front or {}).items()
+        },
+        "front": [
+            {
+                "index": i,
+                "seed": i == seed_index,
+                "val": round(scores[i], 4) if i < len(scores) else None,
+                "scores": {o: round(subscores[i][o], 4) for o in objectives},
+                "tops": [o for o in objectives if i in tops.get(o, ())],
+                "chars": sum(len(text) for text in result.candidates[i].values()),
+                "components": dict(result.candidates[i]),
+            }
+            # Discovery order, so the file diffs positionally between runs.
+            for i in front
+        ],
+    }
+
+    written = [pareto(node)] + ([path] if path else [])
+    for destination in written:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(document, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    _front_table(document, objectives)
+    for destination in written:
+        say(f"          written {destination}")
+
+
+def _front_table(document: dict, objectives: tuple[str, ...]) -> None:
+    """The front on stderr, so it is read without opening anything.
+
+    No colour: `_gate` spends green and red on pass and fail, and a table where
+    every row is one colour is not saying anything.
+    """
+    pool = document["pool"]
+    say(
+        f"\npareto    {len(objectives)} objectives over {pool['candidates']} "
+        f"candidates, {pool['on_front']} on the front\n"
+    )
+
+    width = {o: max(len(o), 6) for o in objectives}
+    header = "  ".join(f"{o:>{width[o]}}" for o in objectives)
+    say(f"          {'cand':>4}  {'val':>6}  {header}")
+
+    for entry in document["front"]:
+        cells = "  ".join(f"{entry['scores'][o]:>{width[o]}.2f}" for o in objectives)
+        note = "seed" if entry["seed"] else ""
+        if entry["tops"]:
+            note = (note + "  " if note else "") + "tops " + ", ".join(entry["tops"])
+        val = f"{entry['val']:.3f}" if entry["val"] is not None else "-"
+        say(f"          {entry['index']:>4}  {val:>6}  {cells}  {note}".rstrip())
+
+    best = document["best_per_objective"]
+    if best:
+        cells = "  ".join(
+            f"{best.get(o, float('nan')):>{width[o]}.2f}" for o in objectives
+        )
+        say(f"          {'best':>4}  {'-':>6}  {cells}")
+
+
 # ------------------------------------------------------------------- the gate
 
 
@@ -352,14 +518,20 @@ def _run_probes(loop, text: str, all_probes: list[probes.Probe]) -> list[Outcome
     return loop.run(all_of_them())
 
 
+def _seed_index(result, seed_prompt: str, component: str) -> int | None:
+    """Where the unmutated seed sits in the pool, if GEPA kept it."""
+    for i, candidate in enumerate(result.candidates):
+        if candidate[component] == seed_prompt:
+            return i
+    return None
+
+
 def _seed_score(result, seed_prompt: str, component: str) -> float | None:
     """What the current prompt scored on the valset. `_gate` skips the seed, so
     it cannot see that GEPA's best program is frequently that seed."""
     scores = result.val_aggregate_scores or []
-    for i, candidate in enumerate(result.candidates):
-        if candidate[component] == seed_prompt and i < len(scores):
-            return scores[i]
-    return None
+    i = _seed_index(result, seed_prompt, component)
+    return scores[i] if i is not None and i < len(scores) else None
 
 
 def _gate(loop, result, seed_prompt: str, node: str) -> list[dict]:

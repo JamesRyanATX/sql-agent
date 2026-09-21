@@ -28,9 +28,16 @@ BETTER = "a better instruction, which also honours every invariant"
 
 @dataclass
 class FakeResult:
+    """Enough of `GEPAResult` for the command. The three per-objective fields
+    default to None exactly as they do on the real type, which is how a run
+    with no objective scores reaches `_pareto`."""
+
     candidates: list[dict[str, str]]
     val_aggregate_scores: list[float] = field(default_factory=list)
     total_metric_calls: int = 42
+    val_aggregate_subscores: list[dict[str, float]] | None = None
+    per_objective_best_candidates: dict[str, set[int]] | None = None
+    objective_pareto_front: dict[str, float] | None = None
 
 
 @pytest.fixture
@@ -137,3 +144,161 @@ def test_an_empty_pool_is_reported_as_a_result_rather_than_a_crash(a_run, monkey
     assert result.exit_code == gepa.NO_IMPROVEMENT
     assert result.stdout == ""
     assert "GEPA proposed nothing" in result.stderr
+
+
+# ----------------------------------------------------------------- the front
+#
+# The metric collapses five weighted terms into one number, which settles the
+# grounding-against-cost trade on the reader's behalf. These say the front
+# survives that collapse, lands in a file, and never reaches stdout.
+
+TERMS = ("grounding", "census", "names", "shape", "cost")
+
+
+def _subscores(*rows: tuple[float, ...]) -> list[dict[str, float]]:
+    return [dict(zip(TERMS, row)) for row in rows]
+
+
+@pytest.fixture
+def a_front(a_run, monkeypatch):
+    """Four candidates. 0 is the seed, 1 dominates it outright, 2 is worst
+    everywhere, 3 buys the cheapest turn by giving up grounding."""
+    pool = [
+        {COMPONENT: a_run},
+        {COMPONENT: BETTER},
+        {COMPONENT: "worse on every term"},
+        {COMPONENT: "terse, and ungrounded"},
+    ]
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            pool,
+            [0.80, 0.95, 0.40, 0.72],
+            val_aggregate_subscores=_subscores(
+                (0.80, 1.00, 1.00, 0.75, 0.90),
+                (0.95, 1.00, 1.00, 0.90, 0.90),
+                (0.50, 0.90, 0.90, 0.50, 0.50),
+                (0.30, 1.00, 1.00, 1.00, 1.00),
+            ),
+            per_objective_best_candidates={
+                "grounding": {1},
+                "census": {0, 1, 3},
+                "names": {0, 1, 3},
+                "shape": {3},
+                "cost": {3},
+            },
+            objective_pareto_front=dict(zip(TERMS, (0.95, 1.0, 1.0, 1.0, 1.0))),
+        ),
+    )
+    return a_run
+
+
+def test_the_front_is_written_without_touching_stdout(a_front, tmp_path):
+    """The whole command's contract, applied to a second artifact: a file is
+    written, a table is printed, and the prompt on stdout is untouched."""
+    path = tmp_path / "artifacts" / "extract.pareto.json"
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stdout == BETTER + "\n", "the front must not reach stdout"
+
+    document = json.loads(path.read_text())
+    assert document["target"] == "extract"
+    assert document["objectives"] == list(TERMS)
+    assert document["pool"]["seed_index"] == 0
+    # The whole argument for a front: no single candidate has all of it.
+    assert document["best_per_objective"]["grounding"] == 0.95
+    assert document["best_per_objective"]["cost"] == 1.0
+
+    for term in TERMS:
+        assert term in result.stderr
+
+
+def test_a_dominated_candidate_is_not_on_the_front(a_front, tmp_path):
+    """Candidate 2 is worse than candidate 1 on all five terms, so no reading
+    of "better" puts it on a front. Candidate 3 is worse on grounding and
+    better on shape and cost, so it belongs there — and it is the one that
+    makes the trade-off visible, which is the point of showing a front at all.
+
+    This is also what stops somebody quietly substituting GEPA's
+    `per_objective_best_candidates`, which is a different, smaller set.
+    """
+    path = tmp_path / "front.json"
+
+    CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
+
+    on_front = {entry["index"] for entry in json.loads(path.read_text())["front"]}
+    assert 2 not in on_front, "dominated on every term"
+    assert {1, 3} <= on_front, "neither beats the other on everything"
+
+
+def test_the_front_is_byte_stable_across_runs(a_front, tmp_path):
+    """The file is committed and read in a diff. GEPA hands back sets, and one
+    unsorted set reaching the JSON makes every rerun a spurious change."""
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+
+    CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(first)])
+    CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(second)])
+
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_the_front_is_always_written_to_the_run_directory(a_front, tmp_path):
+    """`--pareto` names a tracked copy. Not passing it must not mean losing the
+    evidence — `out/` is where every other artifact of a run already lands."""
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert result.exit_code == 0
+    assert json.loads(gepa.pareto("extract").read_text())["front"]
+
+
+def test_a_result_with_no_objective_scores_says_so_rather_than_crashing(
+    a_run, monkeypatch
+):
+    """An adapter that returns no per-term breakdown is a run with no front,
+    not a run that failed. Says so in one line and writes nothing."""
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult([{COMPONENT: a_run}, {COMPONENT: BETTER}], [0.8, 0.9]),
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert result.exit_code == 0
+    assert result.stdout == BETTER + "\n"
+    assert "no per-objective scores" in result.stderr
+    assert not gepa.pareto("extract").exists()
+
+
+def test_a_candidate_that_scored_nothing_anywhere_is_left_off(a_run, monkeypatch):
+    """`metric_extract.score` returns empty terms on both its gates, so a
+    candidate whose every validation case errored arrives with no terms at all.
+    It is ineligible for the front rather than a KeyError.
+
+    The run also ends NO_IMPROVEMENT, and the front is on disk anyway. That is
+    the reason `_pareto` runs before the pool is judged: a run that produced
+    nothing promotable is the one whose evidence is most worth keeping.
+    """
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [{COMPONENT: a_run}, {COMPONENT: BETTER}],
+            [0.8, 0.0],
+            val_aggregate_subscores=[dict(zip(TERMS, (0.9,) * 5)), {}],
+            per_objective_best_candidates={term: {0} for term in TERMS},
+            objective_pareto_front=dict(zip(TERMS, (0.9,) * 5)),
+        ),
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert result.exit_code == gepa.NO_IMPROVEMENT
+    assert result.stdout == ""
+    on_front = {
+        e["index"] for e in json.loads(gepa.pareto("extract").read_text())["front"]
+    }
+    assert on_front == {0}

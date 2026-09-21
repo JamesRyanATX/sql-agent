@@ -263,8 +263,9 @@ probe gate, the diff.
 
 ## 4. What a Pareto frontier of prompts looks like — 3 min
 
-**Status: this is not built yet, and the missing piece is two arguments. The
-gap list says which.**
+**Status: not built yet. GEPA computes the per-objective scores on every
+evaluation and hands them back on the result; what is missing is the code that
+writes them down. The gap list says where.**
 
 ### Say
 
@@ -384,7 +385,7 @@ of `CHALLENGE.md` that specifies it.
 |---|---|---|
 | §2 | All 23 questions recorded and judged | `make corpus` — built, never run |
 | §3 | `make gepa-extract` against a real corpus, promoted and committed | CHALLENGE §7 |
-| §4 | `frontier_type="objective"` and `write_agent_state=True` on the `gepa.optimize` call | `tools/gepa/cli.py`, `_search`. The per-objective scores are already computed on every evaluation and then thrown away — they survive only inside a pickle. Two arguments write `pareto/objective_front.json`. |
+| §4 | A committed front, and the code that writes it | `tools/gepa/cli.py`, after `_search`. `GEPAResult` carries `val_aggregate_subscores`, `per_objective_best_candidates` and `objective_pareto_front`, populated whenever the adapter returns per-term scores, which ours does. gepa 0.1.4 never writes them anywhere, so about fifty lines must. `--pareto <path>` for the tracked copy. |
 | §5 | Whole-turn replay, whole-turn metric, `TurnAdapter`, `demo/golden.jsonl` | CHALLENGE §§1, 4, 5, 6 |
 | §5 | An override seam for the four tool descriptions in `app/tools.py` | CHALLENGE §4 |
 | §5 | `cli.py` assuming one component and a prompt file per node | `_check_node`, `_seed_label`, `_diff`, `_gate`, `_seed_score` |
