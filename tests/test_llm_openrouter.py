@@ -197,6 +197,14 @@ def test_openrouter_has_its_own_key_and_falls_back(monkeypatch):
 
     spec = Model(provider="openrouter", model="x/y", url=ROUTER)
 
+    # Built without the env file, deliberately. `Settings` reads `.env` as well
+    # as the environment, so `delenv` alone does not unset anything a developer
+    # happens to have in theirs — this used to pass only on a machine with no
+    # OpenRouter key, and failed the moment somebody set one up.
+    from app.settings import Settings
+
+    monkeypatch.setattr(llm, "settings", lambda: Settings(_env_file=None))
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-real")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     settings.cache_clear()
@@ -213,3 +221,79 @@ def test_openrouter_has_its_own_key_and_falls_back(monkeypatch):
     finally:
         monkeypatch.undo()
         settings.cache_clear()
+
+
+# ------------------------------------------------------------- rate limiting
+
+
+async def test_a_rate_limit_is_waited_out_rather_than_raised(monkeypatch):
+    """OpenRouter caps a new account at 20 requests a minute per model, and one
+    cold turn is five to eight calls — so three concurrent rollouts exceed it in
+    seconds. Observed: 17 of 19 rollouts of a paid run died on 429 and the
+    tokens already spent bought nothing.
+
+    A 429 costs no tokens, so retrying is free apart from the clock.
+    """
+    use_openrouter(monkeypatch)
+    slept: list[float] = []
+    monkeypatch.setattr(llm.asyncio, "sleep", lambda s: slept.append(s) or _noop())
+
+    seen = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["n"] += 1
+        if seen["n"] < 3:
+            return httpx.Response(429, json={"error": {"message": "slow down"}})
+        return httpx.Response(200, json=OK)
+
+    monkeypatch.setattr(
+        llm, "_http_client", lambda spec: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url=ROUTER
+        )
+    )
+
+    result = await llm.complete(system="s", messages=[], node="plan", effort="low")
+
+    assert seen["n"] == 3, "it kept going until the endpoint stopped refusing"
+    assert len(slept) == 2, "and waited between attempts"
+    assert result.tool_uses, "and the answer it eventually got is the real one"
+
+
+async def test_a_rate_limit_that_never_clears_is_reported(monkeypatch):
+    """Bounded. A limit that does not clear is a configuration problem, and
+    waiting quietly on one is worse than saying so."""
+    use_openrouter(monkeypatch)
+    monkeypatch.setattr(llm.asyncio, "sleep", lambda s: _noop())
+    monkeypatch.setattr(
+        llm, "_http_client", lambda spec: httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(429, json={"error": {"message": "nope"}})
+            ),
+            base_url=ROUTER,
+        )
+    )
+
+    with pytest.raises(llm.LlmError, match="429"):
+        await llm.complete(system="s", messages=[], node="plan", effort="low")
+
+
+def test_the_endpoints_own_delay_is_honoured_over_a_guess():
+    """`Retry-After` when there is one, OpenRouter's millisecond reset stamp
+    when there is not, and a doubling backoff otherwise."""
+    plain = httpx.Response(429, headers={"retry-after": "7"}, json={})
+    assert llm._retry_after(plain, 0) == 7.0
+
+    import time as _time
+
+    soon = int((_time.time() + 4) * 1000)
+    router = httpx.Response(
+        429,
+        json={"error": {"metadata": {"headers": {"X-RateLimit-Reset": str(soon)}}}},
+    )
+    assert 0 < llm._retry_after(router, 0) <= 5
+
+    assert llm._retry_after(httpx.Response(429, json={}), 3) == 8.0
+
+
+async def _noop():
+    return None

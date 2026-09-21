@@ -21,8 +21,11 @@ grammar-constrained decoding is unavailable.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +35,8 @@ import httpx
 from app import tracing
 from app.config import Model, config
 from app.settings import settings
+
+log = logging.getLogger(__name__)
 
 # On Opus 5 max_tokens caps thinking *plus* response text, and thinking is on by
 # default — sized tight, answers truncate mid-sentence. 16k also keeps
@@ -303,6 +308,61 @@ _EFFORT = {
 }
 
 
+# A rate limit is a queue, not a failure. Without this an optimiser run dies
+# partway through and the tokens it already spent buy nothing: OpenRouter caps
+# new accounts at 20 requests a minute per model, and one cold turn is five to
+# eight calls, so three concurrent rollouts exceed it in seconds.
+#
+# Bounded, because a limit that never clears is a configuration problem and
+# waiting quietly on one is worse than saying so.
+_RATE_LIMIT_TRIES = 6
+_RATE_LIMIT_CEILING = 60.0
+
+
+async def _post(spec: Model, body: dict[str, Any]) -> Any:
+    """One request, retried while the endpoint says it is rate limited.
+
+    `Retry-After` when the endpoint sends one, and OpenRouter's reset timestamp
+    when it sends that instead; otherwise exponential backoff. A 429 costs no
+    tokens, so retrying is free apart from the wall clock.
+    """
+    client = _http_client(spec)
+    for attempt in range(_RATE_LIMIT_TRIES):
+        resp = await client.post("/chat/completions", json=body)
+        if resp.status_code != 429 or attempt == _RATE_LIMIT_TRIES - 1:
+            return resp
+        delay = _retry_after(resp, attempt)
+        log.warning(
+            "rate limited by %s, waiting %.1fs (attempt %d of %d)",
+            spec.url, delay, attempt + 1, _RATE_LIMIT_TRIES,
+        )
+        await asyncio.sleep(delay)
+    return resp
+
+
+def _retry_after(resp: Any, attempt: int) -> float:
+    """How long the endpoint asked for, or a doubling backoff if it did not."""
+    header = resp.headers.get("retry-after")
+    if header:
+        try:
+            return min(float(header), _RATE_LIMIT_CEILING)
+        except ValueError:
+            pass
+
+    # OpenRouter puts a millisecond epoch in the body rather than a header.
+    try:
+        headers = (resp.json().get("error") or {}).get("metadata", {}).get("headers", {})
+        reset = float(headers.get("X-RateLimit-Reset", 0)) / 1000
+    except Exception:
+        reset = 0
+    if reset:
+        wait = reset - time.time()
+        if 0 < wait <= _RATE_LIMIT_CEILING:
+            return wait
+
+    return min(2.0**attempt, _RATE_LIMIT_CEILING)
+
+
 async def _complete_openai(
     *,
     spec: Model,
@@ -386,7 +446,7 @@ async def _complete_openai(
             for t in tools
         ]
 
-    resp = await _http_client(spec).post("/chat/completions", json=body)
+    resp = await _post(spec, body)
     if (
         resp.status_code == 400
         and cap_field == "max_tokens"
@@ -398,7 +458,7 @@ async def _complete_openai(
         _CAP_FIELD[spec.url or ""] = "max_completion_tokens"
         del body["max_tokens"]
         body["max_completion_tokens"] = cap
-        resp = await _http_client(spec).post("/chat/completions", json=body)
+        resp = await _post(spec, body)
     if resp.status_code >= 400:
         # Not `raise_for_status()`, which throws away the body — and the body is
         # the entire diagnosis when a local server rejects one field.
