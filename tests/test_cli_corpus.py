@@ -32,7 +32,7 @@ def scripted(monkeypatch, tmp_path):
     """A scripted run: what was called, in order, and what was posted."""
     calls: list[str] = []
     posted: list[dict] = []
-    state = {"answer": dict(ANSWER), "tracing": True, "fatal": False}
+    state = {"answer": dict(ANSWER), "tracing": True, "fatal": False, "ceiling": 5.0}
 
     def stream_events(path, payload):
         async def events():
@@ -54,8 +54,15 @@ def scripted(monkeypatch, tmp_path):
         return {}
 
     async def get(path, **kw):
-        return {"config": {}, "overlay": None, "overridden": [],
-                "tracing": state["tracing"]}
+        return {
+            "config": {
+                "model": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+                "max_spend": state["ceiling"],
+            },
+            "overlay": None,
+            "overridden": [],
+            "tracing": state["tracing"],
+        }
 
     monkeypatch.setattr(turn_mod.http, "stream_events", stream_events)
     monkeypatch.setattr(turn_mod.http, "post", post)
@@ -63,6 +70,9 @@ def scripted(monkeypatch, tmp_path):
     monkeypatch.setattr(corpus.http, "get", get)
     monkeypatch.setattr(turn_mod.render, "choose", lambda *a, **kw: state.get("choice", 0))
     monkeypatch.setattr(turn_mod.click, "prompt", lambda *a, **kw: "wrong table")
+    # The run asks before it spends. Tests that care about a confirmation
+    # replace this with one that refuses.
+    monkeypatch.setattr(corpus.click, "confirm", lambda *a, **kw: True)
 
     path = tmp_path / "questions.txt"
     path.write_text(QUESTIONS)
@@ -214,4 +224,66 @@ async def test_the_demo_connection_asks_first(scripted, monkeypatch, capsys):
         await run(scripted, connection="default")
 
     assert "Use it anyway?" in asked["text"]
+    assert scripted["calls"] == []
+
+
+# ---------------------------------------------------------------------- money
+
+
+async def test_it_says_what_it_is_about_to_spend(scripted, monkeypatch, capsys):
+    """Before the first turn, not after the twentieth. The model, the rough
+    token cost and the ceiling, so agreeing to a run is agreeing to a number."""
+    streams(monkeypatch)
+
+    await run(scripted)
+
+    out = capsys.readouterr().out
+    assert "google/gemini-2.5-flash" in out
+    assert "23,000 tokens" in out  # two questions, ~11.5k each, every one cold
+    assert "$5.00" in out
+
+
+async def test_it_stops_at_the_ceiling(scripted, monkeypatch, capsys):
+    """A search left running unattended is the case this exists for. The run
+    stops mid-list and says where it stopped rather than finishing the list."""
+    streams(monkeypatch)
+    scripted["state"]["ceiling"] = 0.05
+    scripted["state"]["answer"] = {**ANSWER, "cost": 0.06}
+
+    await run(scripted)
+
+    assert scripted["calls"].count("ask:how many customers do we have?") == 1
+    out = capsys.readouterr().out
+    assert "stopping at $0.06" in out
+    assert "1 of 2 asked" in out
+
+
+async def test_no_ceiling_is_said_out_loud(scripted, monkeypatch, capsys):
+    """`max_spend: 0` is a real choice, and the run should not imply a guard it
+    does not have."""
+    streams(monkeypatch)
+    scripted["state"]["ceiling"] = 0
+
+    await run(scripted)
+
+    assert "no spend ceiling" in capsys.readouterr().out
+
+
+async def test_what_it_spent_is_in_the_summary(scripted, monkeypatch, capsys):
+    streams(monkeypatch)
+    scripted["state"]["answer"] = {**ANSWER, "cost": 0.0123}
+
+    await run(scripted)
+
+    assert "$0.0246 spent" in capsys.readouterr().out
+
+
+async def test_declining_the_estimate_stops_before_any_turn(scripted, monkeypatch):
+    """The confirmation is the last chance to not spend the money."""
+    streams(monkeypatch)
+    monkeypatch.setattr(corpus.click, "confirm", lambda *a, **kw: (_ for _ in ()).throw(click.Abort()))
+
+    with pytest.raises(click.Abort):
+        await run(scripted)
+
     assert scripted["calls"] == []

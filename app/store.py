@@ -681,7 +681,7 @@ async def read_turns(
         f"""
         SELECT id, question, sql, answer, tool_calls, explored,
                tokens_in, tokens_out, latency_ms, cache_entries, created_at,
-               trace_id
+               trace_id, cost
         FROM turn
         WHERE connection_id = %s {"AND answer IS NOT NULL" if finished else ""}
         ORDER BY id DESC
@@ -723,14 +723,19 @@ async def finish_turn(
     latency_ms: int | None = None,
     cache_entries: int = 0,
     trace_id: str | None = None,
+    cost: float | None = None,
 ) -> None:
-    """Record what the turn cost. This is the demo chart."""
+    """Record what the turn cost, in tokens and in money. This is the demo chart.
+
+    `cost` is None wherever the backend did not itemise the charge, which is
+    every backend but OpenRouter today. None and 0 are different answers.
+    """
     await conn.execute(
         """
         UPDATE turn SET
             sql = %s, answer = %s, tool_calls = %s, explored = %s,
             tokens_in = %s, tokens_out = %s, latency_ms = %s, cache_entries = %s,
-            trace_id = %s
+            trace_id = %s, cost = %s
         WHERE id = %s
         """,
         (
@@ -743,6 +748,7 @@ async def finish_turn(
             latency_ms,
             cache_entries,
             trace_id,
+            cost,
             turn_id,
         ),
     )

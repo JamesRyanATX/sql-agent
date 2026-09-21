@@ -87,8 +87,16 @@ async def _turns(connection: str | None, limit: int, show_all: bool) -> None:
     if not rows:
         click.echo("no turns yet — ask a question")
         return
+    # The cost column appears only when something reported one. Every backend
+    # but OpenRouter charges somewhere this process cannot see, and a column of
+    # blanks would suggest the turns were free.
+    priced = any(t.get("cost") is not None for t in rows)
+    headers = ["id", "question", "explored", "tools", "cached", "tokens", "secs"]
+    if priced:
+        headers.append("cost")
+
     render.table(
-        ["id", "question", "explored", "tools", "cached", "tokens", "secs"],
+        headers,
         [
             [
                 t["id"],
@@ -98,11 +106,32 @@ async def _turns(connection: str | None, limit: int, show_all: bool) -> None:
                 t["cache_entries"],
                 f"{t['tokens']:,}",
                 f"{t['latency_ms'] / 1000:.0f}" if t["latency_ms"] else "",
+                *([_dollars(t.get("cost"))] if priced else []),
             ]
             for t in rows
         ],
-        right=frozenset({"id", "tools", "cached", "tokens", "secs"}),
+        right=frozenset({"id", "tools", "cached", "tokens", "secs", "cost"}),
+        footer=_total(rows) if priced else None,
     )
+
+
+def _dollars(cost: float | None) -> str:
+    """Four decimal places: a cheap turn costs a fraction of a cent, and two
+    would round every one of them to nothing."""
+    return "" if cost is None else f"${float(cost):.4f}"
+
+
+def _total(rows: list[dict]) -> str:
+    """What the rows on screen came to. The number somebody paying for this
+    wants, and the one nobody wants to add up by hand.
+
+    Keeps the `(N rows)` shape: `demo/demo.tape` waits on the closing paren to
+    know the command has finished printing, so a footer that drops it hangs the
+    recording for forty minutes.
+    """
+    total = sum(float(t["cost"]) for t in rows if t.get("cost") is not None)
+    plural = "" if len(rows) == 1 else "s"
+    return f"({len(rows)} row{plural} — ${total:.4f})"
 
 
 @click.command()

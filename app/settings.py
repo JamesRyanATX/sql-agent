@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Which model, at what effort, is config/config.yaml. Only the keys are here.
     anthropic_api_key: str = ""  # falls back to the SDK's own env resolution
     openai_api_key: str = "not-needed"
+    # OpenRouter bills separately from OpenAI, so it gets its own name rather
+    # than overwriting a key that is still wanted for something else. Falls back
+    # to `openai_api_key` when unset, because one gateway at a time is the
+    # common case and two names for one value is a trap.
+    openrouter_api_key: str = ""
 
     # Holds config.yaml, config.local.yaml and prompts/. An environment variable
     # because where the config lives cannot itself be config.

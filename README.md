@@ -74,6 +74,32 @@ model:
   url: http://192.168.1.10:11434/v1   # not localhost — the API is a container
 ```
 
+Three providers. `anthropic` talks to the SDK. `openai_compat` is any
+OpenAI-shaped endpoint — Ollama, vLLM, LM Studio, OpenAI itself. `openrouter` is
+OpenAI-shaped too and is worth naming separately, because three things differ
+and each costs money to get wrong: effort goes in a `reasoning` object rather
+than a flat field that gateway ignores, prompt caching needs an explicit marker
+or every cached turn pays full price, and the response reports what the call
+charged.
+
+```yaml
+model:
+  provider: openrouter
+  model: google/gemini-2.5-flash       # anything in their catalogue
+  url: https://openrouter.ai/api/v1
+
+gepa:                                  # a better model for the one node that
+  model:                               # proposes rewrites, while the hundreds
+    provider: openrouter               # of rollouts stay cheap
+    model: anthropic/claude-sonnet-5
+    url: https://openrouter.ai/api/v1
+```
+
+Where the backend reports a charge, `sql-agent turns` grows a cost column and a
+total. Where it does not, the column is absent rather than showing zeros, since
+a turn nobody priced is not a free one. `max_spend` in `config.yaml` stops a
+long run — recording a corpus, running a search — once it has spent that much.
+
 Any node may take its own `model:` block on the same keys. The server says at
 startup when an overlay is in effect, because what is answering questions should
 never be a surprise — and `sql-agent config` prints the merged result, shaped

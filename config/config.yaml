@@ -13,6 +13,11 @@ max_fix_attempts: 3
 max_rows: 50
 statement_timeout_ms: 5000
 
+# Dollars one long-running command may spend before it stops — recording a
+# corpus, running a search. 0 turns the ceiling off. Only enforceable where the
+# backend reports what it charged, which today means OpenRouter.
+max_spend: 5.0
+
 # GEPA prompt optimization settings:
 gepa:
   effort: max

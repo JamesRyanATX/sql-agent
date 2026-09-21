@@ -25,6 +25,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.overrides import current as current_overrides
 from app.settings import settings
 
+# The two providers that speak OpenAI's wire shape over plain HTTP, and so need
+# an address and a key rather than an SDK.
+HTTP_PROVIDERS = ("openai_compat", "openrouter")
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
 FILE = "config.yaml"
 LOCAL = "config.local.yaml"
 
@@ -35,11 +40,16 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # `openai_compat` is any OpenAI-shaped endpoint (Ollama, vLLM, LM Studio).
+    # `openrouter` is OpenAI-shaped too, and is its own value because three
+    # things differ and all three cost money to get wrong: effort goes in a
+    # `reasoning` object rather than a flat field, prompt caching needs an
+    # explicit marker, and the response reports what the call charged.
     # A Literal so a misspelled provider is an error rather than a silent fallback.
-    provider: Literal["anthropic", "openai_compat"] = "anthropic"
+    provider: Literal["anthropic", "openai_compat", "openrouter"] = "anthropic"
     model: str = "claude-opus-5"
 
-    # openai_compat only; ignored by the Anthropic backend, which has one address.
+    # Both OpenAI-shaped providers; ignored by the Anthropic backend, which has
+    # one address.
     url: str | None = None
 
     # For a thinking model the ceiling on output tokens is the ceiling on wall clock.
@@ -49,14 +59,30 @@ class Model(BaseModel):
 
     @model_validator(mode="after")
     def _endpoint_is_known(self) -> Model:
-        """`openai_compat` has no default address, and must not invent one."""
-        if self.provider == "openai_compat" and not self.url:
+        """An OpenAI-shaped provider has no default address, and must not invent
+        one. OpenRouter has a published address but still names it here, because
+        a url in the file is the one place somebody looks to answer "where did
+        this call go, and who charged me for it"."""
+        if self.provider in HTTP_PROVIDERS and not self.url:
             raise ValueError(
-                "provider: openai_compat needs a url — there is no default "
+                f"provider: {self.provider} needs a url — there is no default "
                 "endpoint. It must not be localhost: the API runs in a "
                 "container, where localhost is the container."
+                + (f" For OpenRouter that is {OPENROUTER_URL}."
+                   if self.provider == "openrouter" else "")
             )
         return self
+
+    def is_claude(self) -> bool:
+        """Whether this ends up at a Claude model, however it is reached.
+
+        Not `provider == "anthropic"`: through a gateway a Claude model arrives
+        as an OpenAI-shaped request, and the rules that exist because of how
+        Claude behaves have to follow the model rather than the wire format.
+        OpenRouter spells the family as a prefix, which is what makes this
+        answerable at all.
+        """
+        return self.provider == "anthropic" or self.model.startswith("anthropic/")
 
 
 class Node(BaseModel):
@@ -90,6 +116,17 @@ class Config(BaseModel):
     statement_timeout_ms: int = 5_000
     max_rows: int = 50  # rows handed back to the model from execute
 
+    # Dollars a single command may spend before it stops. Applies to the long
+    # unattended ones — recording a corpus, running a search — not to one
+    # question asked by hand. Zero means no ceiling, which is the old
+    # behaviour and has to be asked for.
+    #
+    # It can only be enforced where the backend reports what it charged, which
+    # today is OpenRouter alone. Elsewhere a run reports nothing and stops at
+    # nothing, and the commands say so rather than implying a guard they do not
+    # have.
+    max_spend: float = 5.0
+
     # The six nodes that talk to a model. `load_cache` reads a table, so it is
     # not one. Each of these must have a prompt file, and vice versa.
     plan: Node = Field(default_factory=Node)
@@ -114,14 +151,15 @@ class Config(BaseModel):
         offenders = [
             name
             for name in self.NODES
-            if self.node(name).effort == "none"
-            and self.model_for(name).provider == "anthropic"
+            if self.node(name).effort == "none" and self.model_for(name).is_claude()
         ]
         if offenders:
             raise ValueError(
-                f"effort: none on {', '.join(offenders)} — the Anthropic backend "
-                f"has no such level, and disabling thinking on Opus 5 breaks tool "
-                f"calls. Lower the effort instead."
+                f"effort: none on {', '.join(offenders)} — Claude has no such "
+                f"level, and disabling thinking on Opus 5 breaks tool calls: it "
+                f"writes one as visible text that never runs. Lower the effort "
+                f"instead. (The check follows the model, not the provider, so a "
+                f"Claude model reached through a gateway is caught too.)"
             )
         return self
 
@@ -157,10 +195,10 @@ class Config(BaseModel):
         if proposed is None and "." in name:
             proposed = current_overrides().efforts.get(name.split(".", 1)[0])
         if proposed is not None:
-            if proposed == "none" and self.model_for(name).provider == "anthropic":
+            if proposed == "none" and self.model_for(name).is_claude():
                 raise ValueError(
-                    f"effort: none on {name} — the Anthropic backend has no such "
-                    f"level, and disabling thinking on Opus 5 breaks tool calls"
+                    f"effort: none on {name} — Claude has no such level, and "
+                    f"disabling thinking on Opus 5 breaks tool calls"
                 )
             return proposed
         return self.node(name).effort or default

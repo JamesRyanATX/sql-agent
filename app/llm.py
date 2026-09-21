@@ -81,6 +81,10 @@ class Result:
     tokens_in: int = 0
     tokens_out: int = 0
     cache_read: int = 0
+    # What this call charged, in dollars, when the backend says so. None where
+    # nothing reported it, which is not the same as free — an Anthropic-direct
+    # call costs money and simply does not itemise it in the response.
+    cost: float | None = None
     raw: Any = None  # provider-native assistant content, for echo-back
 
     def parsed(self) -> dict[str, Any]:
@@ -247,15 +251,35 @@ def _http_client(spec: Model) -> httpx.AsyncClient:
     key = (spec.url or "", spec.timeout)
     client = _http.get(key)
     if client is None:
+        headers = {"authorization": f"Bearer {_key_for(spec)}"}
+        if spec.provider == "openrouter":
+            # Optional, and worth sending: OpenRouter groups spend by app, which
+            # is the difference between "$4 last week" and "$4 on the corpus run
+            # last week".
+            headers["http-referer"] = "https://github.com/sql-agent"
+            headers["x-title"] = "sql-agent"
         client = httpx.AsyncClient(
             base_url=spec.url or "",
             # A 27B model on consumer hardware takes minutes per call, and the
             # default 5s read timeout would fail every request.
             timeout=httpx.Timeout(spec.timeout, connect=10.0),
-            headers={"authorization": f"Bearer {settings().openai_api_key}"},
+            headers=headers,
         )
         _http[key] = client
     return client
+
+
+def _key_for(spec: Model) -> str:
+    """Which key dials this endpoint.
+
+    OpenRouter bills separately, so it has its own name and falls back to the
+    OpenAI one — which keeps a single-gateway setup to one variable, without
+    making somebody overwrite a key they still use for something else.
+    """
+    s = settings()
+    if spec.provider == "openrouter":
+        return s.openrouter_api_key or s.openai_api_key
+    return s.openai_api_key
 
 
 # Which spelling of the output cap an endpoint takes, keyed by url. OpenAI's
@@ -288,19 +312,47 @@ async def _complete_openai(
     tools: list[dict[str, Any]] | None,
     schema: dict[str, Any] | None,
     max_tokens: int,
+    cache_system: bool = False,
 ) -> Result:
+    router = spec.provider == "openrouter"
+
+    # The system block, plain or marked for caching. OpenRouter passes the
+    # marker through to Anthropic, where it is what makes a cached turn cheap;
+    # `graph.plan` is the node that asks for it. A plain string everywhere else,
+    # because an endpoint that does not know the block form rejects the request
+    # rather than ignoring the marker.
+    system_content: Any = system
+    if router and cache_system:
+        system_content = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+
     body: dict[str, Any] = {
         "model": spec.model,
-        "messages": [{"role": "system", "content": system}, *messages],
+        "messages": [{"role": "system", "content": system_content}, *messages],
     }
     # Local models don't need Opus 5's headroom for adaptive thinking, and the
-    # ceiling on output tokens is the ceiling on wall clock.
+    # ceiling on output tokens is the ceiling on wall clock. On OpenRouter it is
+    # also the thinking budget: effort is applied as a fraction of this, and
+    # thinking bills as output. Lowering it is the most direct cost lever there.
     cap = min(max_tokens, spec.max_tokens)
     cap_field = _CAP_FIELD.get(spec.url or "", "max_tokens")
     body[cap_field] = cap
-    # Per-node effort applies here too — without it a reasoning model has no
-    # brake, and `plan` is configured `low` precisely so a cached turn is cheap.
-    body["reasoning_effort"] = _EFFORT.get(effort, "medium")
+
+    if router:
+        # An object, not the flat field, which OpenRouter does not read. All six
+        # levels survive: it defines `max` and `xhigh`, so the two that the
+        # OpenAI mapping below flattens into `high` stay distinct — which is the
+        # difference between per-node effort being a real setting and a
+        # decoration.
+        body["reasoning"] = {"effort": effort}
+        # What the call charged, on the response. Spend is otherwise a surprise
+        # at the end of the month.
+        body["usage"] = {"include": True}
+    else:
+        # Per-node effort applies here too — without it a reasoning model has no
+        # brake, and `plan` is configured `low` precisely so a cached turn is cheap.
+        body["reasoning_effort"] = _EFFORT.get(effort, "medium")
 
     if schema is not None:
         # Structured output as a forced tool call. `response_format` and the
@@ -359,6 +411,11 @@ async def _complete_openai(
     choice = data["choices"][0]
     message = choice["message"]
     usage = data.get("usage") or {}
+    # OpenRouter reports both when asked; every other endpoint reports neither,
+    # and `None` for the cost says "nobody said", which is not "free".
+    cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    charged = usage.get("cost")
+    cost = float(charged) if charged is not None else None
     # Reasoning models leak <think>…</think> into content; it is not an answer.
     text = _THINK.sub("", message.get("content") or "").strip()
 
@@ -380,7 +437,10 @@ async def _complete_openai(
                 f"no {_EMIT!r} tool call: finish_reason="
                 f"{choice.get('finish_reason')!r}, "
                 f"completion_tokens={usage.get('completion_tokens')}, "
-                f"max_tokens={body['max_tokens']}, text={text[:160]!r}"
+                # `cap`, not `body["max_tokens"]`: the negotiation above may
+                # have renamed that key, and a KeyError here would replace the
+                # diagnosis with a worse one.
+                f"max_tokens={cap}, text={text[:160]!r}"
             )
         # Hand it back as JSON text so .parsed() works identically on both backends.
         return Result(
@@ -388,6 +448,8 @@ async def _complete_openai(
             stop_reason="end_turn",
             tokens_in=usage.get("prompt_tokens", 0),
             tokens_out=usage.get("completion_tokens", 0),
+            cache_read=cached,
+            cost=cost,
         )
 
     return Result(
@@ -396,6 +458,8 @@ async def _complete_openai(
         stop_reason=choice.get("finish_reason"),
         tokens_in=usage.get("prompt_tokens", 0),
         tokens_out=usage.get("completion_tokens", 0),
+        cache_read=cached,
+        cost=cost,
     )
 
 
@@ -413,7 +477,10 @@ async def complete(
     cache_system: bool = False,
     node: str = "model",
 ) -> Result:
-    """One model call. `cache_system` is Anthropic-only.
+    """One model call.
+
+    `cache_system` reaches Anthropic directly and through OpenRouter, which
+    passes the marker on; every other endpoint ignores it.
 
     `node` names the caller for the trace, selects the prompt and selects the
     model. This is also the only place a generation is opened, which is what
@@ -456,6 +523,7 @@ async def complete(
                 tools=tools,
                 schema=schema,
                 max_tokens=max_tokens,
+                cache_system=cache_system,
             )
 
         gen.update(

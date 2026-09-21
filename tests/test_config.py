@@ -231,3 +231,56 @@ def test_a_yaml_that_is_not_a_mapping_says_so(config_dir, tmp_path):
 
     with pytest.raises(ValueError, match="not a mapping"):
         config()
+
+
+# ------------------------------------------------------- reached through a gateway
+
+
+ROUTER = {"provider": "openrouter", "url": "https://openrouter.ai/api/v1"}
+
+
+def test_a_gateway_still_needs_its_address_named():
+    """It has a published one, but the file is where somebody looks to answer
+    "where did this call go, and who charged me for it"."""
+    with pytest.raises(ValidationError, match="needs a url"):
+        Model.model_validate({"provider": "openrouter", "model": "x/y"})
+
+
+def test_effort_none_is_refused_on_claude_however_it_is_reached():
+    """The rule exists because of how Claude behaves, so it follows the model.
+    Keyed on the provider it would go quiet here, and `none` would reach Opus
+    through a gateway — thinking off, a tool call written as visible text, and
+    an explore loop that never runs one."""
+    with pytest.raises(ValidationError, match="effort: none on explore"):
+        Config.model_validate({
+            **DEMO,
+            "model": {**ROUTER, "model": "anthropic/claude-opus-5"},
+            "explore": {"effort": "none"},
+        })
+
+
+def test_effort_none_is_allowed_on_a_model_that_is_not_claude():
+    """Gemini through the same gateway. The guard is about one model family,
+    not about gateways."""
+    loaded = Config.model_validate({
+        **DEMO,
+        "model": {**ROUTER, "model": "google/gemini-2.5-flash"},
+        "explore": {"effort": "none"},
+    })
+
+    assert loaded.effort_for("explore") == "none"
+
+
+def test_a_per_node_claude_model_is_caught_under_a_cheap_default():
+    """The configuration this project is heading for: cheap rollouts, a better
+    model for the one node that proposes rewrites. The guard has to see the
+    node's own model, not the global one."""
+    with pytest.raises(ValidationError, match="effort: none on gepa"):
+        Config.model_validate({
+            **DEMO,
+            "model": {**ROUTER, "model": "google/gemini-2.5-flash"},
+            "gepa": {
+                "effort": "none",
+                "model": {**ROUTER, "model": "anthropic/claude-sonnet-5"},
+            },
+        })

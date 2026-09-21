@@ -28,6 +28,11 @@ from sql_agent import config, http, render, turn
 # the demo buried in the middle.
 DEMO_CONNECTION = "default"
 
+# What one cold turn costs in tokens, measured (README's T1). Used only to say
+# the order of magnitude before a run: a real figure would need a price per
+# model, and the run reports what it actually spent as it goes.
+COLD_TURN_TOKENS = 11_500
+
 
 @click.command("corpus")
 @click.argument("questions", type=click.Path(exists=True, dir_okay=False, path_type=Path))
@@ -67,12 +72,13 @@ def read_questions(path: Path) -> list[str]:
 async def _record(path: Path, connection: str | None, verbose: bool) -> None:
     cid = config.connection(connection)
     asked = judged = approved = 0
+    spent = 0.0
 
     questions = read_questions(path)
     if not questions:
         raise http.ApiError(f"{path} holds no questions — every line is blank or a comment")
 
-    await _preflight(cid, path, questions)
+    ceiling = await _preflight(cid, path, questions)
 
     try:
         for n, question in enumerate(questions, start=1):
@@ -95,21 +101,31 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
 
             approved += await turn.judge(cid, answered)
             judged += 1
+
+            spent += answered.get("cost") or 0.0
+            if ceiling and spent >= ceiling:
+                click.secho(
+                    f"\nstopping at ${spent:.2f}, the ceiling in config.yaml "
+                    f"(max_spend: {ceiling}). {n} of {len(questions)} asked.",
+                    fg="yellow",
+                )
+                break
     except (KeyboardInterrupt, click.Abort):
         # Twenty questions is long enough that it will be interrupted, and the
         # operator needs to know where it stopped rather than guessing.
         click.echo()
         click.secho("stopped early", fg="yellow")
     finally:
-        _summary(asked, judged, approved, cid)
+        _summary(asked, judged, approved, spent, cid)
 
 
-async def _preflight(cid: str, path: Path, questions: list[str]) -> None:
+async def _preflight(cid: str, path: Path, questions: list[str]) -> float:
     """Everything that would waste the run, checked before the first turn.
+    Returns the spend ceiling, or 0 where there is none.
 
     Each of these is otherwise discovered after a cold turn has been paid for,
-    and the third one only at the end, when the verdicts turn out to be on
-    nothing.
+    the trace one only at the end when the verdicts turn out to be on nothing,
+    and the money one when the statement arrives.
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise http.ApiError(
@@ -128,6 +144,23 @@ async def _preflight(cid: str, path: Path, questions: list[str]) -> None:
         f"{len(questions)} questions from {path}, against {cid}, "
         f"cold each time. Answer each one as it lands."
     )
+
+    model = body["config"]["model"]
+    ceiling = float(body["config"].get("max_spend") or 0)
+    click.echo(render.dim(f"  model: {model['model']} via {model['provider']}"))
+    click.echo(
+        render.dim(
+            f"  roughly {len(questions) * COLD_TURN_TOKENS:,} tokens — a cold "
+            f"turn is about {COLD_TURN_TOKENS:,}, and every one of these is cold"
+        )
+    )
+    if ceiling:
+        click.echo(render.dim(f"  stopping at ${ceiling:.2f} (max_spend)"))
+    else:
+        click.secho(
+            "  no spend ceiling — max_spend is 0 in config.yaml", fg="yellow"
+        )
+
     if cid == DEMO_CONNECTION:
         click.secho(
             f"\n{cid!r} is the connection the demo reads — its turn log is the "
@@ -136,12 +169,17 @@ async def _preflight(cid: str, path: Path, questions: list[str]) -> None:
         )
         click.confirm("Use it anyway?", abort=True)
 
+    click.confirm("Start?", default=True, abort=True)
+    return ceiling
 
-def _summary(asked: int, judged: int, approved: int, cid: str) -> None:
+
+def _summary(asked: int, judged: int, approved: int, spent: float, cid: str) -> None:
     click.echo()
     click.echo(
         render.bold(f"{judged} of {asked} turns judged, {approved} of them right")
     )
+    if spent:
+        click.echo(render.bold(f"${spent:.4f} spent"))
     click.echo(
         render.dim(
             f"  the verdicts are on the traces; `sql-agent turns -c {cid}` is "

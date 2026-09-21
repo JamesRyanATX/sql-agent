@@ -34,6 +34,10 @@ def _add(a: int, b: int) -> int:
     return a + b
 
 
+def _add_cost(a: float, b: float) -> float:
+    return a + b
+
+
 class TurnState(TypedDict, total=False):
     session_id: str
     question: str
@@ -73,6 +77,22 @@ class TurnState(TypedDict, total=False):
     # Reduced across nodes, so the counter sums every API call the turn made.
     tokens_in: Annotated[int, _add]
     tokens_out: Annotated[int, _add]
+    # What the turn charged, where the backend says so, and how many of its
+    # calls said. The count is what separates "nobody reported" from "it was
+    # free": a turn on a zero-price model really does cost nothing, and a turn
+    # on a backend that does not itemise is unknown, and those must not look
+    # alike in the turn log.
+    cost: Annotated[float, _add_cost]
+    costed_calls: Annotated[int, _add]
+
+
+def spend(result: llm.Result) -> dict[str, Any]:
+    """One call's money, as a state delta. `None` means the backend did not say,
+    which is counted as nothing reported rather than as nothing spent."""
+    return {
+        "cost": result.cost or 0.0,
+        "costed_calls": 1 if result.cost is not None else 0,
+    }
 
 
 # --------------------------------------------------------------------- prompts
@@ -303,6 +323,7 @@ async def plan(state: TurnState) -> TurnState:
         "missing": missing,
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
+        **spend(result),
     }
     if sufficient:
         emit({"type": "sql", "sql": sql, "assumptions": parsed.get("assumptions") or []})
@@ -332,6 +353,8 @@ async def explore(state: TurnState) -> TurnState:
         ask += "\n\nStill unknown:\n" + "\n".join(f"- {g}" for g in gaps)
     messages: list[dict[str, Any]] = [{"role": "user", "content": ask}]
     tokens_in = tokens_out = calls = 0
+    cost = 0.0
+    costed = 0
     result: llm.Result | None = None
 
     async with db.target(state["connection_id"]) as conn:
@@ -345,6 +368,8 @@ async def explore(state: TurnState) -> TurnState:
             )
             tokens_in += result.tokens_in
             tokens_out += result.tokens_out
+            cost += result.cost or 0.0
+            costed += 1 if result.cost is not None else 0
 
             if not result.tool_uses:
                 break
@@ -402,6 +427,8 @@ async def explore(state: TurnState) -> TurnState:
             )
             tokens_in += result.tokens_in
             tokens_out += result.tokens_out
+            cost += result.cost or 0.0
+            costed += 1 if result.cost is not None else 0
 
     findings = (result.text if result else "") or "(no findings)"
     emit({"type": "findings", "text": findings, "tool_calls": calls})
@@ -411,6 +438,8 @@ async def explore(state: TurnState) -> TurnState:
         "tool_calls": calls,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
+        "cost": cost,
+        "costed_calls": costed,
     }
 
 
@@ -438,6 +467,7 @@ async def generate_sql(state: TurnState) -> TurnState:
         "assumptions": parsed["assumptions"],
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
+        **spend(result),
     }
 
 
@@ -546,6 +576,7 @@ async def fix(state: TurnState) -> TurnState:
         "error": "",
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
+        **spend(result),
     }
 
 
@@ -742,12 +773,17 @@ async def extract(state: TurnState) -> TurnState:
             ],
         }
     )
-    return {"tokens_in": result.tokens_in, "tokens_out": result.tokens_out}
+    return {
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        **spend(result),
+    }
 
 
 async def answer(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     tokens_in = tokens_out = 0
+    mine: dict[str, Any] = {"cost": 0.0, "costed_calls": 0}
 
     if state.get("error"):
         text = (
@@ -772,9 +808,14 @@ async def answer(state: TurnState) -> TurnState:
             node="answer",
         )
         text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
+        mine = spend(result)
 
     total_in = state.get("tokens_in", 0) + tokens_in
     total_out = state.get("tokens_out", 0) + tokens_out
+    # This node's own call is not in the state yet — the reducer runs on what is
+    # returned below, after the row has been written.
+    total_cost = state.get("cost", 0.0) + mine["cost"]
+    costed = state.get("costed_calls", 0) + mine["costed_calls"]
     latency = int((time.monotonic() - state.get("started_at", time.monotonic())) * 1000)
 
     async with db.agent() as conn:
@@ -799,6 +840,9 @@ async def answer(state: TurnState) -> TurnState:
             latency_ms=latency,
             cache_entries=len(state.get("cache", [])),
             trace_id=state.get("trace_id") or None,
+            # None, not 0.0, when nothing reported: a backend that does not
+            # itemise its charges is unknown, and a free model really is free.
+            cost=total_cost if costed else None,
         )
 
     emit(
@@ -817,9 +861,15 @@ async def answer(state: TurnState) -> TurnState:
             # nowhere to go, taken without a second request.
             "turn_id": state["turn_id"],
             "trace_id": state.get("trace_id") or None,
+            "cost": total_cost if costed else None,
         }
     )
-    return {"answer": text, "tokens_in": tokens_in, "tokens_out": tokens_out}
+    return {
+        "answer": text,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        **mine,
+    }
 
 
 # ----------------------------------------------------------------------- edges

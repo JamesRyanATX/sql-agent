@@ -244,6 +244,9 @@ class TurnOut(BaseModel):
     created_at: datetime
     # None means the turn was taken with tracing off, which is the common case.
     trace_id: str | None = None
+    # Dollars, where the backend itemised the charge. None means nobody said,
+    # which is not the same as free.
+    cost: float | None = None
 
 
 class TurnListOut(BaseModel):
