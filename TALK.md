@@ -9,8 +9,10 @@ Agent Loop Chicago, **Nov 17**. 35 minutes, live, with a computer.
 
 This is the run sheet: what to say, what to type, what appears on screen, and
 what to do when it does not. Read the "Status" column before rehearsing —
-roughly half of section 4 onward is not built yet, and the blocking work is
-named where it bites.
+what is built and what is not changes as work lands, and the blocking work is
+named where it bites. Sections 2, 3 and 6 are blocked on one thing: a `make
+corpus` run, which is forty minutes at a keyboard and cannot be done on the
+day.
 
 ## Live, or pre-baked
 
@@ -27,6 +29,7 @@ Settle this first, because it decides whether the talk fits.
 | Pre-baked | Takes | Why it cannot be live |
 |---|---|---|
 | Recording and judging all 23 questions | ~40 min | Twenty-three cold turns |
+| `gepa-tools --probe-only` | ~20 min | Nineteen cold turns, one per golden case |
 | Every GEPA search | 20 min – 2 hrs | 60–150 metric calls |
 | The overfit run | ~15 min | A second search |
 
@@ -283,24 +286,35 @@ for a stated reason.
 
 ## 5. Things that do not look like prompts — 6 min
 
-**Status: none of this is built yet. It is the talk's thesis and the largest
-gap in the repo.**
+**Status: 5a is built — `make gepa-tools` — and has never been run against a
+model. 5b is not built and may not be worth building; see the honesty check.**
 
 ### Say
 
 - GEPA represents a candidate as a **dict of named text components** and will
-  mutate any of them. This adapter pins that dict to one key: `extract`.
+  mutate any of them. For `extract` that dict has one key, because a node has
+  one prompt. Nothing made it one key except our own code.
 - The thesis is that dict. Anything that is text and that a human wrote once is
   a component.
 
 ### 5a. Tool descriptions
 
 The agent's four introspection tools carry descriptions somebody wrote once and
-never revisited. They are prose, they are in the prompt on every
-cold turn, and nobody has ever measured them.
+never revisited. They are prose, they are in the prompt on every cold turn, and
+nobody has ever measured them.
 
-Show the before and after, and the measured effect on T1: tokens and tool-call
-count, seed versus promoted.
+They are now four keys of one candidate, scored by running whole cold turns
+against `demo/golden/` — nineteen questions with a known answer. A candidate
+that gets a question wrong which the seed got right is discarded whatever it
+scored, and nothing is averaged.
+
+```bash
+make gepa-tools GEPA_ARGS=--probe-only   # the seed over all 19, ~220k tokens
+make gepa-tools                          # the search, ~690k tokens, asks first
+```
+
+Show the before and after: T1 tokens and tool-call count, seed versus promoted,
+on the same question. The probe-only run is the before half.
 
 ### 5b. Config — `max_tool_calls`, currently 24
 
@@ -386,9 +400,8 @@ of `CHALLENGE.md` that specifies it.
 | §2 | All 23 questions recorded and judged | `make corpus` — built, never run |
 | §3 | `make gepa-extract` against a real corpus, promoted and committed | CHALLENGE §7 |
 | §4 | A committed front, and the code that writes it | `tools/gepa/cli.py`, after `_search`. `GEPAResult` carries `val_aggregate_subscores`, `per_objective_best_candidates` and `objective_pareto_front`, populated whenever the adapter returns per-term scores, which ours does. gepa 0.1.4 never writes them anywhere, so about fifty lines must. `--pareto <path>` for the tracked copy. |
-| §5 | Whole-turn replay, whole-turn metric, `TurnAdapter`, `demo/golden.jsonl` | CHALLENGE §§1, 4, 5, 6 |
-| §5 | An override seam for the four tool descriptions in `app/tools.py` | CHALLENGE §4 |
-| §5 | `cli.py` assuming one component and a prompt file per node | `_check_node`, `_seed_label`, `_diff`, `_gate`, `_seed_score` |
+| §5 | A real `make gepa-tools` run, promoted into `app/tools.py` and committed | built and tested; never run against a model |
+| §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted | `make gepa-tools GEPA_ARGS=--probe-only` is the before half |
 | §6 | A second search with the gate disabled, kept whatever it produces | CHALLENGE, "What the talk has to show" |
 
 Deadline for the promotion that sections 3 and 5 rest on: **Oct 10**.

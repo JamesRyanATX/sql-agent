@@ -167,3 +167,11 @@ def test_a_whole_turn_target_says_what_a_rollout_costs():
     # 150 would be 1.7 million tokens.
     assert targets.TOOLS.budget == 60
     assert targets.EXTRACT.rollout_tokens == 0, "one model call — do not ask"
+
+
+def test_every_target_offers_a_cheap_check():
+    """--probe-only is how you find out something is wrong for the price of a
+    few model calls rather than a whole search. A target without one silently
+    turns that into an error message."""
+    for target in targets.TARGETS.values():
+        assert target.check is not None, target.name

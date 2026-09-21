@@ -256,6 +256,16 @@ def _confirm(
         "config/, and nothing is committed."
     )
 
+    ask_before_spending(yes)
+
+
+def ask_before_spending(yes: bool = False) -> None:
+    """The last chance not to spend the money.
+
+    On stderr, confirmation included: a prompt on stdout would land in the
+    middle of the artifact. Refuses a pipe rather than spending into one, which
+    is `make gepa-tools > new.md` and every CI job.
+    """
     if yes:
         return
     if not sys.stdin.isatty():

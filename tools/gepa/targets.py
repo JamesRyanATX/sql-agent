@@ -384,6 +384,56 @@ def _argument_line(schema: dict) -> str:
     ) + "."
 
 
+def _tools_check(loop) -> int:
+    """The seed over the whole golden corpus, once, before any search.
+
+    Two things nothing else will tell you. Whether the corpus is answerable at
+    all — if the seed gets most of it wrong, `correct` never reaches 1.0, the
+    cost and tool-call terms are gated off on every case, and a search has
+    nothing to optimise but a term it cannot move, which looks exactly like GEPA
+    finding nothing. And the before half of a before-and-after table, which is
+    the only form the talk can show a tool-description change in.
+
+    Nineteen cold turns, so it asks first like a search does.
+    """
+    from tools.gepa import cli, golden, metric_turn, reference
+    from tools.gepa.adapter import TurnAdapter
+
+    cases = golden.load()
+    seed = _tools_seed()
+    say(f"\ntools     the seed over all {len(cases)} golden cases")
+    say(f"  budget      {len(cases)} rollouts at roughly "
+        f"{COLD_TURN_TOKENS:,} tokens each — about "
+        f"{len(cases) * COLD_TURN_TOKENS:,} tokens")
+    cli.ask_before_spending()
+
+    adapter = TurnAdapter(loop, to_overrides=_tools_overrides, focus=_tools_focus)
+    batch = adapter.evaluate(cases, seed, capture_traces=True)
+
+    say(f"\n  {'case':<32} {'right':>5} {'tokens':>7} {'tools':>5}")
+    right = 0
+    for t in batch.trajectories or []:
+        ok = t.score.terms["correct"] >= 1.0
+        right += ok
+        say(
+            f"  {t.case.name:<32} {'yes' if ok else 'NO':>5} "
+            f"{t.replayed.tokens:>7,} {len(t.replayed.tools):>5}",
+            fg=None if ok else "yellow",
+        )
+
+    say(f"\n  the seed answers {right} of {len(cases)} correctly")
+    if right * 2 < len(cases):
+        say(
+            "\nUnder half. Two of three terms are gated off on a wrong answer, "
+            "so a search here would have nothing to optimise but correctness — "
+            "which reads as GEPA finding nothing. The fix is easier cases, not "
+            "more rollouts.",
+            fg="yellow",
+        )
+        return 1
+    return 0
+
+
 TOOLS = Target(
     name="tools",
     seed=_tools_seed,
@@ -395,6 +445,7 @@ TOOLS = Target(
     render=_tools_render,
     label=_tools_label,
     notes=_tools_notes,
+    check=_tools_check,
     templates=_tools_templates,
     # A whole cold turn a rollout, against `extract`'s single model call.
     # CHALLENGE's own figure: 60 with a 10-case train split is under 700k

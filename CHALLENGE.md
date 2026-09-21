@@ -91,7 +91,7 @@ one thing a whole-turn metric needs.
 - `extract` keeps its own trace-based harvest either way (`harvest.py`); this is
   a second harvest beside it, not a replacement.
 
-**Why `demo/golden.jsonl` may be committed when `tools/gepa/out/` is not.** That
+**Why `demo/golden/` may be committed when `tools/gepa/out/` is not.** That
 directory is gitignored because a harvested case holds a recorded prompt, and a
 recorded prompt holds whatever the registered warehouse holds — committing a
 harvest commits customer data by construction. This corpus comes from
@@ -279,10 +279,13 @@ None of them fall out of a run by themselves.
 
 ## Definition of done
 
-1. `demo/golden.jsonl`: ≥15 cases, each built from a turn trace whose answer a
-   human marked correct, carrying the SQL that turn ran. A test executes every
-   case against a freshly seeded demo database and fails if one errors, comes
-   back empty, or disagrees with the `expect` value written beside it.
+1. `demo/golden/`: ≥15 cases, one JSON file each, carrying a reference query
+   and — where `demo.sql` fixes the number — the answer beside it. A test
+   executes every case against a freshly seeded demo database and fails if one
+   errors, comes back empty, or disagrees with its `expect`. **Done**, 19 cases,
+   nine with a literal answer. Authored against `demo.sql` rather than harvested
+   from traces, because the numbers are reachable without a model and waiting
+   for `make corpus` would have blocked the metric and the adapter behind it.
 2. `make gepa-tools` exits 0 with a diff on stderr and prose on stdout, from a
    real run, and the promotion is committed.
 3. The feedback prompt exists, is TTY-gated, writes a score and comment to the
@@ -294,4 +297,7 @@ None of them fall out of a run by themselves.
    will not survive this work — outcome labelling is exactly what items 2 and 3
    build — so it needs the reason that still holds: `plan`'s degenerate optimum
    is the worst in the graph, always say sufficient, and nothing in the golden
-   set gates that yet.
+   set gates that yet. **Done**, and four of the five needed rewriting rather
+   than one: "scoring one call means running the SQL against a warehouse whose
+   answers are known" was an argument against building the thing, and
+   `demo/golden/` is now a description of it.

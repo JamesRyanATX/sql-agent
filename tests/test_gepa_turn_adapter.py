@@ -228,3 +228,53 @@ def test_only_the_components_gepa_asked_about_come_back(adapter, monkeypatch, po
     assert set(
         adapter.make_reflective_dataset(targets.TOOLS.seed(), batch, ["list_tables"])
     ) == {"list_tables"}
+
+
+# --------------------------------------------------------- the cheap pre-check
+
+
+def test_the_seed_check_reports_every_case_and_what_it_cost(
+    monkeypatch, pool, capsys
+):
+    """`make gepa-tools GEPA_ARGS=--probe-only`, which is two things at once.
+
+    It is the before half of the talk's before-and-after table, and it is the
+    cheap way to find out whether the corpus is answerable at all — if the seed
+    gets most of it wrong, two of three terms are gated off on every case and a
+    search has nothing to optimise but a term it cannot move.
+
+    One case here rather than nineteen: what is being checked is the reporting,
+    and a scripted model is a queue that nineteen concurrent turns would drain
+    in an order nobody can predict.
+    """
+    from tools.gepa import cli
+
+    monkeypatch.setattr(golden, "load", lambda: CASES)
+    monkeypatch.setattr(cli, "ask_before_spending", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "complete", cold())
+
+    with Loop() as loop:
+        status = targets._tools_check(loop)
+
+    out = capsys.readouterr().err
+    assert status == 0
+    assert "customers_active" in out
+    assert "the seed answers 1 of 1 correctly" in out
+
+
+def test_a_corpus_the_seed_mostly_fails_is_reported_as_the_problem_it_is(
+    monkeypatch, pool, capsys
+):
+    """Not a search that found nothing. The fix is easier cases, and saying so
+    here costs one run instead of one run plus a search."""
+    from tools.gepa import cli
+
+    monkeypatch.setattr(golden, "load", lambda: CASES)
+    monkeypatch.setattr(cli, "ask_before_spending", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "complete", cold(sql=WRONG, answer="2,000 customers."))
+
+    with Loop() as loop:
+        status = targets._tools_check(loop)
+
+    assert status == 1
+    assert "Under half" in capsys.readouterr().err
