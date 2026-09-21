@@ -231,50 +231,71 @@ def test_only_the_components_gepa_asked_about_come_back(adapter, monkeypatch, po
 
 
 # --------------------------------------------------------- the cheap pre-check
+#
+# `make gepa-tools GEPA_ARGS=--probe-only` is two things at once: the before
+# half of the talk's before-and-after table, and the cheap way to find out
+# whether the corpus can be searched at all before paying for a search.
+#
+# Both ends are the problem and the middle is the point, so these are the two
+# ends. One case each, because a scripted model is a queue and nineteen
+# concurrent turns would drain it in an order nobody can predict. The middle is
+# what a real run exercises.
 
 
-def test_the_seed_check_reports_every_case_and_what_it_cost(
-    monkeypatch, pool, capsys
-):
-    """`make gepa-tools GEPA_ARGS=--probe-only`, which is two things at once.
+def check_with(monkeypatch, cases, model) -> tuple[int, str]:
+    from tools.gepa import cli  # noqa: F401 — imported for the monkeypatch below
 
-    It is the before half of the talk's before-and-after table, and it is the
-    cheap way to find out whether the corpus is answerable at all — if the seed
-    gets most of it wrong, two of three terms are gated off on every case and a
-    search has nothing to optimise but a term it cannot move.
-
-    One case here rather than nineteen: what is being checked is the reporting,
-    and a scripted model is a queue that nineteen concurrent turns would drain
-    in an order nobody can predict.
-    """
-    from tools.gepa import cli
-
-    monkeypatch.setattr(golden, "load", lambda: CASES)
-    monkeypatch.setattr(cli, "ask_before_spending", lambda *a, **k: None)
-    monkeypatch.setattr(llm, "complete", cold())
-
+    monkeypatch.setattr(golden, "load", lambda: cases)
+    monkeypatch.setattr(llm, "complete", model)
     with Loop() as loop:
-        status = targets._tools_check(loop)
+        return targets._tools_check(loop, yes=True)
+
+
+def test_a_corpus_the_seed_already_answers_cannot_be_won(monkeypatch, pool, capsys):
+    """`demo/questions.txt` says this about itself: a candidate cannot win where
+    the seed already wins, so a corpus of questions the agent gets right
+    measures nothing. It needs harder questions, not more rollouts."""
+    status = check_with(monkeypatch, CASES, cold())
 
     out = capsys.readouterr().err
-    assert status == 0
-    assert "customers_active" in out
+    assert status == 1
+    assert "customers_active" in out, "every case is still reported"
     assert "the seed answers 1 of 1 correctly" in out
+    assert "cannot win where the seed already wins" in out
 
 
-def test_a_corpus_the_seed_mostly_fails_is_reported_as_the_problem_it_is(
+def test_a_corpus_the_seed_never_answers_has_nothing_to_optimise(
     monkeypatch, pool, capsys
 ):
-    """Not a search that found nothing. The fix is easier cases, and saying so
-    here costs one run instead of one run plus a search."""
-    from tools.gepa import cli
+    """Every case gated at `correct` means cost and tool calls are never scored,
+    so two of three terms are dead and a search has nothing to move. That reads
+    as GEPA finding nothing, which is the wrong diagnosis to reach after paying
+    for a run."""
+    status = check_with(
+        monkeypatch, CASES, cold(sql=WRONG, answer="2,000 customers.")
+    )
 
-    monkeypatch.setattr(golden, "load", lambda: CASES)
-    monkeypatch.setattr(cli, "ask_before_spending", lambda *a, **k: None)
-    monkeypatch.setattr(llm, "complete", cold(sql=WRONG, answer="2,000 customers."))
-
-    with Loop() as loop:
-        status = targets._tools_check(loop)
-
+    out = capsys.readouterr().err
     assert status == 1
-    assert "Under half" in capsys.readouterr().err
+    assert "the seed answers 0 of 1 correctly" in out
+    assert "nothing for a search to move" in out
+
+
+def test_a_rollout_that_broke_is_not_reported_as_a_wrong_answer(
+    monkeypatch, pool, capsys
+):
+    """The regression this exists for. `replay_turn` needed an agent pool that
+    only a test fixture ever opened, so the first real run scored nineteen
+    rollouts zero in 1.6 seconds and the table said the corpus was hard. A
+    broken rollout is the harness, and the table has to say so."""
+
+    async def explode(**kwargs):
+        raise RuntimeError("the model refused")
+
+    status = check_with(monkeypatch, CASES, explode)
+
+    out = capsys.readouterr().err
+    assert status == 1
+    assert "broke" in out
+    assert "That is the harness, not the corpus" in out
+    assert "the model refused" in out

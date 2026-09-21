@@ -77,9 +77,10 @@ class Target:
     # a passing gate still does not prove. Empty is allowed.
     notes: Callable[[], str]
 
-    # The cheap pre-check `--probe-only` runs, returning an exit status. None
-    # where a target has nothing cheap to offer.
-    check: Callable[[Any], int] | None = None
+    # The cheap pre-check `--probe-only` runs: (loop, yes) -> exit status. It
+    # takes `yes` because a check can itself be expensive enough to ask about.
+    # None where a target has nothing cheap to offer.
+    check: Callable[[Any, bool], int] | None = None
 
     # component -> the reflection prompt GEPA renders for it. None uses GEPA's
     # own generic one, which is right for a node instruction and wrong for a
@@ -174,7 +175,7 @@ def _extract_notes() -> str:
     return "\n".join(lines)
 
 
-def _extract_check(loop) -> int:
+def _extract_check(loop, yes: bool = False) -> int:
     outcomes = gates.run_probes(
         loop, _extract_seed()[EXTRACT_COMPONENT], probes.load(EXTRACT_COMPONENT)
     )
@@ -384,7 +385,7 @@ def _argument_line(schema: dict) -> str:
     ) + "."
 
 
-def _tools_check(loop) -> int:
+def _tools_check(loop, yes: bool = False) -> int:
     """The seed over the whole golden corpus, once, before any search.
 
     Two things nothing else will tell you. Whether the corpus is answerable at
@@ -405,32 +406,62 @@ def _tools_check(loop) -> int:
     say(f"  budget      {len(cases)} rollouts at roughly "
         f"{COLD_TURN_TOKENS:,} tokens each — about "
         f"{len(cases) * COLD_TURN_TOKENS:,} tokens")
-    cli.ask_before_spending()
+    cli.ask_before_spending(yes)
 
     adapter = TurnAdapter(loop, to_overrides=_tools_overrides, focus=_tools_focus)
     batch = adapter.evaluate(cases, seed, capture_traces=True)
 
-    say(f"\n  {'case':<32} {'right':>5} {'tokens':>7} {'tools':>5}")
-    right = 0
+    say(f"\n  {'case':<32} {'right':>6} {'tokens':>7} {'tools':>5}")
+    right = broke = 0
     for t in batch.trajectories or []:
         ok = t.score.terms["correct"] >= 1.0
+        # A rollout that fell over is not a wrong answer, and a table that shows
+        # them the same way is how nineteen zeroes read as a hard corpus.
+        failed = t.replayed.error is not None
         right += ok
+        broke += failed
         say(
-            f"  {t.case.name:<32} {'yes' if ok else 'NO':>5} "
+            f"  {t.case.name:<32} {'broke' if failed else 'yes' if ok else 'NO':>6} "
             f"{t.replayed.tokens:>7,} {len(t.replayed.tools):>5}",
-            fg=None if ok else "yellow",
+            fg="red" if failed else None if ok else "yellow",
         )
 
-    say(f"\n  the seed answers {right} of {len(cases)} correctly")
-    if right * 2 < len(cases):
+    if broke:
         say(
-            "\nUnder half. Two of three terms are gated off on a wrong answer, "
-            "so a search here would have nothing to optimise but correctness — "
-            "which reads as GEPA finding nothing. The fix is easier cases, not "
-            "more rollouts.",
+            f"\n{broke} of {len(cases)} rollouts did not complete. That is the "
+            f"harness, not the corpus — the first one said:\n",
+            fg="red",
+        )
+        first = next(t for t in batch.trajectories if t.replayed.error)
+        say(f"  {first.replayed.error}")
+        return 1
+
+    say(f"\n  the seed answers {right} of {len(cases)} correctly")
+
+    # Both ends are the problem, and the middle is the point. A corpus the seed
+    # already answers cannot be won — `demo/questions.txt` says exactly that
+    # about itself — and one it never answers has two of three terms gated off
+    # on every case, which reads as GEPA finding nothing.
+    if right == 0:
+        say(
+            "\nNone. Every case is gated at `correct`, so cost and tool calls "
+            "are never scored and there is nothing for a search to move. Read "
+            "the feedback on one case before spending anything.",
+            fg="red",
+        )
+        return 1
+    if right == len(cases):
+        say(
+            "\nAll of them. A candidate cannot win where the seed already "
+            "wins, so this corpus can confirm the status quo and nothing else. "
+            "It needs harder questions.",
             fg="yellow",
         )
         return 1
+    say(
+        f"  the {len(cases) - right} it gets wrong are where a candidate has "
+        f"room to win",
+    )
     return 0
 
 

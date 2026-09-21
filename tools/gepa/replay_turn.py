@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from app import graph, overrides
+from app import db, graph, overrides
 
 
 @dataclass
@@ -105,7 +105,14 @@ async def _drive(question: str, out: TurnReplayed) -> None:
 
     `memory: False` is the whole point: the turn neither reads the cache nor
     saves to it, so it behaves like a first-ever question every time.
+
+    The agent pool is opened here rather than assumed. A turn writes to the turn
+    log whatever its memory setting, so it needs one, and the only other callers
+    of `open_pools` are the server's startup and a test fixture — which is how
+    this went missing: every test had the fixture, and `make gepa-tools` scored
+    nineteen rollouts zero in 1.6 seconds. It is idempotent.
     """
+    await db.open_pools()
     compiled = graph.build_graph()
     session = str(uuid4())
     async for mode, chunk in compiled.astream(

@@ -106,7 +106,7 @@ def cli(
         if chosen.check is None:
             raise click.ClickException(f"{chosen.name} has no cheap pre-check")
         with Loop() as loop:
-            raise SystemExit(chosen.check(loop))
+            raise SystemExit(chosen.check(loop, yes))
 
     _fresh_run_dir(chosen.name, resume)
     cases = _not_too_thin(chosen.corpus(days=days, resume=resume, verbose=verbose))

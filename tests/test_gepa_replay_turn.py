@@ -202,3 +202,24 @@ async def test_it_neither_reads_the_memory_nor_adds_to_it(monkeypatch, pool, age
     # found it, which is what makes it safe to run against your own agent.
     assert [e.name for e in after] == ["soft deletes"]
 
+
+
+async def test_it_opens_the_pools_it_needs_rather_than_assuming_them(monkeypatch):
+    """No `pool` fixture, deliberately, and that is the entire point.
+
+    Every other test in this file takes it, which is how `replay_turn` shipped
+    needing an agent pool nobody opened for it. `make gepa-tools` scored
+    nineteen rollouts zero in 1.6 seconds and the suite was green throughout: a
+    turn writes to the turn log whatever its memory setting, and the only
+    callers of `open_pools` were the server's startup and that fixture.
+
+    So this one runs the way the optimiser runs, from a cold process.
+    """
+    await db.close_pools()
+    monkeypatch.setattr(llm, "complete", cold_turn())
+
+    out = await replay()
+
+    assert out.error is None, "a cold process must be able to drive a turn"
+    assert out.answer == "1,840 customers."
+    await db.close_pools()

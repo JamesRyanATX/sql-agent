@@ -13,7 +13,7 @@
     ]
   ],
   "ordered": false,
-  "reading": "Every customer filed under west in any casing, soft-deleted ones included, because the question does not say active. region = 'west' answers 350.",
+  "reading": "Every customer ever filed under west in any casing, soft-deleted included. `demo/questions.txt` pins this one at 500 explicitly, which reads the bare word `customers` the other way round from the case above it — a real ambiguity in the demo's own questions, left as the demo states it. What this case is actually for is the casing: `region = 'west'` answers 350.",
   "traps": [
     "region casing"
   ],

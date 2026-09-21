@@ -4,6 +4,7 @@
   "reference_sql": [
     "SELECT lower(region) AS region, count(*) AS customers",
     "FROM customer",
+    "WHERE deleted_at IS NULL",
     "GROUP BY 1",
     "ORDER BY 1"
   ],
@@ -13,25 +14,26 @@
   "expect": [
     [
       "east",
-      500
+      460
     ],
     [
       "north",
-      500
+      460
     ],
     [
       "south",
-      500
+      460
     ],
     [
       "west",
-      500
+      460
     ]
   ],
   "ordered": false,
-  "reading": "Four regions, not the eight spellings the column holds. All customers, because the question does not say active.",
+  "reading": "Four regions, not the eight spellings the column holds, and existing customers — `how many customers do we have?` means 1,840 in this demo, so it means 460 a region here too. The four counts summing to 1,840 is what makes the corpus agree with itself.",
   "traps": [
-    "region casing"
+    "region casing",
+    "soft deletes"
   ],
   "format_version": 1
 }
