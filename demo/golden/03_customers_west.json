@@ -1,0 +1,21 @@
+{
+  "name": "customers_west",
+  "question": "how many customers are in the west region?",
+  "reference_sql": [
+    "SELECT count(*) AS customers FROM customer WHERE lower(region) = 'west'"
+  ],
+  "tables": [
+    "customer"
+  ],
+  "expect": [
+    [
+      500
+    ]
+  ],
+  "ordered": false,
+  "reading": "Every customer filed under west in any casing, soft-deleted ones included, because the question does not say active. region = 'west' answers 350.",
+  "traps": [
+    "region casing"
+  ],
+  "format_version": 1
+}

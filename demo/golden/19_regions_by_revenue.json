@@ -1,0 +1,27 @@
+{
+  "name": "regions_by_revenue",
+  "question": "which regions are our biggest by revenue?",
+  "reference_sql": [
+    "SELECT lower(c.region) AS region, SUM(oi.qty * oi.price) AS revenue",
+    "FROM customer c",
+    "JOIN orders o ON o.customer_id = c.id",
+    "JOIN order_item oi ON oi.order_id = o.id",
+    "WHERE o.status <> 'cancelled'",
+    "GROUP BY 1",
+    "ORDER BY 2 DESC"
+  ],
+  "tables": [
+    "customer",
+    "orders",
+    "order_item"
+  ],
+  "expect": null,
+  "ordered": true,
+  "reading": "The regional revenue question with the ordering made part of the answer. Grouping on the raw column reports west three times and gets the ranking wrong as well as the rows.",
+  "traps": [
+    "region casing",
+    "historical price",
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

@@ -1,0 +1,22 @@
+{
+  "name": "revenue_total",
+  "question": "what was our total revenue?",
+  "reference_sql": [
+    "SELECT SUM(oi.qty * oi.price) AS revenue",
+    "     FROM order_item oi",
+    "JOIN orders o ON o.id = oi.order_id",
+    "WHERE o.status <> 'cancelled'"
+  ],
+  "tables": [
+    "order_item",
+    "orders"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "What the lines actually sold for, not today's list price, and cancelled orders excluded. Refunded orders are money that moved, so they stay in.",
+  "traps": [
+    "historical price",
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

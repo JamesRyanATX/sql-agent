@@ -1,0 +1,21 @@
+{
+  "name": "orders_cancelled",
+  "question": "how many orders have been cancelled?",
+  "reference_sql": [
+    "SELECT count(*) AS cancelled FROM orders WHERE status = 'cancelled'"
+  ],
+  "tables": [
+    "orders"
+  ],
+  "expect": [
+    [
+      750
+    ]
+  ],
+  "ordered": false,
+  "reading": "The literal status. One eighth of the 6,000 orders.",
+  "traps": [
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

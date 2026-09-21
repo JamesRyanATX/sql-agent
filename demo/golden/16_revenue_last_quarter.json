@@ -1,0 +1,25 @@
+{
+  "name": "revenue_last_quarter",
+  "question": "what was our revenue last quarter?",
+  "reference_sql": [
+    "SELECT SUM(oi.qty * oi.price) AS revenue",
+    "FROM order_item oi",
+    "JOIN orders o ON o.id = oi.order_id",
+    "WHERE o.status <> 'cancelled'",
+    "  AND o.created >= date_trunc('quarter', now()) - INTERVAL '3 months'",
+    "  AND o.created <  date_trunc('quarter', now())"
+  ],
+  "tables": [
+    "order_item",
+    "orders"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "The previous calendar quarter, not the last ninety days, and not the quarter we are in.",
+  "traps": [
+    "historical price",
+    "cancelled orders",
+    "created column"
+  ],
+  "format_version": 1
+}

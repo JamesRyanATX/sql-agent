@@ -1,0 +1,37 @@
+{
+  "name": "regions_by_customers",
+  "question": "what regions do we have, and how many customers in each?",
+  "reference_sql": [
+    "SELECT lower(region) AS region, count(*) AS customers",
+    "FROM customer",
+    "GROUP BY 1",
+    "ORDER BY 1"
+  ],
+  "tables": [
+    "customer"
+  ],
+  "expect": [
+    [
+      "east",
+      500
+    ],
+    [
+      "north",
+      500
+    ],
+    [
+      "south",
+      500
+    ],
+    [
+      "west",
+      500
+    ]
+  ],
+  "ordered": false,
+  "reading": "Four regions, not the eight spellings the column holds. All customers, because the question does not say active.",
+  "traps": [
+    "region casing"
+  ],
+  "format_version": 1
+}

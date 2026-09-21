@@ -1,0 +1,21 @@
+{
+  "name": "customers_active",
+  "question": "how many customers do we have?",
+  "reference_sql": [
+    "SELECT count(*) AS customers FROM customer WHERE deleted_at IS NULL"
+  ],
+  "tables": [
+    "customer"
+  ],
+  "expect": [
+    [
+      1840
+    ]
+  ],
+  "ordered": false,
+  "reading": "Customers that still exist. 160 of the 2,000 rows are soft-deleted, and a deleted customer is not a customer.",
+  "traps": [
+    "soft deletes"
+  ],
+  "format_version": 1
+}

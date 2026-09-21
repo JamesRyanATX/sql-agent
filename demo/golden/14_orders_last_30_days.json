@@ -1,0 +1,19 @@
+{
+  "name": "orders_last_30_days",
+  "question": "how many orders were placed in the last 30 days?",
+  "reference_sql": [
+    "SELECT count(*) AS orders",
+    "FROM orders",
+    "WHERE created >= now() - INTERVAL '30 days'"
+  ],
+  "tables": [
+    "orders"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "The column is `created`. There is no `created_at` on orders, which is what makes this the fix loop's question.",
+  "traps": [
+    "created column"
+  ],
+  "format_version": 1
+}

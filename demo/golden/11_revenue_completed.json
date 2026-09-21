@@ -1,0 +1,22 @@
+{
+  "name": "revenue_completed",
+  "question": "what was our revenue from completed orders?",
+  "reference_sql": [
+    "SELECT SUM(oi.qty * oi.price) AS revenue",
+    "FROM order_item oi",
+    "JOIN orders o ON o.id = oi.order_id",
+    "WHERE o.status = 'completed'"
+  ],
+  "tables": [
+    "order_item",
+    "orders"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "`completed` is a literal status in this data, so the question names one status rather than meaning everything uncancelled. That broader reading is the total-revenue case, and the two differ by more than twofold.",
+  "traps": [
+    "historical price",
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

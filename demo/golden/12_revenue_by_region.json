@@ -1,0 +1,27 @@
+{
+  "name": "revenue_by_region",
+  "question": "what was our revenue by region?",
+  "reference_sql": [
+    "SELECT lower(c.region) AS region, SUM(oi.qty * oi.price) AS revenue",
+    "FROM customer c",
+    "JOIN orders o ON o.customer_id = c.id",
+    "JOIN order_item oi ON oi.order_id = o.id",
+    "WHERE o.status <> 'cancelled'",
+    "GROUP BY 1",
+    "ORDER BY 1"
+  ],
+  "tables": [
+    "customer",
+    "orders",
+    "order_item"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "Four regions, not eight spellings. A soft-deleted customer keeps their revenue: the money was real even though the account is gone.",
+  "traps": [
+    "region casing",
+    "historical price",
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

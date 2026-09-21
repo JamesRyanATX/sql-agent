@@ -1,0 +1,41 @@
+{
+  "name": "order_statuses",
+  "question": "what order statuses exist, and how many orders have each?",
+  "reference_sql": [
+    "SELECT status, count(*) AS orders",
+    "FROM orders",
+    "GROUP BY status",
+    "ORDER BY 1"
+  ],
+  "tables": [
+    "orders"
+  ],
+  "expect": [
+    [
+      "cancelled",
+      750
+    ],
+    [
+      "completed",
+      2400
+    ],
+    [
+      "pending",
+      600
+    ],
+    [
+      "refunded",
+      750
+    ],
+    [
+      "shipped",
+      1500
+    ]
+  ],
+  "ordered": false,
+  "reading": "Every status in the data, none assumed. This is the question whose answer explains the cancelled-orders trap in the revenue questions.",
+  "traps": [
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

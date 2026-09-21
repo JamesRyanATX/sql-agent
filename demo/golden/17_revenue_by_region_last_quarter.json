@@ -1,0 +1,30 @@
+{
+  "name": "revenue_by_region_last_quarter",
+  "question": "what was our revenue by region last quarter?",
+  "reference_sql": [
+    "SELECT lower(c.region) AS region, SUM(oi.qty * oi.price) AS revenue",
+    "FROM customer c",
+    "JOIN orders o ON o.customer_id = c.id",
+    "JOIN order_item oi ON oi.order_id = o.id",
+    "WHERE o.status <> 'cancelled'",
+    "  AND o.created >= date_trunc('quarter', now()) - INTERVAL '3 months'",
+    "  AND o.created <  date_trunc('quarter', now())",
+    "GROUP BY 1",
+    "ORDER BY 1"
+  ],
+  "tables": [
+    "customer",
+    "orders",
+    "order_item"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "Three traps and a date window: the casing, the historical price, cancelled orders out, and the column called `created`.",
+  "traps": [
+    "region casing",
+    "historical price",
+    "cancelled orders",
+    "created column"
+  ],
+  "format_version": 1
+}

@@ -1,0 +1,21 @@
+{
+  "name": "orders_by_month_this_year",
+  "question": "how many orders did we get each month this year?",
+  "reference_sql": [
+    "SELECT date_trunc('month', created)::date AS month, count(*) AS orders",
+    "FROM orders",
+    "WHERE created >= date_trunc('year', now())",
+    "GROUP BY 1",
+    "ORDER BY 1"
+  ],
+  "tables": [
+    "orders"
+  ],
+  "expect": null,
+  "ordered": true,
+  "reading": "Calendar year to date, one row per month, oldest first. `this year` means the year we are in, not the last twelve months.",
+  "traps": [
+    "created column"
+  ],
+  "format_version": 1
+}

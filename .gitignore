@@ -24,5 +24,6 @@ demo/*.mp4
 # recorded prompt, and a trace holds whatever the registered warehouse holds,
 # so committing a harvest commits customer data by construction. The *authored*
 # probes in tests/probes/ are the opposite — those are contract, like
-# tests/test_traps.py.
+# tests/test_traps.py. So is demo/golden/, which is derived from demo/demo.sql
+# and holds no recorded prompt: do not add it here by analogy with this rule.
 tools/gepa/out/

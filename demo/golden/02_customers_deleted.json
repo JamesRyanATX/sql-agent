@@ -1,0 +1,21 @@
+{
+  "name": "customers_deleted",
+  "question": "how many customers have been deleted?",
+  "reference_sql": [
+    "SELECT count(*) AS deleted FROM customer WHERE deleted_at IS NOT NULL"
+  ],
+  "tables": [
+    "customer"
+  ],
+  "expect": [
+    [
+      160
+    ]
+  ],
+  "ordered": false,
+  "reading": "The same column from the other side. There is no hard-delete audit trail here; deleted_at is the record.",
+  "traps": [
+    "soft deletes"
+  ],
+  "format_version": 1
+}

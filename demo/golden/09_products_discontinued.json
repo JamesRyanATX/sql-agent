@@ -1,0 +1,19 @@
+{
+  "name": "products_discontinued",
+  "question": "how many products have been discontinued?",
+  "reference_sql": [
+    "SELECT count(*) AS discontinued FROM product WHERE discontinued"
+  ],
+  "tables": [
+    "product"
+  ],
+  "expect": [
+    [
+      18
+    ]
+  ],
+  "ordered": false,
+  "reading": "The boolean column, taken at face value. No trap in this one, deliberately: a corpus of only traps trains a prompt that only hunts for tricks.",
+  "traps": [],
+  "format_version": 1
+}

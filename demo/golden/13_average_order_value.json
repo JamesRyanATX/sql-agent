@@ -1,0 +1,26 @@
+{
+  "name": "average_order_value",
+  "question": "what is the average order value?",
+  "reference_sql": [
+    "SELECT round(avg(total), 2) AS average_order_value",
+    "FROM (",
+    "  SELECT o.id, SUM(oi.qty * oi.price) AS total",
+    "  FROM orders o",
+    "  JOIN order_item oi ON oi.order_id = o.id",
+    "  WHERE o.status <> 'cancelled'",
+    "  GROUP BY o.id",
+    ") per_order"
+  ],
+  "tables": [
+    "orders",
+    "order_item"
+  ],
+  "expect": null,
+  "ordered": false,
+  "reading": "The mean of the order totals, not the mean of the line totals. Averaging order_item directly answers a different question and is the common way to get this wrong.",
+  "traps": [
+    "historical price",
+    "cancelled orders"
+  ],
+  "format_version": 1
+}

@@ -1,0 +1,19 @@
+{
+  "name": "products_total",
+  "question": "how many products do we sell?",
+  "reference_sql": [
+    "SELECT count(*) AS products FROM product"
+  ],
+  "tables": [
+    "product"
+  ],
+  "expect": [
+    [
+      200
+    ]
+  ],
+  "ordered": false,
+  "reading": "Every row in the catalogue. 18 are discontinued; the question asks what we sell, and the catalogue is the answer the demo pins.",
+  "traps": [],
+  "format_version": 1
+}

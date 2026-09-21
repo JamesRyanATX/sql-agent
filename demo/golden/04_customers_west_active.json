@@ -1,0 +1,24 @@
+{
+  "name": "customers_west_active",
+  "question": "how many active customers are in the west region?",
+  "reference_sql": [
+    "SELECT count(*) AS customers",
+    "FROM customer",
+    "WHERE lower(region) = 'west' AND deleted_at IS NULL"
+  ],
+  "tables": [
+    "customer"
+  ],
+  "expect": [
+    [
+      460
+    ]
+  ],
+  "ordered": false,
+  "reading": "Both traps at once: every casing of west, and only customers that still exist.",
+  "traps": [
+    "region casing",
+    "soft deletes"
+  ],
+  "format_version": 1
+}
