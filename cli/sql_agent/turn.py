@@ -18,7 +18,11 @@ VERDICTS = ("OK", "Not OK")
 
 
 async def take(
-    cid: str, question: str, *, verbose: bool = False, as_json: bool = False
+    question: str,
+    *,
+    verbose: bool = False,
+    as_json: bool = False,
+    memory: bool = True,
 ) -> tuple[dict | None, bool]:
     """Ask, rendering as it happens.
 
@@ -32,9 +36,9 @@ async def take(
     fatal = False
     answered: dict | None = None
     # No session_id: the server mints one per turn, which is what a one-shot
-    # question wants. Turns share the connection's cache regardless.
+    # question wants. Every turn reads the same memory regardless.
     async for ev in http.stream_events(
-        f"/connections/{cid}/ask", {"question": question}
+        "/ask", {"question": question, "memory": memory}
     ):
         if as_json:
             events.raw(ev)
@@ -65,7 +69,7 @@ def askable(answered: dict | None) -> bool:
     )
 
 
-async def judge(cid: str, answered: dict) -> bool:
+async def judge(answered: dict) -> bool:
     """Ask what that answer was worth, and file it against the turn's trace.
 
     Returns the verdict, which `sql-agent corpus` counts: how many of twenty
@@ -85,7 +89,7 @@ async def judge(cid: str, answered: dict) -> bool:
         # the sentence the person would have typed anyway.
         comment = click.prompt("What could be improved", default="", show_default=False)
     await http.post(
-        f"/connections/{cid}/turns/{answered['turn_id']}/feedback",
+        f"/turns/{answered['turn_id']}/feedback",
         json={"correct": correct, "comment": comment or None},
     )
     click.echo(render.dim("  thanks — filed on this turn's trace"))

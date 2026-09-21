@@ -41,15 +41,14 @@ def _add_cost(a: float, b: float) -> float:
 class TurnState(TypedDict, total=False):
     session_id: str
     question: str
-    # Which registered database this turn is about. In the state rather than in
-    # `config["configurable"]` beside thread_id: state is checkpointed, and a
-    # value outside it lets a resumed thread switch warehouses mid-conversation,
-    # replaying a cache loaded from one while `execute` runs against another.
-    connection_id: str
-    # Which SQL the model should write. Set by `load_cache` from the registry
-    # row's `driver` column, so nothing is dialled. In state for the same reason
-    # as connection_id: a resumed thread must not plan in one dialect and
-    # execute in another.
+    # Whether this turn may read what the agent has learned, and save what it
+    # learns. False is what an optimisation run asks for: it is measuring a
+    # prompt, and a turn that answers from memory measures the memory instead.
+    # In the state rather than beside it, because a resumed thread must not
+    # change its mind halfway and answer from a cache its first half never saw.
+    memory: bool
+    # Which SQL the model should write. Read from TARGET_DATABASE_URL, so
+    # nothing has to be dialled to find out.
     dialect: str
 
     turn_id: int
@@ -232,18 +231,19 @@ def render_cache(entries: list[dict[str, Any]]) -> str:
 
 
 async def load_cache(state: TurnState) -> TurnState:
-    """Open the turn and load everything not disabled, ordered by hits."""
+    """Open the turn and load everything not disabled, ordered by hits.
+
+    `memory: False` skips the load, so the turn explores as though nothing had
+    ever been learned. The turn row is opened either way — it cost tokens and
+    belongs in the log.
+    """
     async with db.agent() as conn:
         turn_id = await store.start_turn(
             conn,
-            connection_id=state["connection_id"],
             session_id=state["session_id"],
             question=state["question"],
         )
-        entries = await store.load_cache(conn, connection_id=state["connection_id"])
-        # From the registry row: `driver` is a column, so the dialect is known
-        # before anything is dialled.
-        registered = await store.get_connection(conn, state["connection_id"])
+        entries = await store.load_cache(conn) if state.get("memory", True) else []
 
     cache = [
         {
@@ -262,7 +262,7 @@ async def load_cache(state: TurnState) -> TurnState:
         "turn_id": turn_id,
         "started_at": time.monotonic(),
         "cache": cache,
-        "dialect": registered.dialect if registered else "postgresql",
+        "dialect": db.target_dialect(),
         "fix_attempts": 0,
         "tool_calls": 0,
     }
@@ -284,10 +284,9 @@ async def plan(state: TurnState) -> TurnState:
         return {"sufficient": False}
 
     result = await llm.complete(
-        # Anything added to this system block must be a function of
-        # `connection_id` alone — prompt caching keys on an exact prefix. The
-        # dialect and the cache text are; the question is not, so it stays in
-        # the user message.
+        # Anything added to this system block has to be the same on every turn
+        # — prompt caching keys on an exact prefix. The dialect and the cache
+        # text are; the question is not, so it stays in the user message.
         system=(
             f"{prompts.get('plan')}{dialect_note(state['dialect'])}\n\n"
             f"{render_cache(cache)}"
@@ -357,7 +356,7 @@ async def explore(state: TurnState) -> TurnState:
     costed = 0
     result: llm.Result | None = None
 
-    async with db.target(state["connection_id"]) as conn:
+    async with db.target() as conn:
         while calls < config().max_tool_calls:
             result = await llm.complete(
                 system=system,
@@ -490,7 +489,7 @@ async def execute(state: TurnState) -> TurnState:
     emit = get_stream_writer()
     try:
         with tracing.span(name="sql.execute", input=state["sql"]) as sp:
-            async with db.target_readonly(state["connection_id"]) as conn:
+            async with db.target_readonly() as conn:
                 # exec_driver_sql, never text(). `text()` reads `:name` as a bind
                 # parameter, and this string is whatever the model wrote, so
                 # `WHERE status = ':pending'` becomes a missing-parameter error
@@ -617,13 +616,13 @@ def grounded_in(fragment: str | None, sql: str) -> bool:
     return all(token in ran for token in wanted)
 
 
-async def infer_tables(sql: str, connection_id: str) -> list[str]:
+async def infer_tables(sql: str) -> list[str]:
     """Which real tables does this SQL touch?
 
     The model sometimes returns an empty `tables`, which would make `schema_fp`
     a hash over nothing — an entry that can never go stale (§5).
     """
-    async with db.target(connection_id) as conn:
+    async with db.target() as conn:
         known = await conn.run_sync(
             lambda sync_conn: set(inspect(sync_conn).get_table_names())
         )
@@ -741,18 +740,30 @@ async def extract(state: TurnState) -> TurnState:
         return {}
 
     sql = state["sql"]
-    fallback_tables = await infer_tables(sql, state["connection_id"])
+    fallback_tables = await infer_tables(sql)
     entries = entries_from(parsed, sql, fallback_tables)
 
     # The one operation spanning both databases, and the order is forced: no
     # single connection reaches the target and the agent's own memory.
-    async with db.target(state["connection_id"]) as conn:
+    async with db.target() as conn:
         await store.fingerprint_entries(conn, entries)
+
+    # `memory: False` stops here: the model call above still happened and is
+    # still traced, which is what an optimisation run needs to score, but
+    # nothing it decided is kept. So the next turn is as cold as this one.
+    if not state.get("memory", True):
+        emit({"type": "learned", "count": 0, "skipped": len(entries),
+              "entries": [], "unsaved": True})
+        return {
+            "tokens_in": result.tokens_in,
+            "tokens_out": result.tokens_out,
+            **spend(result),
+        }
+
     async with db.agent() as conn:
         written = await store.write_entries(
             conn,
             entries,
-            connection_id=state["connection_id"],
             turn_id=state["turn_id"],
         )
 
@@ -825,7 +836,6 @@ async def answer(state: TurnState) -> TurnState:
             await store.bump_hits(
                 conn,
                 state.get("used_ids") or [],
-                connection_id=state["connection_id"],
                 turn_id=state["turn_id"],
             )
         await store.finish_turn(
@@ -891,7 +901,7 @@ def route_after_execute(state: TurnState) -> str:
     return "extract"
 
 
-async def stream_turn(compiled, session_id: str, question: str, connection_id: str):
+async def stream_turn(compiled, session_id: str, question: str, *, memory: bool = True):
     """Drive one turn, yielding UI events. Never raises — a model timeout is one
     failed turn, not a traceback and a turn row left open.
 
@@ -899,14 +909,14 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
     generator on client disconnect, so the span has to close on `aclose()` too.
     """
     with tracing.turn(
-        session_id=session_id, question=question, connection_id=connection_id
+        session_id=session_id, question=question
     ) as trace:
         try:
             async for mode, chunk in compiled.astream(
                 {
                     "session_id": session_id,
                     "question": question,
-                    "connection_id": connection_id,
+                    "memory": memory,
                     "trace_id": trace.trace_id or "",
                 },
                 stream_mode=["updates", "custom"],
@@ -935,7 +945,6 @@ async def stream_turn(compiled, session_id: str, question: str, connection_id: s
                         conn,
                         session_id,
                         f"failed — {message}",
-                        connection_id=connection_id,
                     )
             except Exception:  # the turn is already lost; don't lose the event too
                 pass

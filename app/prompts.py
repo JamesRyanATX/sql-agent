@@ -4,9 +4,10 @@ Only prose that is a function of nothing — not the question, not the cache, no
 the dialect. Anything composed per turn stays in `graph.py`, as do the JSON
 schemas, which are wire contracts rather than prose.
 
-Blocks resolve **once per process**: `graph.plan` puts its system block behind an
-Anthropic cache breakpoint promising it varies with `connection_id` alone, so a
-prompt changing mid-process would show up only as T2 costing more.
+Blocks resolve **once per process**, and `graph.plan` puts its system block
+behind a prompt-cache breakpoint. So a prompt file edited while the server is up
+does not take effect, and editing one in a way that broke the cache would show
+up only as warm turns costing more.
 
 Imports stdlib and `app.settings` only, so `tools/gepa/` can read a seed candidate
 without pulling in langgraph and sqlalchemy.

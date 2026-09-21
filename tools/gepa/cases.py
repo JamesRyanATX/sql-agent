@@ -22,10 +22,13 @@ from typing import Any, Iterator
 from app import graph
 
 # Bumped by hand when `graph.extract_message` or this dataclass changes shape,
-# with a comment saying what moved. `optimize` refuses a stale corpus: tuning a
-# prompt against a message the product no longer sends is a result that
-# reproduces perfectly and means nothing.
-FORMAT_VERSION = 2
+# with a line saying what moved. 3 dropped `connection_id`: there is one memory
+# now, so a case cannot be about one database rather than another.
+#
+# `optimize` refuses a stale corpus. Tuning a prompt against a message the
+# product no longer sends is a result that reproduces perfectly and means
+# nothing.
+FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,6 @@ class ExtractCase:
     # apart without a second type or a flag.
     obs_id: str | None = None
     trace_id: str | None = None
-    connection_id: str | None = None
     # The 8-char fingerprint of the `extract` prompt that produced this case.
     # Once a candidate ships, new traces come from the thing being optimised, and
     # without this a second round trains on the first round's output.

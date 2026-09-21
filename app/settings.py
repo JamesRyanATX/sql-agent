@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     # both connections end up back on one server.
     agent_database_url: str = "postgresql://agent:agent@localhost:5433/agent"
 
-    # The address of the `default` registry row, the only one the environment
-    # owns. Every other target comes out of the `connection` table.
+    # The database the agent answers questions about. Postgres, MySQL or SQLite;
+    # a bare scheme is mapped onto an installed driver by `db.target_url`.
     target_database_url: str = "postgresql://reader:reader@localhost:5432/business"
 
     # The suite's superuser handle, and nothing in app/ reads it. It creates and
@@ -28,10 +28,6 @@ class Settings(BaseSettings):
     # Everything under /v1 requires this token. Empty disables enforcement and
     # the server warns at startup.
     api_token: str = ""
-
-    # A urlsafe-base64 32-byte Fernet key sealing registered warehouse
-    # passwords. Empty means plaintext at rest, and a startup warning.
-    connection_secret: str = ""
 
     # --- model credentials --------------------------------------------------
     # Which model, at what effort, is config/config.yaml. Only the keys are here.

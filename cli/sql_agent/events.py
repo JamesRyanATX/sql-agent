@@ -96,8 +96,13 @@ def _verbose(ev: dict[str, Any], kind: str | None) -> None:
 
 
 def _learned(ev: dict[str, Any]) -> None:
-    """Three shapes, and only one of them carries entries."""
-    if ev.get("cached"):
+    """Four shapes, and only one of them carries entries."""
+    if ev.get("unsaved"):
+        click.secho(
+            f"learned: {ev['skipped']} entries, saved none — asked with --no-memory",
+            dim=True,
+        )
+    elif ev.get("cached"):
         click.secho("learned: nothing — the cache already covered it", dim=True)
     elif failed := ev.get("failed"):
         click.secho(f"learned: extraction failed — {failed}", fg="yellow")

@@ -96,7 +96,6 @@ def say(message: str = "", **kwargs) -> None:
     help="continue the last run: its corpus and its GEPA state, no harvest",
 )
 @click.option("--probe-only", is_flag=True, help="check the invariants and stop")
-@click.option("-c", "--conn", default="default", help="which connection to harvest")
 @click.option("--days", default=30, show_default=True, help="how far back to harvest")
 def cli(
     node: str,
@@ -106,7 +105,6 @@ def cli(
     seed: int,
     resume: bool,
     probe_only: bool,
-    conn: str,
     days: int,
 ) -> None:
     """GEPA over one node's prompt. The new prose goes to stdout.
@@ -128,7 +126,7 @@ def cli(
         raise SystemExit(1 if _report(outcomes, _seed_label(node)) else 0)
 
     _fresh_run_dir(node, resume)
-    cases = _corpus(node, conn=conn, days=days, resume=resume, verbose=verbose)
+    cases = _corpus(node, days=days, resume=resume, verbose=verbose)
     trainset, valset = _split(cases, val_fraction, seed)
     say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
 
@@ -233,7 +231,7 @@ def _fresh_run_dir(node: str, resume: bool) -> None:
 
 
 def _corpus(
-    node: str, *, conn: str, days: int, resume: bool, verbose: bool
+    node: str, *, days: int, resume: bool, verbose: bool
 ) -> list[ExtractCase]:
     """Harvested every run, so a search always scores the prompt against what
     the agent has actually been doing. Only `--resume` reuses what is on disk:
@@ -255,7 +253,7 @@ def _corpus(
             "run some turns, then try again."
         )
 
-    harvested = extract_cases(connection_id=conn, days=days)
+    harvested = extract_cases(days=days)
     if verbose:
         say(harvested.report())
     else:
@@ -263,8 +261,8 @@ def _corpus(
             f"recorded {node} calls (-v for what was dropped)")
     if not harvested.cases:
         raise click.ClickException(
-            f"no cases — has connection {conn!r} run any turns since tracing "
-            "was switched on?"
+            "no cases — has the agent answered any questions since tracing was "
+            "switched on?"
         )
 
     write_jsonl(path, harvested.cases)

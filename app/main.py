@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app import config as config_module
-from app import db, prompts, store, tracing
+from app import db, prompts, tracing
 from app.api import router as v1
 from app.config import config
 from app.graph import build_graph
@@ -67,16 +67,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # this process only, which is why the clients go through HTTP.
     app.state.graph = build_graph(checkpointer)
 
-    # Best-effort: on a fresh clone `make up` runs before `make migrate` has
-    # created the table.
-    try:
-        await db.ensure_default_connection()
-    except Exception as e:
-        log.warning("could not resolve the 'default' connection (%s) — run 'make migrate'", type(e).__name__)
-
     if not settings().api_token:
-        # An unauthenticated DELETE on a connection's cache wipes everything the
-        # agent has learned about it.
+        # An unauthenticated DELETE on the cache wipes everything the agent has
+        # learned.
         log.warning("API_TOKEN is unset — /v1 is open and unauthenticated")
 
     retired = sorted(RETIRED & os.environ.keys())
@@ -87,12 +80,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "count of milliseconds.",
             ", ".join(retired),
             Path(settings().config_dir) / "config.yaml",
-        )
-
-    if not settings().connection_secret:
-        log.warning(
-            "CONNECTION_SECRET is unset — registered warehouse passwords are "
-            "stored in plaintext on agent-db"
         )
 
     if tracing.enabled():
@@ -125,11 +112,9 @@ app.include_router(v1)
 async def health() -> dict[str, str | int]:
     """Unversioned and unauthenticated, so a load balancer can reach it.
 
-    Checks the agent's own database and not the registered targets: one
-    warehouse being down does not stop this process serving every other one.
-    Per-target reachability is POST /v1/connections/{id}/test.
+    Checks the agent's own database and not the one it queries: a warehouse
+    being down is a question `POST /v1/test` answers, with the reason.
     """
     async with db.agent() as conn:
         await (await conn.execute("SELECT 1 AS ok")).fetchone()
-        registered = len(await store.list_connections(conn))
-    return {"status": "ok", "agent": "ok", "connections": registered}
+    return {"status": "ok", "agent": "ok"}

@@ -16,13 +16,9 @@ from psycopg import AsyncConnection
 
 from app import api, store
 from app.settings import settings
-from tests.conftest import DEFAULT_CONNECTION as CID
 from tests.conftest import DEMO
-from tests.conftest import OTHER_CONNECTION as OTHER
 
-# Every route about learned state hangs off the connection it is about, so the
-# unscoped path does not exist to be reached by accident.
-CACHE = f"/v1/connections/{CID}/cache"
+CACHE = "/v1/cache"
 
 
 PROBE = "api_probe"
@@ -41,14 +37,13 @@ async def clean(
     """An empty cache each side. The graph reads the cache in full, so a leftover
     entry from one test is an input to the next.
 
-    The turn log too, since the feedback tests below write turns: the chart is
-    "every turn this connection took", so a leftover row is an extra line in
-    somebody else's assertion about what the demo prints.
+    The turn log too, since the feedback tests below write turns: a leftover row
+    is an extra line in somebody else's assertion about what the demo prints.
     """
     await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
     yield
     await agent_conn.execute("TRUNCATE cache_entry RESTART IDENTITY CASCADE")
-    await agent_conn.execute("DELETE FROM turn WHERE connection_id = %s", (CID,))
+    await agent_conn.execute("DELETE FROM turn")
     # The probe table is on the demo server — that is where the schemas cache
     # entries describe actually live.
     await target_conn.execute(f"DROP TABLE IF EXISTS {PROBE}")
@@ -73,7 +68,6 @@ async def seed_entries(conn: AsyncConnection) -> None:
                 tables=["orders"],
             ),
         ],
-        connection_id=CID,
     )
 
 
@@ -103,7 +97,6 @@ async def test_v1_rejects_anything_but_the_token(client: AsyncClient, monkeypatc
     monkeypatch.setenv("API_TOKEN", "s3cret")
     settings.cache_clear()
     try:
-        # Scoped and unscoped alike: the dependency is on the router.
         for path in (CACHE, "/v1/config"):
             resp = await client.get(path, headers=header)
             assert resp.status_code == 401, path
@@ -219,7 +212,7 @@ async def test_the_listing_is_ordered_by_hits_like_load_cache(client: AsyncClien
     is for."""
     await seed_entries(conn)
     cur = await conn.execute("SELECT id FROM cache_entry WHERE name = 'orders.created'")
-    await store.bump_hits(conn, [(await cur.fetchone())["id"]], connection_id=CID)
+    await store.bump_hits(conn, [(await cur.fetchone())["id"]])
 
     body = (await client.get(CACHE)).json()
     assert [e["name"] for e in body["entries"]] == ["orders.created", "active customer"]
@@ -248,7 +241,6 @@ async def test_tombstones_are_listed_and_disabled_entries_are_only_counted(
                 disabled=True,
             ),
         ],
-        connection_id=CID,
     )
     body = (await client.get(CACHE)).json()
 
@@ -284,7 +276,7 @@ async def test_a_renamed_column_marks_its_entry_stale(
     # Fingerprinted as the reader, on SQLAlchemy — which is what `extract`
     # does. `target_conn` is the owner, and only ever runs DDL here.
     await store.fingerprint_entries(reader_conn, [entry])
-    await store.write_entries(conn, [entry], connection_id=CID)
+    await store.write_entries(conn, [entry])
 
     body = (await client.get(CACHE)).json()
     assert body["entries"][0]["stale"] is False
@@ -313,7 +305,7 @@ async def test_delete_wipes_learned_state_and_reports_what_it_took(
     client: AsyncClient, conn
 ):
     await seed_entries(conn)
-    await store.start_turn(conn, connection_id=CID,
+    await store.start_turn(conn,
                           session_id="11111111-1111-1111-1111-111111111111",
                            question="how many customers do we have?")
 
@@ -359,10 +351,9 @@ def scores(monkeypatch):
     return recorded
 
 
-async def a_turn(conn: AsyncConnection, *, connection_id=CID, trace_id=None) -> int:
+async def a_turn(conn: AsyncConnection, *, trace_id=None) -> int:
     turn_id = await store.start_turn(
         conn,
-        connection_id=connection_id,
         session_id=uuid4(),
         question="how many customers do we have?",
     )
@@ -370,8 +361,8 @@ async def a_turn(conn: AsyncConnection, *, connection_id=CID, trace_id=None) -> 
     return turn_id
 
 
-def feedback(turn_id: int, cid: str = CID) -> str:
-    return f"/v1/connections/{cid}/turns/{turn_id}/feedback"
+def feedback(turn_id: int) -> str:
+    return f"/v1/turns/{turn_id}/feedback"
 
 
 async def test_a_wrong_answer_files_the_prose_with_the_verdict(
@@ -434,20 +425,6 @@ async def test_tracing_off_now_is_the_same_answer(client: AsyncClient, conn, mon
     resp = await client.post(feedback(turn_id), json={"correct": True})
 
     assert resp.status_code == 409
-
-
-async def test_a_verdict_cannot_reach_another_connections_turn(
-    client: AsyncClient, conn, scores
-):
-    """Turn ids are global and warehouses are not. Routed through `other`, a
-    turn belonging to `default` does not exist."""
-    turn_id = await a_turn(conn, trace_id="b" * 32)
-
-    resp = await client.post(feedback(turn_id, OTHER), json={"correct": True})
-
-    assert resp.status_code == 404
-    assert str(turn_id) in resp.json()["detail"]
-    assert scores == []
 
 
 async def test_an_unknown_turn_is_a_404(client: AsyncClient, scores):

@@ -9,15 +9,14 @@ a whole turn can see it.
 That makes this the expensive unit, ~11.5k tokens a rollout, and everything here
 exists to make sure the tokens buy a measurement rather than a confound:
 
-**Cold every rollout.** The cache is cleared first, so no rollout is answering
-from what the last one learned. Tool descriptions only matter on the cold path —
-a warm turn never calls a tool — so a shared cache would silently make half the
-candidates unmeasurable.
+**Cold every time, and nothing kept.** The question is asked with memory off:
+the turn ignores what the agent has learned and saves nothing it learns. Tool
+descriptions only matter on the cold path — a warm turn never calls a tool — so
+a candidate measured against a warm cache is not measured at all.
 
-**One scratch connection per concurrent rollout.** Learned state is keyed by
-connection id, so two rollouts sharing one would share a cache and clear it
-under each other. `default` is never used: it is the demo's warehouse, and its
-turn log is a chart somebody presents.
+Nothing is *cleared* to achieve that, which is what makes it safe. Your memory
+is as it was when the run finishes, and two questions asked at once cannot wipe
+each other halfway through.
 
 **The graph is driven directly, not through `stream_turn`.** That wrapper opens
 a trace span named `turn`, which is the name a later harvest filters on. A
@@ -30,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from app import db, graph, overrides, store
+from app import graph, overrides
 
 
 @dataclass
@@ -52,7 +51,6 @@ class TurnReplayed:
     """
 
     question: str
-    connection_id: str
     answer: str = ""
     sql: str = ""
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -79,10 +77,7 @@ class TurnReplayed:
 
 
 async def replay_turn(
-    question: str,
-    *,
-    connection_id: str,
-    candidate: overrides.Overrides,
+    question: str, *, candidate: overrides.Overrides
 ) -> TurnReplayed:
     """One cold turn, under this candidate's prompts, tools and efforts.
 
@@ -92,30 +87,29 @@ async def replay_turn(
     hop into the optimiser's event-loop thread. Setting it here is also what
     lets rollouts run in parallel without reading each other's candidate.
     """
-    replayed = TurnReplayed(question=question, connection_id=connection_id)
+    replayed = TurnReplayed(question=question)
     try:
-        async with db.agent() as conn:
-            await store.reset_learned(conn, connection_id=connection_id)
-
         with overrides.using(candidate):
-            await _drive(question, connection_id, replayed)
+            await _drive(question, replayed)
     except Exception as e:
         replayed.error = f"{type(e).__name__}: {e}"
     return replayed
 
 
-async def _drive(question: str, cid: str, out: TurnReplayed) -> None:
+async def _drive(question: str, out: TurnReplayed) -> None:
     """Run the graph and fold its events into the record.
 
-    No checkpointer: a rollout is one turn and is never resumed, and the
-    checkpoint rows would be state to clean up between rollouts. `custom` events
-    only — the same stream the CLI renders, so what is measured is what a user
-    would have seen.
+    No checkpointer: one turn, never resumed, and the checkpoint rows would be
+    state to clean up afterwards. `custom` events only — the same stream the CLI
+    renders, so what is measured is what a user would have seen.
+
+    `memory: False` is the whole point: the turn neither reads the cache nor
+    saves to it, so it behaves like a first-ever question every time.
     """
     compiled = graph.build_graph()
     session = str(uuid4())
     async for mode, chunk in compiled.astream(
-        {"session_id": session, "question": question, "connection_id": cid},
+        {"session_id": session, "question": question, "memory": False},
         stream_mode=["custom"],
         config={"configurable": {"thread_id": session}},
     ):
@@ -152,30 +146,3 @@ def _fold(event: dict[str, Any], out: TurnReplayed) -> None:
         out.explored = bool(event.get("explored"))
         out.tokens_in = int(event.get("tokens_in", 0))
         out.tokens_out = int(event.get("tokens_out", 0))
-
-
-# ------------------------------------------------------------ scratch warehouses
-
-
-def scratch_id(slot: int) -> str:
-    """The connection id for one rollout slot. `gepa-0`, `gepa-1`, …"""
-    return f"gepa-{slot}"
-
-
-async def ensure_scratch(slot: int, *, url: str) -> str:
-    """Register the scratch connection for a slot, if it is not already there.
-
-    Points at the same database the demo connection does, and carries its own
-    address (`origin="api"`) rather than reading the environment, so it survives
-    a `TARGET_DATABASE_URL` that changes mid-run. Its cache starts empty because
-    learned state is keyed by connection id — which is most of why a rollout
-    gets a scratch id at all rather than borrowing `default` and tidying up.
-    """
-    cid = scratch_id(slot)
-    async with db.agent() as conn:
-        if await store.get_connection(conn, cid) is not None:
-            return cid
-        await store.create_connection(
-            conn, store.connection_from_url(url, id=cid, origin="api")
-        )
-    return cid

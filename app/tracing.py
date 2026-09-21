@@ -139,7 +139,7 @@ def _serialisable(obj: Any) -> Any:
 
 
 @contextmanager
-def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]:
+def turn(*, session_id: str, question: str) -> Iterator[Any]:
     """One turn: the root span every generation and tool call hangs off.
 
     `.trace_id` is minted here rather than read out of the ambient context inside
@@ -161,19 +161,16 @@ def turn(*, session_id: str, question: str, connection_id: str) -> Iterator[Any]
         name="turn",
         as_type="span",
         trace_context={"trace_id": trace_id},
-        input=_serialisable({"question": question, "connection_id": connection_id}),
+        input=_serialisable({"question": question}),
         # Which prose produced this turn, so a harvest can tell a run under the
         # seed from a run under a candidate. Eight hex characters per node is
         # 124 for the whole dict, under the 200 a metadata value truncates at —
         # a longer hash would lose its tail and compare equal every time.
         metadata=_serialisable({"prompts": prompts.fingerprint()}),
     ) as span:
-        # The connection as a tag, so "everything this warehouse was ever asked"
-        # is filterable.
         with propagate_attributes(
             session_id=str(session_id),
             trace_name="turn",
-            tags=[f"connection:{connection_id}"],
         ):
             yield span
 
@@ -226,8 +223,8 @@ def observations(
 
     Two shapes are used. `kind="GENERATION"` with a node name is `tools/gepa/`'s
     per-node dataset of exact inputs and outputs. `name="turn", kind="SPAN"` is
-    the scope: the turn span's `input.connection_id` says which warehouse a
-    recorded call was about, which cannot come from a join to `turn.trace_id`
+    what says which prose produced a recorded call — its metadata carries the
+    prompt fingerprints, which cannot come from a join to `turn.trace_id`
     because `make reset` empties that table by design.
 
     Yields nothing when tracing is off, which is the common case.

@@ -2,9 +2,9 @@
 
 There were no tests here, which is how the first version shipped with a defect
 that only appeared in use: it joined each recorded call to `turn.trace_id` to
-find out which warehouse it was about, and `make reset` empties that table by
-design. A reset turned every earlier recording into debris — data intact,
-ownership unprovable.
+find out which prompt had produced it, and `make reset` empties that table by
+design. A reset turned every earlier recording into debris, data intact and
+provenance gone.
 
 So the first test below is the regression: a case whose turn row is gone must
 still harvest. The rest are the drop reasons, each asserted to fire *and* not to
@@ -51,15 +51,14 @@ def generation(trace_id: str, *, name: str = "extract", content: str | None = No
     }
 
 
-def turn_span(trace_id: str, *, connection_id: str = "default",
-              extract_fp: str = "abc12345") -> dict:
+def turn_span(trace_id: str, *, extract_fp: str = "abc12345") -> dict:
     return {
         "id": f"span-{trace_id}",
         "trace_id": trace_id,
         "name": "turn",
         "start_time": None,
         "level": None,
-        "input": {"question": "q", "connection_id": connection_id},
+        "input": {"question": "q"},
         "output": None,
         "metadata": {"prompts": {"extract": extract_fp, "plan": "deadbeef"}},
         "usage": {},
@@ -88,39 +87,45 @@ def test_a_case_survives_the_loss_of_its_turn_row(recorded):
     recorded["extract"] = [generation("t1")]
     recorded["turn"] = [turn_span("t1")]
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
     assert len(result.cases) == 1
     assert result.cases[0].trace_id == "t1"
-    assert result.cases[0].connection_id == "default"
+    assert result.cases[0].prompt_fp == "abc12345"
 
 
-def test_the_scope_comes_from_the_turn_span(recorded):
-    """One warehouse's recordings are not evidence about another's, and the
-    turn span's own input is the only surviving record of which is which."""
-    recorded["extract"] = [generation("mine", obs_id="a"), generation("theirs", obs_id="b")]
+def test_each_case_carries_its_own_turn_spans_fingerprint(recorded):
+    """Two calls recorded under two different `extract` prompts. The span is
+    per-turn, so the fingerprints must not be shared between them."""
+    recorded["extract"] = [
+        generation("first", obs_id="a"),
+        generation("second", obs_id="b", content=message("and the west region?")),
+    ]
     recorded["turn"] = [
-        turn_span("mine", connection_id="default"),
-        turn_span("theirs", connection_id="warehouse-2"),
+        turn_span("first", extract_fp="1111aaaa"),
+        turn_span("second", extract_fp="2222bbbb"),
     ]
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
-    assert [c.trace_id for c in result.cases] == ["mine"]
-    assert result.other_connection == 1
+    assert {c.trace_id: c.prompt_fp for c in result.cases} == {
+        "first": "1111aaaa",
+        "second": "2222bbbb",
+    }
 
 
 def test_a_call_with_no_turn_span_is_dropped_rather_than_assumed(recorded):
-    """Unscoped is not the same as ours. Guessing here is how one customer's
-    recordings tune the prompt used on another's warehouse."""
+    """No span means no fingerprint, and no fingerprint means round two cannot
+    tell its own output from the prose it started with. Dropping it is how the
+    corpus stays evidence about the prompt a human actually ran."""
     recorded["extract"] = [generation("orphan")]
     recorded["turn"] = []
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
     assert result.cases == []
     assert result.unscoped == 1
-    assert "which warehouse" in result.report()
+    assert "which prose produced it" in result.report()
 
 
 def test_the_prompt_fingerprint_rides_along(recorded):
@@ -128,7 +133,7 @@ def test_the_prompt_fingerprint_rides_along(recorded):
     recorded["extract"] = [generation("t1")]
     recorded["turn"] = [turn_span("t1", extract_fp="9f9f9f9f")]
 
-    assert harvest.extract_cases(connection_id="default").cases[0].prompt_fp == "9f9f9f9f"
+    assert harvest.extract_cases().cases[0].prompt_fp == "9f9f9f9f"
 
 
 def test_what_the_recorded_call_cost_rides_along_too(recorded):
@@ -139,7 +144,7 @@ def test_what_the_recorded_call_cost_rides_along_too(recorded):
     recorded["extract"] = [generation("t1", tokens_out=1387)]
     recorded["turn"] = [turn_span("t1")]
 
-    assert harvest.extract_cases(connection_id="default").cases[0].baseline_tokens_out == 1387
+    assert harvest.extract_cases().cases[0].baseline_tokens_out == 1387
 
 
 def test_a_call_langfuse_has_no_usage_for_still_harvests(recorded):
@@ -149,7 +154,7 @@ def test_a_call_langfuse_has_no_usage_for_still_harvests(recorded):
     recorded["extract"] = [missing]
     recorded["turn"] = [turn_span("t1")]
 
-    assert harvest.extract_cases(connection_id="default").cases[0].baseline_tokens_out == 0
+    assert harvest.extract_cases().cases[0].baseline_tokens_out == 0
 
 
 # ------------------------------------------------------------ the drop reasons
@@ -159,7 +164,7 @@ def test_the_harnesss_own_calls_never_become_corpus(recorded):
     recorded["extract"] = [generation("t1", name=REPLAY_NODE)]
     recorded["turn"] = [turn_span("t1")]
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
     assert result.cases == []
     assert result.contaminated == 1
@@ -171,7 +176,7 @@ def test_a_message_whose_sql_will_not_parse_is_dropped_and_counted(recorded):
     recorded["extract"] = [generation("t1", content="Question: q\n\nno anchor here")]
     recorded["turn"] = [turn_span("t1")]
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
     assert result.cases == []
     assert result.no_sql == 1
@@ -184,7 +189,7 @@ def test_an_input_with_no_user_turn_is_dropped(recorded):
     recorded["extract"] = [bad]
     recorded["turn"] = [turn_span("t1")]
 
-    assert harvest.extract_cases(connection_id="default").no_message == 1
+    assert harvest.extract_cases().no_message == 1
 
 
 def test_the_same_question_twice_is_kept_once(recorded):
@@ -193,7 +198,7 @@ def test_the_same_question_twice_is_kept_once(recorded):
     recorded["extract"] = [generation("t1", obs_id="a"), generation("t2", obs_id="b")]
     recorded["turn"] = [turn_span("t1"), turn_span("t2")]
 
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
 
     assert len(result.cases) == 1
     assert result.duplicate == 1
@@ -207,7 +212,7 @@ def test_different_questions_are_both_kept(recorded):
     ]
     recorded["turn"] = [turn_span("t1"), turn_span("t2")]
 
-    assert len(harvest.extract_cases(connection_id="default").cases) == 2
+    assert len(harvest.extract_cases().cases) == 2
 
 
 # ------------------------------------------------------------------ the report
@@ -217,19 +222,19 @@ def test_the_report_accounts_for_every_generation_it_saw(recorded):
     """Kept plus dropped must equal seen, or the numbers are decoration."""
     recorded["extract"] = [
         generation("keep", obs_id="a"),
-        generation("other", obs_id="b"),
+        generation("same-again", obs_id="b"),
         generation("orphan", obs_id="c"),
-        generation("mine", obs_id="d", name=REPLAY_NODE),
+        generation("harness", obs_id="d", name=REPLAY_NODE),
     ]
     recorded["turn"] = [
         turn_span("keep"),
-        turn_span("other", connection_id="warehouse-2"),
-        turn_span("mine"),
+        turn_span("same-again"),
+        turn_span("harness"),
     ]
 
-    r = harvest.extract_cases(connection_id="default")
+    r = harvest.extract_cases()
     dropped = (r.no_message + r.no_sql + r.unscoped
-               + r.other_connection + r.contaminated + r.duplicate)
+               + r.contaminated + r.duplicate)
 
     assert r.seen == 4
     assert len(r.cases) + dropped == r.seen
@@ -239,7 +244,7 @@ def test_a_clean_harvest_says_nothing_about_drops(recorded):
     recorded["extract"] = [generation("t1")]
     recorded["turn"] = [turn_span("t1")]
 
-    assert "dropped" not in harvest.extract_cases(connection_id="default").report()
+    assert "dropped" not in harvest.extract_cases().report()
 
 
 def test_the_label_is_readable_and_unique(recorded):
@@ -249,7 +254,7 @@ def test_the_label_is_readable_and_unique(recorded):
     ]
     recorded["turn"] = [turn_span("aaaaaaaabbbb"), turn_span("ccccccccdddd")]
 
-    names = [c.name for c in harvest.extract_cases(connection_id="default").cases]
+    names = [c.name for c in harvest.extract_cases().cases]
 
     assert names == ["aaaaaaaa-how-many-customers-do-we-have", "cccccccc-revenue-by-region"]
 
@@ -257,5 +262,5 @@ def test_the_label_is_readable_and_unique(recorded):
 def test_tracing_off_yields_an_empty_harvest_rather_than_an_error(monkeypatch):
     """Off has to stay free, here as everywhere else."""
     monkeypatch.setattr(tracing, "client", lambda: None)
-    result = harvest.extract_cases(connection_id="default")
+    result = harvest.extract_cases()
     assert result.cases == [] and result.seen == 0

@@ -21,7 +21,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from app import db, dialects
+from app import api, db, dialects
+from sqlalchemy.engine import make_url
 
 WRITES = {
     # `TRUNCATE` is deliberately absent: SQLite has none (it optimises
@@ -36,12 +37,13 @@ WRITES = {
 }
 
 
-def test_every_supported_driver_has_a_capability_record():
-    """A missing record must fail at registration, not on the first turn inside
-    an SSE stream where it reads as the agent breaking."""
-    from app import store
+def test_every_driver_the_url_may_name_has_a_capability_record():
+    """A missing record must fail at start-up, not on the first turn inside an
+    SSE stream where it reads as the agent breaking. TARGET_DATABASE_URL may
+    name any of these, so all of them need one."""
+    from app import db
 
-    assert {d.split("+")[0] for d in store.DRIVERS} == set(dialects.CAPABILITIES)
+    assert {d.split("+")[0] for d in db._DRIVERS.values()} == set(dialects.CAPABILITIES)
     with pytest.raises(KeyError, match="postgresql"):
         dialects.for_dialect("oracle")
 
@@ -53,7 +55,7 @@ async def test_the_claimed_read_only_state_is_actually_set(portable):
     it there raises nothing and simply never fires."""
     cap = dialects.for_dialect(portable.dialect)
     statement, expected = cap.probe
-    async with db.target(portable.cid) as conn:
+    async with portable.guarded.connect() as conn:
         got = (await conn.exec_driver_sql(statement)).scalar_one()
     assert str(got) == expected, (
         f"{portable.dialect} claims read-only sessions but reports {got!r} — "
@@ -68,7 +70,7 @@ async def test_the_claimed_write_block_is_real(portable, name):
     cap = dialects.for_dialect(portable.dialect)
     expected = cap.blocks_dml if kind == "dml" else cap.blocks_ddl
 
-    async with db.target(portable.cid) as conn:
+    async with portable.guarded.connect() as conn:
         try:
             await conn.exec_driver_sql(statement)
             refused = False
@@ -87,13 +89,13 @@ async def test_the_data_survives_whatever_the_tier(portable):
     Where a tier is weaker the *disclosure* is the feature; where it is not, the
     row count is.
     """
-    async with db.target(portable.cid) as conn:
+    async with portable.guarded.connect() as conn:
         for _, statement in WRITES.values():
             try:
                 await conn.exec_driver_sql(statement)
             except Exception:
                 pass
-    async with portable.engine.connect() as conn:
+    async with portable.guarded.connect() as conn:
         n = (await conn.execute(text("SELECT count(*) FROM ledger"))).scalar_one()
     cap = dialects.for_dialect(portable.dialect)
     if cap.blocks_dml:
@@ -106,7 +108,7 @@ async def test_generated_sql_runs_under_the_transaction_guard_too(portable):
     session guard is doing the work — that emptiness is the model working, not
     a gap, and this is what says so."""
     cap = dialects.for_dialect(portable.dialect)
-    async with db.target_readonly(portable.cid) as conn:
+    async with db.readonly(portable.guarded) as conn:
         assert (await conn.exec_driver_sql("SELECT count(*) FROM ledger")).scalar_one() == 5
         if cap.blocks_dml:
             with pytest.raises(Exception) as e:
@@ -116,8 +118,8 @@ async def test_generated_sql_runs_under_the_transaction_guard_too(portable):
             )
 
 
-async def test_the_probe_reports_the_capability_truthfully(client, portable):
-    body = (await client.post(f"/v1/connections/{portable.cid}/test")).json()
+async def test_the_probe_reports_the_capability_truthfully(portable):
+    body = (await api._probe(make_url(portable.url))).model_dump()
     cap = dialects.for_dialect(portable.dialect)
     assert body["ok"] is True, body
     assert body["driver"] == f"{portable.dialect}+{ {'postgresql':'psycopg','sqlite':'aiosqlite','mysql':'asyncmy'}[portable.dialect] }"
@@ -126,12 +128,12 @@ async def test_the_probe_reports_the_capability_truthfully(client, portable):
     assert body["default_schema"]
 
 
-async def test_a_dialect_that_cannot_enforce_says_so(client, portable):
+async def test_a_dialect_that_cannot_enforce_says_so(portable):
     """If enforcement is best-effort, the warning *is* the feature — and an
     untested warning is a feature that gets deleted as noise six months from
     now. An undisclosed gap and an undisclosed hole are the same bug."""
     cap = dialects.for_dialect(portable.dialect)
-    body = (await client.post(f"/v1/connections/{portable.cid}/test")).json()
+    body = (await api._probe(make_url(portable.url))).model_dump()
     for gap in cap.gaps:
         assert any(gap in w for w in body["warnings"]), (
             f"{portable.dialect} declares the gap {gap!r} and never mentions it: "
@@ -141,13 +143,13 @@ async def test_a_dialect_that_cannot_enforce_says_so(client, portable):
         assert cap.gaps == (), "an enforced tier has nothing to warn about"
 
 
-async def test_sqlite_reports_no_credentials_rather_than_read_only(client, portable):
+async def test_sqlite_reports_no_credentials_rather_than_read_only(portable):
     """`read_only: true` on SQLite would be a lie a user acts on — there are no
     credentials to judge, so `None` is the honest answer and it finally means
     something."""
     if portable.dialect != "sqlite":
         pytest.skip("about SQLite's absence of users, not about the others")
-    body = (await client.post(f"/v1/connections/{portable.cid}/test")).json()
+    body = (await api._probe(make_url(portable.url))).model_dump()
     assert body["username"] is None
     assert not dialects.for_dialect("sqlite").has_auth
 

@@ -9,10 +9,10 @@ Now it is two servers and a role that holds SELECT. These tests are what say so
 — in particular `test_the_agent_cannot_see_its_own_memory`, which replaces the
 version that only proved a Python set was doing its job.
 
-**One of those halves came back.** With a registered connection the credentials
-are whatever the user handed us, so "the role holds SELECT" is a hope, not a
+**One of those halves came back.** `TARGET_DATABASE_URL` holds whatever
+credentials the user put there, so "the role holds SELECT" is a hope, not a
 property. `test_a_user_supplied_dsn_still_cannot_write` is the one that says the
-guarantee moved rather than evaporated: every target pool opens its connections
+guarantee moved rather than evaporated: the target engine opens its connections
 in a read-only session, which binds any role including a superuser.
 
 Requires `make up && make migrate && make seed`.
@@ -191,15 +191,16 @@ async def test_reset_cannot_reach_the_business_data(agent_conn, target_conn):
 # ------------------------------------------------ a target we did not choose
 
 
-async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
-    """Register credentials that genuinely *can* write, and watch them not.
+async def test_a_user_supplied_dsn_still_cannot_write(monkeypatch, target_conn):
+    """Point `TARGET_DATABASE_URL` at credentials that genuinely *can* write,
+    and watch them not.
 
-    `demo/demo.sql` builds a SELECT-only role, so for the built-in connection
-    the session guard was a second line of defence. A registered connection has
-    no such promise behind it — the credentials are whatever the user handed us.
-    This is the test that would fail if somebody removed the `dialects.install`
-    call in app/db.py, which is otherwise five lines with nothing pointing at
-    them.
+    `demo/demo.sql` builds a SELECT-only role, so with the URL the demo ships,
+    the session guard is a second line of defence. It is the *only* line as soon
+    as somebody puts their own credentials in that variable, which is the normal
+    way to point this at a real database. This is the test that would fail if
+    somebody removed the `dialects.install` call in app/db.py, which is
+    otherwise five lines with nothing pointing at them.
 
     Postgres claims the `enforced` tier, so both halves are asserted here. What
     a weaker dialect claims, and whether it says so, is
@@ -209,36 +210,23 @@ async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
 
     from app import db, dialects
 
-    owner = make_url(
-        store.connection_from_url(settings().test_admin_url, id="_owner")
-        .url()
-        .render_as_string(hide_password=False)
-    )
-    resp = await client.post(
-        "/v1/connections",
-        params={"probe": "false"},
-        json={
-            "id": "owner",
-            "host": owner.host,
-            "port": owner.port,
-            "database": owner.database,
-            "username": owner.username,
-            "password": owner.password,
-        },
-    )
-    assert resp.status_code == 201, resp.text
-
     cap = dialects.for_dialect("postgresql")
     assert cap.tier == "enforced"
-    try:
-        # These credentials own the database. Prove it, so the assertions below
-        # are about the guard and not about a role that could never have written.
-        probe = (await client.post("/v1/connections/owner/test")).json()
-        assert probe["read_only"] is False
 
+    # `target_conn` is this same role, without the guard. It creates and drops
+    # tables all over this suite, so the assertions below are about the guard
+    # and not about a role that could never have written anyway.
+    owner = make_url(settings().test_admin_url).set(drivername="postgresql+psycopg")
+    monkeypatch.setattr(db, "target_url", lambda: owner)
+
+    # The engine is a module-level global built on first use. Swapping it by
+    # hand rather than with monkeypatch, because the one this test builds has to
+    # be disposed as well as put back.
+    saved, db._target = db._target, None
+    try:
         # The plain connection — what `explore`, `infer_tables` and `extract`
         # use, and the one with no transaction of its own to guard.
-        async with db.target("owner") as conn:
+        async with db.target() as conn:
             statement, expected = cap.probe
             assert (await conn.exec_driver_sql(statement)).scalar_one() == expected
             with pytest.raises(Exception) as e:
@@ -246,7 +234,7 @@ async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
             assert dialects.is_read_only_error(e.value)
 
         # And where the generated SQL runs.
-        async with db.target_readonly("owner") as conn:
+        async with db.target_readonly() as conn:
             with pytest.raises(Exception) as e:
                 await conn.exec_driver_sql("DELETE FROM customer")
             assert dialects.is_read_only_error(e.value)
@@ -254,11 +242,12 @@ async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
         # Nothing was deleted by any of that. On a fresh connection, not on one
         # already handed back to the pool — the previous version of this test
         # read from a closed one and worked by luck.
-        async with db.target("owner") as conn:
+        async with db.target() as conn:
             n = (
                 await conn.exec_driver_sql("SELECT count(*) FROM customer")
             ).scalar_one()
         assert n == 2000
     finally:
-        await agent_conn.execute("DELETE FROM connection WHERE id = 'owner'")
-        await db.evict("owner")
+        as_owner, db._target = db._target, saved
+        if as_owner is not None:
+            await as_owner.dispose()

@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from app import db, llm, overrides, store
-from tests.conftest import DEFAULT_CONNECTION
 from tests.test_coldpath import (  # noqa: F401 — `pool` is a fixture
     ScriptedModel,
     json_result,
@@ -23,7 +22,7 @@ from tests.test_coldpath import (  # noqa: F401 — `pool` is a fixture
     text_result,
     tool_result,
 )
-from tools.gepa.replay_turn import replay_turn, scratch_id
+from tools.gepa.replay_turn import replay_turn
 
 QUESTION = "how many customers do we have?"
 SQL = "SELECT count(*) AS n FROM customer WHERE deleted_at IS NULL"
@@ -43,7 +42,6 @@ def cold_turn() -> ScriptedModel:
 async def replay(**kw) -> object:
     return await replay_turn(
         QUESTION,
-        connection_id=DEFAULT_CONNECTION,
         candidate=kw.pop("candidate", overrides.NONE),
         **kw,
     )
@@ -175,10 +173,10 @@ async def test_the_candidates_text_is_what_ran(monkeypatch, pool):
     )
 
 
-async def test_every_rollout_starts_cold(monkeypatch, pool, agent_conn):
-    """Tool descriptions only matter on the cold path — a warm turn never calls
-    a tool. A rollout inheriting the last one's cache would be unmeasurable for
-    the very thing this exists to measure."""
+async def test_it_neither_reads_the_memory_nor_adds_to_it(monkeypatch, pool, agent_conn):
+    """The whole bargain. Tool descriptions only matter on the cold path — a
+    warm turn never calls a tool — and a run that wiped the memory to get that
+    would be a run nobody dares start."""
     await store.write_entries(
         agent_conn,
         [
@@ -189,25 +187,18 @@ async def test_every_rollout_starts_cold(monkeypatch, pool, agent_conn):
                 tables=["customer"],
             )
         ],
-        connection_id=DEFAULT_CONNECTION,
     )
     async with db.agent() as conn:
-        assert await store.load_cache(conn, connection_id=DEFAULT_CONNECTION)
+        assert await store.load_cache(conn)
 
     monkeypatch.setattr(llm, "complete", cold_turn())
     out = await replay()
 
+    # It explored, so it did not read the entry that was sitting there.
     assert out.explored is True
     async with db.agent() as conn:
-        after = await store.load_cache(conn, connection_id=DEFAULT_CONNECTION)
-    # What this turn learned, not what the last one left: `no_entries` means the
-    # scripted extract recorded nothing, so the cache is empty again.
-    assert after == []
+        after = await store.load_cache(conn)
+    # And the entry is still there, untouched: the run leaves the memory as it
+    # found it, which is what makes it safe to run against your own agent.
+    assert [e.name for e in after] == ["soft deletes"]
 
-
-def test_scratch_ids_are_one_per_slot():
-    """Two rollouts sharing a connection would share a cache and clear it under
-    each other, which is the confound the cold start exists to remove."""
-    assert scratch_id(0) == "gepa-0"
-    assert scratch_id(3) == "gepa-3"
-    assert len({scratch_id(i) for i in range(4)}) == 4

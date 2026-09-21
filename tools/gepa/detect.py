@@ -83,7 +83,7 @@ def near_collisions(
     """(new name, filed name) pairs that are variants rather than the same key.
 
     The failure this defends: "active customer count" on one turn and "active
-    customers count" on the next. The upsert keys on `(connection_id, name)`, so
+    customers count" on the next. The upsert keys on `(name)`, so
     those are two entries saying one thing, both loaded into every later prompt.
 
     An *exact* match is not a collision — reusing a name is how an entry is

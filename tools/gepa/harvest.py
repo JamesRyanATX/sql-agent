@@ -1,7 +1,7 @@
 """Turn recorded `extract` calls into a replayable corpus.
 
-**Langfuse is the record, and this reads only Langfuse.** Scope comes from the
-turn span's own `input.connection_id`, never from a join to `turn.trace_id`:
+**Langfuse is the record, and this reads only Langfuse.** Which prose produced a
+call comes from its turn span's metadata, never from a join to `turn.trace_id`:
 `make reset` empties that table by design while the trace store keeps
 everything, so the join would turn every earlier recording into debris — intact
 and unattributable.
@@ -32,7 +32,6 @@ class Harvest:
     no_message: int = 0
     no_sql: int = 0
     unscoped: int = 0
-    other_connection: int = 0
     contaminated: int = 0
     duplicate: int = 0
 
@@ -41,8 +40,7 @@ class Harvest:
         dropped = [
             ("no user message", self.no_message),
             ("SQL would not parse", self.no_sql),
-            ("no turn span, so no way to say which warehouse", self.unscoped),
-            ("another connection", self.other_connection),
+            ("no turn span, so no way to say which prose produced it", self.unscoped),
             ("written by the harness itself", self.contaminated),
             ("identical to a case already kept", self.duplicate),
         ]
@@ -52,17 +50,8 @@ class Harvest:
         return "\n".join(lines)
 
 
-def extract_cases(
-    *,
-    connection_id: str,
-    days: int = 30,
-    since: datetime | None = None,
-) -> Harvest:
-    """Every `extract` call for one connection, as replayable cases.
-
-    Scoped to one connection for the same reason `load_cache` is: a corpus
-    mixing two warehouses has scores that describe neither.
-    """
+def extract_cases(*, days: int = 30, since: datetime | None = None) -> Harvest:
+    """Every recorded `extract` call, as replayable cases."""
     since = since or datetime.now(timezone.utc) - timedelta(days=days)
     scope = turn_scope(since=since)
 
@@ -80,12 +69,9 @@ def extract_cases(
             continue
 
         trace_id = observation.get("trace_id") or ""
-        scoped = scope.get(trace_id)
-        if scoped is None:
+        prompt_fp = scope.get(trace_id)
+        if prompt_fp is None:
             harvest.unscoped += 1
-            continue
-        if scoped.connection_id != connection_id:
-            harvest.other_connection += 1
             continue
 
         message = _user_message(observation.get("input"))
@@ -113,8 +99,7 @@ def extract_cases(
                 filed=filed_from(message),
                 obs_id=observation.get("id"),
                 trace_id=trace_id,
-                connection_id=connection_id,
-                prompt_fp=scoped.prompt_fp,
+                prompt_fp=prompt_fp,
                 baseline_tokens_out=_tokens_out(observation),
             )
         )
@@ -122,24 +107,17 @@ def extract_cases(
     return harvest
 
 
-@dataclass(frozen=True)
-class Scope:
-    connection_id: str | None
-    prompt_fp: str | None
+def turn_scope(*, since: datetime | None = None) -> dict[str, str | None]:
+    """trace_id -> the fingerprint of the `extract` prose that produced it.
 
-
-def turn_scope(*, since: datetime | None = None) -> dict[str, Scope]:
-    """trace_id -> which warehouse the turn was about, and under which prose.
-
-    The turn span is the only place that says so.
+    The turn span is the only place that says so, and a call with no turn span
+    is dropped rather than guessed at: without the fingerprint a second round
+    cannot tell its own output from the prose it started with.
     """
-    scope: dict[str, Scope] = {}
+    scope: dict[str, str | None] = {}
     for span in tracing.observations(name="turn", kind="SPAN", since=since):
         prompts = (span.get("metadata") or {}).get("prompts") or {}
-        scope[span.get("trace_id") or ""] = Scope(
-            connection_id=(span.get("input") or {}).get("connection_id"),
-            prompt_fp=prompts.get("extract"),
-        )
+        scope[span.get("trace_id") or ""] = prompts.get("extract")
     return scope
 
 

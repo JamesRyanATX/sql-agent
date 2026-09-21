@@ -29,11 +29,9 @@ def spy(monkeypatch):
 
         return fake
 
-    from sql_agent import connections, main, memory, server
+    from sql_agent import main, memory, server
 
     monkeypatch.setattr(main, "_ask", record("ask"))
-    monkeypatch.setattr(connections, "_connect", record("connect"))
-    monkeypatch.setattr(connections, "_list", record("connections ls"))
     monkeypatch.setattr(memory, "_cache", record("cache"))
     monkeypatch.setattr(memory, "_turns", record("turns"))
     monkeypatch.setattr(memory, "_reset", record("reset"))
@@ -55,8 +53,8 @@ def test_a_subcommand_is_a_subcommand(spy):
 
 
 def test_a_subcommand_keeps_its_own_flags(spy):
-    assert invoke(["cache", "-c", "prod"])[0] == 0
-    assert spy == {"command": "cache", "args": ("prod", None), "kwargs": {}}
+    assert invoke(["cache", "--kind", "recipe"])[0] == 0
+    assert spy == {"command": "cache", "args": ("recipe",), "kwargs": {}}
 
 
 def test_a_quoted_question_arrives_intact(spy):
@@ -71,23 +69,24 @@ def test_an_unquoted_question_is_joined_with_spaces(spy):
 
 
 @pytest.mark.parametrize(
-    "argv", [["-c", "prod", "how many customers?"], ["how many customers?", "-c", "prod"]]
+    "argv",
+    [["-v", "how many customers?"], ["how many customers?", "-v"]],
 )
-def test_the_connection_flag_works_on_either_side_of_the_question(spy, argv):
+def test_a_flag_works_on_either_side_of_the_question(spy, argv):
     """The leading-option form is the one that would break a naive
     `args[0] not in commands` rule."""
     assert invoke(argv)[0] == 0
     assert spy["command"] == "ask"
-    assert spy["args"][:2] == ("how many customers?", "prod")
+    assert spy["args"] == ("how many customers?", True, False, False, False)
 
 
 def test_ask_is_how_you_ask_a_question_that_is_a_command(spy):
     """Same string, two meanings, and the only way to pick the other one."""
     assert invoke(["ask", "cache"])[0] == 0
-    # question, connection, verbose, as_json, no_feedback
+    # question, verbose, as_json, no_feedback, no_memory
     assert spy == {
         "command": "ask",
-        "args": ("cache", None, False, False, False),
+        "args": ("cache", False, False, False, False),
         "kwargs": {},
     }
 
@@ -107,10 +106,10 @@ def test_a_near_miss_for_a_command_is_a_typo_not_a_question(spy, typo, meant):
 
 
 def test_config_is_a_command_not_a_question(spy):
-    """Not about a database, so it takes no -c."""
+    """It reports the server's own settings, so it takes no options at all."""
     assert invoke(["config"])[0] == 0
     assert spy == {"command": "config", "args": (), "kwargs": {}}
-    assert invoke(["config", "-c", "prod"])[0] == 2
+    assert invoke(["config", "--kind", "recipe"])[0] == 2
 
 
 def test_an_unambiguous_one_word_question_is_still_asked(spy):
@@ -135,7 +134,7 @@ def test_the_groups_own_flags_still_reach_click(argv):
 def test_a_bare_invocation_prints_help():
     code, output = invoke([])
     assert code == 2
-    assert "connections" in output and "Ask a database questions" in output
+    assert "Ask a database questions" in output and "corpus" in output
 
 
 def test_an_unknown_option_is_still_an_unknown_option():
@@ -144,11 +143,10 @@ def test_an_unknown_option_is_still_an_unknown_option():
     assert "No such option" in output
 
 
-def test_the_connections_group_is_reached_not_asked(spy):
-    assert invoke(["connections", "ls"])[0] == 0
-    assert spy["command"] == "connections ls"
+def test_no_memory_is_a_flag_on_ask_and_nothing_else(spy):
+    """The optimiser's one question-shaped need. It has to reach `_ask` as a
+    value, because a flag that parsed and did nothing would still exit 0."""
+    assert invoke(["--no-memory", "how many customers?"])[0] == 0
+    assert spy["args"] == ("how many customers?", False, False, False, True)
 
-
-def test_connect_is_a_command(spy):
-    assert invoke(["connect", "warehouse"])[0] == 0
-    assert spy == {"command": "connect", "args": ("warehouse",), "kwargs": {}}
+    assert invoke(["cache", "--no-memory"])[0] == 2

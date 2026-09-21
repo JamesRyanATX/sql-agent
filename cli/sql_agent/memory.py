@@ -2,7 +2,7 @@
 
 `cache` is the product — it is what the model reads on the next turn, in the
 same order, tombstones included. `turns` is what each turn cost, which is the
-demo. `reset` throws both away for one connection.
+demo. `reset` throws both away.
 """
 
 from __future__ import annotations
@@ -13,21 +13,19 @@ from sql_agent import config, http, render
 
 
 @click.command()
-@config.option
 @click.option(
     "--kind",
     type=click.Choice(["schema_fact", "recipe"]),
     help="Filter the listing. Never changes what the model would see.",
 )
-def cache(connection: str | None, kind: str | None) -> None:
+def cache(kind: str | None) -> None:
     """What the agent has learned about this database."""
-    http.run(_cache(connection, kind))
+    http.run(_cache(kind))
 
 
-async def _cache(connection: str | None, kind: str | None) -> None:
-    cid = config.connection(connection)
+async def _cache(kind: str | None) -> None:
     body = await http.get(
-        f"/connections/{cid}/cache", params={"kind": kind} if kind else None
+        "/cache", params={"kind": kind} if kind else None
     )
     summary, entries = body["summary"], body["entries"]
 
@@ -66,21 +64,19 @@ async def _cache(connection: str | None, kind: str | None) -> None:
 
 
 @click.command()
-@config.option
 @click.option("-n", "--limit", type=int, default=50, show_default=True)
 @click.option(
     "--all", "show_all", is_flag=True, help="Include unfinished and failed turns."
 )
-def turns(connection: str | None, limit: int, show_all: bool) -> None:
+def turns(limit: int, show_all: bool) -> None:
     """What every turn cost. The number that should be going down."""
-    http.run(_turns(connection, limit, show_all))
+    http.run(_turns(limit, show_all))
 
 
-async def _turns(connection: str | None, limit: int, show_all: bool) -> None:
-    cid = config.connection(connection)
+async def _turns(limit: int, show_all: bool) -> None:
     rows = (
         await http.get(
-            f"/connections/{cid}/turns",
+            "/turns",
             params={"limit": limit, "finished": str(not show_all).lower()},
         )
     )["turns"]
@@ -135,29 +131,25 @@ def _total(rows: list[dict]) -> str:
 
 
 @click.command()
-@config.option
 @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation.")
-def reset(connection: str | None, yes: bool) -> None:
-    """Forget everything learned about this database.
+def reset(yes: bool) -> None:
+    """Forget everything the agent has learned.
 
-    The connection itself stays registered — this is "forget what you learned",
-    not "forget the database exists". For that, `connections rm`.
+    The database it queries is untouched — this is "forget what you learned",
+    not "forget the database". Its address is in the environment and nothing
+    here can reach it.
     """
-    cid = config.connection(connection)
     if not yes:
-        # A wrong -c can select the name this is scoped to, which is worth one
-        # keystroke to guard.
         click.confirm(
-            f"wipe everything learned about {cid!r} — cache, turns and checkpoints?",
-            abort=True,
+            "wipe everything learned — cache, turns and checkpoints?", abort=True
         )
-    http.run(_reset(cid))
+    http.run(_reset())
 
 
-async def _reset(cid: str) -> None:
-    wiped = (await http.delete(f"/connections/{cid}/cache"))["wiped"]
+async def _reset() -> None:
+    wiped = (await http.delete("/cache"))["wiped"]
     if not any(wiped.values()):
-        click.echo(f"nothing to wipe — {cid!r} had learned nothing")
+        click.echo("nothing to wipe — the agent had learned nothing")
         return
     for table, rows in sorted(wiped.items()):
         if rows:

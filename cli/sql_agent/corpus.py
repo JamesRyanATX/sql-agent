@@ -4,14 +4,17 @@ The optimisation downstream needs turns with a label on them, and the only
 person who can supply one is the person who just read the answer. So this asks
 a file of questions, one turn each, and waits for you to judge each answer.
 
-**Cold every turn.** The cache is cleared before each question, so no answer
-leans on what the last one learned. That is what makes every turn a full
-exploration — a distinct `extract` call for the prompt corpus, and a token count
-that means something as a baseline. It also makes the run expensive on purpose:
-a warm corpus would be cheaper and would describe an agent nobody starts from.
+**Cold every turn, and nothing kept.** Every question is asked with
+`--no-memory`: it ignores what the agent has learned and saves nothing it
+learns. So each turn is a full exploration — a distinct `extract` call for the
+prompt corpus, and a token count that means something as a baseline — and your
+memory is exactly as it was when the run finishes. It makes the run expensive on
+purpose: a warm corpus would be cheaper and would describe an agent nobody
+starts from.
 
-Everything that could waste the run is checked before the first question:
-a terminal to answer on, tracing to record onto, and a connection that exists.
+Everything that could waste the run is checked before the first question: a
+terminal to answer on, tracing to record the verdicts onto, and a spend ceiling
+said out loud.
 """
 
 from __future__ import annotations
@@ -21,12 +24,7 @@ from pathlib import Path
 
 import click
 
-from sql_agent import config, http, render, turn
-
-# Kept off `default`, which is the demo's own warehouse: `sql-agent turns` reads
-# that connection's log, and twenty corpus turns in it is the demo chart with
-# the demo buried in the middle.
-DEMO_CONNECTION = "default"
+from sql_agent import http, render, turn
 
 # What one cold turn costs in tokens, measured (README's T1). Used only to say
 # the order of magnitude before a run: a real figure would need a price per
@@ -36,22 +34,22 @@ COLD_TURN_TOKENS = 11_500
 
 @click.command("corpus")
 @click.argument("questions", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@config.option
 @click.option("-v", "--verbose", is_flag=True, help="Show planning, exploration and what was learned.")
-def record(questions: Path, connection: str | None, verbose: bool) -> None:
+def record(questions: Path, verbose: bool) -> None:
     """Ask every question in a file, cold, and judge each answer.
 
     \b
-      make corpus                          the demo's questions, on `golden`
+      make corpus                          the demo's questions
       sql-agent corpus demo/questions.txt  the same thing, spelled out
 
     One question per line. Blank lines and `#` comments are skipped, so the file
     can say what each question is for.
 
-    Every verdict is filed on that turn's trace, which is what a later harvest
-    reads as a label. Nothing is written here.
+    Asked with `--no-memory`, so the run leaves what the agent has learned
+    exactly as it found it. Every verdict is filed on that turn's trace, which
+    is what a later harvest reads as a label.
     """
-    http.run(_record(questions, connection, verbose))
+    http.run(_record(questions, verbose))
 
 
 def read_questions(path: Path) -> list[str]:
@@ -69,8 +67,7 @@ def read_questions(path: Path) -> list[str]:
     ]
 
 
-async def _record(path: Path, connection: str | None, verbose: bool) -> None:
-    cid = config.connection(connection)
+async def _record(path: Path, verbose: bool) -> None:
     asked = judged = approved = 0
     spent = 0.0
 
@@ -78,14 +75,14 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
     if not questions:
         raise http.ApiError(f"{path} holds no questions — every line is blank or a comment")
 
-    ceiling = await _preflight(cid, path, questions)
+    ceiling = await _preflight(path, questions)
 
     try:
         for n, question in enumerate(questions, start=1):
-            click.echo(render.dim(f"\n[{n}/{len(questions)}] clearing the cache"))
-            await http.delete(f"/connections/{cid}/cache")
-
-            answered, fatal = await turn.take(cid, question, verbose=verbose)
+            click.echo(render.dim(f"\n[{n}/{len(questions)}]"))
+            answered, fatal = await turn.take(
+                question, verbose=verbose, memory=False
+            )
             asked += 1
             if fatal or not answered:
                 # Not fatal to the whole run: one timed-out turn out of twenty is
@@ -99,7 +96,7 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
                     "to go — check `sql-agent config`"
                 )
 
-            approved += await turn.judge(cid, answered)
+            approved += await turn.judge(answered)
             judged += 1
 
             spent += answered.get("cost") or 0.0
@@ -116,10 +113,10 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
         click.echo()
         click.secho("stopped early", fg="yellow")
     finally:
-        _summary(asked, judged, approved, spent, cid)
+        _summary(asked, judged, approved, spent)
 
 
-async def _preflight(cid: str, path: Path, questions: list[str]) -> float:
+async def _preflight(path: Path, questions: list[str]) -> float:
     """Everything that would waste the run, checked before the first turn.
     Returns the spend ceiling, or 0 where there is none.
 
@@ -141,8 +138,8 @@ async def _preflight(cid: str, path: Path, questions: list[str]) -> float:
         )
 
     click.echo(
-        f"{len(questions)} questions from {path}, against {cid}, "
-        f"cold each time. Answer each one as it lands."
+        f"{len(questions)} questions from {path}, cold each time and none of it "
+        f"kept. Answer each one as it lands."
     )
 
     model = body["config"]["model"]
@@ -161,19 +158,11 @@ async def _preflight(cid: str, path: Path, questions: list[str]) -> float:
             "  no spend ceiling — max_spend is 0 in config.yaml", fg="yellow"
         )
 
-    if cid == DEMO_CONNECTION:
-        click.secho(
-            f"\n{cid!r} is the connection the demo reads — its turn log is the "
-            "chart, and its cache will be cleared before every question.",
-            fg="yellow",
-        )
-        click.confirm("Use it anyway?", abort=True)
-
     click.confirm("Start?", default=True, abort=True)
     return ceiling
 
 
-def _summary(asked: int, judged: int, approved: int, spent: float, cid: str) -> None:
+def _summary(asked: int, judged: int, approved: int, spent: float) -> None:
     click.echo()
     click.echo(
         render.bold(f"{judged} of {asked} turns judged, {approved} of them right")
@@ -182,7 +171,6 @@ def _summary(asked: int, judged: int, approved: int, spent: float, cid: str) -> 
         click.echo(render.bold(f"${spent:.4f} spent"))
     click.echo(
         render.dim(
-            f"  the verdicts are on the traces; `sql-agent turns -c {cid}` is "
-            "what they cost"
+            "  the verdicts are on the traces; `sql-agent turns` is what they cost"
         )
     )

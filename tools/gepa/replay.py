@@ -54,7 +54,7 @@ async def replay(
 
     `entries_from` rather than a re-implementation, so the verification gate the
     metric reads is the one production applies. `fallback_tables` is empty
-    because inferring them needs a target connection and nothing here scores
+    because inferring them needs the target database and nothing here scores
     `tables` — which is what keeps this database-free.
     """
     try:

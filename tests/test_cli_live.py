@@ -24,8 +24,7 @@ import pytest
 from httpx import AsyncClient
 
 from app import store
-from sql_agent import config, connections, http, memory
-from tests.conftest import DEFAULT_CONNECTION as CID
+from sql_agent import config, http, memory
 
 
 @pytest.fixture(autouse=True)
@@ -46,38 +45,6 @@ def through_the_app(client: AsyncClient, monkeypatch):
     )
 
 
-async def test_connections_ls_renders_the_registry(capsys):
-    await connections._list()
-    out = capsys.readouterr().out
-    assert CID in out
-    assert "rows)" in out  # the footer demo.tape waits on
-
-
-async def test_connections_get_renders_one_and_hides_the_password(capsys):
-    await connections._get(CID)
-    out = capsys.readouterr().out
-    # Matched without the padding: the label column widens whenever a longer
-    # key is added, and a test that pins the spacing fails for the wrong reason.
-    assert re.search(r"password\s+\((set|unset)\)", out)
-    assert "reader" in out  # the username is fine to show
-    assert "the environment" in out  # origin='env'
-    assert "postgresql+psycopg" in out  # which engine it is
-    assert "read-only  enforced" in out  # and how far that goes
-
-
-async def test_connect_validates_before_it_writes(capsys):
-    await connections._connect(CID)
-    assert config.selected() == CID
-    assert f"connected to {CID}" in capsys.readouterr().out
-
-
-async def test_connect_to_a_typo_leaves_the_selection_alone(capsys):
-    config.select(CID)
-    with pytest.raises(http.ApiError, match="no connection named"):
-        await connections._connect("wrehouse")
-    assert config.selected() == CID
-
-
 async def test_cache_renders_what_the_model_would_read(capsys, agent_conn):
     await store.write_entries(
         agent_conn,
@@ -91,10 +58,9 @@ async def test_cache_renders_what_the_model_would_read(capsys, agent_conn):
                 verified=True,
             )
         ],
-        connection_id=CID,
     )
     try:
-        await memory._cache(CID, None)
+        await memory._cache(None)
         out = capsys.readouterr().out
         assert "spec:cli revenue" in out
         assert "revenue excludes cancelled orders" in out
@@ -107,8 +73,8 @@ async def test_cache_renders_what_the_model_would_read(capsys, agent_conn):
 
 
 async def test_an_empty_cache_says_so_rather_than_printing_a_header(capsys, agent_conn):
-    await agent_conn.execute("DELETE FROM cache_entry WHERE connection_id = %s", (CID,))
-    await memory._cache(CID, None)
+    await agent_conn.execute("DELETE FROM cache_entry")
+    await memory._cache(None)
     assert "cache is empty" in capsys.readouterr().out
 
 
@@ -118,7 +84,7 @@ async def test_turns_renders_the_chart(capsys, agent_conn):
     ids = []
     for explored, tin, tout in ((True, 11_021, 705), (False, 215, 190)):
         turn_id = await store.start_turn(
-            agent_conn, connection_id=CID,
+            agent_conn,
             session_id="77777777-7777-7777-7777-777777777777",
             question="how many customers do we have?",
         )
@@ -128,7 +94,7 @@ async def test_turns_renders_the_chart(capsys, agent_conn):
         )
         ids.append(turn_id)
     try:
-        await memory._turns(CID, 50, False)
+        await memory._turns(50, False)
         out = capsys.readouterr().out
         assert "how many customers do we have?" in out
         assert "11,726" in out  # in + out, as the endpoint precomputes it
@@ -139,8 +105,8 @@ async def test_turns_renders_the_chart(capsys, agent_conn):
 
 
 async def test_no_turns_yet_says_so(capsys, agent_conn):
-    await agent_conn.execute("DELETE FROM turn WHERE connection_id = %s", (CID,))
-    await memory._turns(CID, 50, False)
+    await agent_conn.execute("DELETE FROM turn")
+    await memory._turns(50, False)
     assert "no turns yet" in capsys.readouterr().out
 
 
@@ -148,12 +114,11 @@ async def test_reset_reports_what_it_wiped(capsys, agent_conn):
     await store.write_entries(
         agent_conn,
         [store.CacheEntry(kind="recipe", name="spec:doomed", claim="x")],
-        connection_id=CID,
     )
-    await memory._reset(CID)
+    await memory._reset()
     out = capsys.readouterr().out
     assert "wiped cache_entry (1 rows)" in out
     assert "reset complete" in out
 
-    await memory._reset(CID)
+    await memory._reset()
     assert "nothing to wipe" in capsys.readouterr().out

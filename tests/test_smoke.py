@@ -12,15 +12,14 @@ from app.events import to_events
 async def test_health(client: AsyncClient):
     """The agent's own database only.
 
-    It used to ping the target too, back when there was one. With a registry it
-    would answer "unhealthy" for a process that is perfectly able to serve every
-    *other* connection — see the docstring on the endpoint.
+    It used to ping the target as well. That made a load balancer pull the
+    process out of rotation over a database being down, which the process can do
+    nothing about and which `POST /v1/test` reports with the reason.
     """
     resp = await client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok" and body["agent"] == "ok"
-    assert body["connections"] >= 1  # `default` at least; the suite registers two
     assert "target" not in body
 
 

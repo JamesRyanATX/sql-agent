@@ -57,9 +57,9 @@ def cli() -> None:
     """Ask a database questions in English.
 
     \b
-      sql-agent connect warehouse
       sql-agent "how many customers do we have?"
       sql-agent cache
+      sql-agent turns
 
     The first turn against a database is expensive — it explores. Every turn
     after that reads what it learned, and costs a fraction. `sql-agent cache` is
@@ -72,7 +72,6 @@ def cli() -> None:
 
 @cli.command()
 @click.argument("question", nargs=-1, required=True)
-@config.option
 @click.option("-v", "--verbose", is_flag=True, help="Show planning, exploration and what was learned.")
 @click.option("--json", "as_json", is_flag=True, help="One raw event per line, unstyled.")
 @click.option(
@@ -80,7 +79,12 @@ def cli() -> None:
     is_flag=True,
     help="Don't ask what you thought of the answer.",
 )
-def ask(question, connection, verbose, as_json, no_feedback) -> None:
+@click.option(
+    "--no-memory",
+    is_flag=True,
+    help="Ignore what the agent has learned, and keep nothing it learns.",
+)
+def ask(question, verbose, as_json, no_feedback, no_memory) -> None:
     """Ask a question. This is what you get by default, so `ask` is optional."""
     if verbose and as_json:
         raise click.UsageError("--json and --verbose are two renderers; pick one")
@@ -100,18 +104,19 @@ def ask(question, connection, verbose, as_json, no_feedback) -> None:
             f"(to ask it as a question: sql-agent ask {joined!r})"
         )
 
-    http.run(_ask(joined, connection, verbose, as_json, no_feedback))
+    http.run(_ask(joined, verbose, as_json, no_feedback, no_memory))
 
 
 async def _ask(
     question: str,
-    connection: str | None,
     verbose: bool,
     as_json: bool,
     no_feedback: bool = False,
+    no_memory: bool = False,
 ) -> None:
-    cid = config.connection(connection)
-    answered, fatal = await turn.take(cid, question, verbose=verbose, as_json=as_json)
+    answered, fatal = await turn.take(
+        question, verbose=verbose, as_json=as_json, memory=not no_memory
+    )
 
     # A recoverable SQL error carries no `fatal` key — that is the fix loop
     # working, not a failed turn. Exiting 0 on a genuinely failed one would let
@@ -120,19 +125,16 @@ async def _ask(
         raise SystemExit(1)
 
     if not no_feedback and not as_json and turn.askable(answered):
-        await turn.judge(cid, answered)
+        await turn.judge(answered)
 
 
 # Registered here rather than imported at the top: the command modules import
 # `config.option`, so the group has to exist first.
-from sql_agent import connections as _connections  # noqa: E402
 from sql_agent import corpus as _corpus  # noqa: E402
 from sql_agent import memory as _memory  # noqa: E402
 from sql_agent import server as _server  # noqa: E402
 
 for _command in (
-    _connections.connect,
-    _connections.connections,
     _corpus.record,
     _memory.cache,
     _memory.turns,

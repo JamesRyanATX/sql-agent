@@ -89,7 +89,7 @@ def answers(monkeypatch):
 
 
 async def ask(**kwargs) -> None:
-    await main._ask("how many customers do we have?", "default", False, False, **kwargs)
+    await main._ask("how many customers do we have?", False, False, **kwargs)
 
 
 async def test_an_approved_answer_files_a_verdict_and_no_prose(turn, answers, monkeypatch):
@@ -101,7 +101,7 @@ async def test_an_approved_answer_files_a_verdict_and_no_prose(turn, answers, mo
 
     assert turn == [
         {
-            "path": "/connections/default/turns/7/feedback",
+            "path": "/turns/7/feedback",
             "json": {"correct": True, "comment": None},
         }
     ]
@@ -207,6 +207,6 @@ async def test_json_output_is_never_interrupted_by_a_menu(turn, answers, monkeyp
     and that program cannot answer a question."""
     streams(monkeypatch, stdin=True, stdout=True)
 
-    await main._ask("how many customers?", "default", False, True)
+    await main._ask("how many customers?", False, False, True)
 
     assert turn == []

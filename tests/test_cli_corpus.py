@@ -31,12 +31,14 @@ how many customers are in the west region?
 def scripted(monkeypatch, tmp_path):
     """A scripted run: what was called, in order, and what was posted."""
     calls: list[str] = []
+    asked: list[dict] = []
     posted: list[dict] = []
     state = {"answer": dict(ANSWER), "tracing": True, "fatal": False, "ceiling": 5.0}
 
     def stream_events(path, payload):
         async def events():
             calls.append(f"ask:{payload['question']}")
+            asked.append(payload)
             if state["fatal"]:
                 yield {"type": "error", "message": "ReadTimeout", "fatal": True}
             else:
@@ -66,6 +68,9 @@ def scripted(monkeypatch, tmp_path):
 
     monkeypatch.setattr(turn_mod.http, "stream_events", stream_events)
     monkeypatch.setattr(turn_mod.http, "post", post)
+    # Nothing should reach this: a corpus run leaves the memory alone. It is
+    # here so that a run which started deleting again would be recorded rather
+    # than hitting the network.
     monkeypatch.setattr(corpus.http, "delete", delete)
     monkeypatch.setattr(corpus.http, "get", get)
     monkeypatch.setattr(turn_mod.render, "choose", lambda *a, **kw: state.get("choice", 0))
@@ -76,7 +81,13 @@ def scripted(monkeypatch, tmp_path):
 
     path = tmp_path / "questions.txt"
     path.write_text(QUESTIONS)
-    return {"calls": calls, "posted": posted, "state": state, "path": path}
+    return {
+        "calls": calls,
+        "asked": asked,
+        "posted": posted,
+        "state": state,
+        "path": path,
+    }
 
 
 def streams(monkeypatch, *, stdin: bool = True, stdout: bool = True) -> None:
@@ -87,8 +98,8 @@ def streams(monkeypatch, *, stdin: bool = True, stdout: bool = True) -> None:
     monkeypatch.setattr(turn_mod.sys, "stdout", Stream(turn_mod.sys.stdout, stdout))
 
 
-async def run(scripted, connection="golden") -> None:
-    await corpus._record(scripted["path"], connection, False)
+async def run(scripted) -> None:
+    await corpus._record(scripted["path"], False)
 
 
 # ------------------------------------------------------------- reading the file
@@ -112,23 +123,25 @@ async def test_a_file_of_nothing_but_comments_is_refused(scripted, monkeypatch):
 # -------------------------------------------------------------------- the loop
 
 
-async def test_every_question_is_asked_cold(scripted, monkeypatch):
-    """The cache is cleared *before each* question, not once at the start.
+async def test_every_question_is_asked_cold_and_the_memory_is_left_alone(
+    scripted, monkeypatch
+):
+    """Cold is what makes the run expensive, and it is the point: a warm second
+    question describes an agent nobody starts from, and its `extract` call is
+    not a distinct case.
 
-    This is the whole reason the run is expensive: a warm second question
-    describes an agent nobody starts from, and its `extract` call is not a
-    distinct case.
+    It gets there with `memory: false` rather than by emptying the memory, which
+    is what makes the run safe to start on the machine the demo runs on.
     """
     streams(monkeypatch)
 
     await run(scripted)
 
     assert scripted["calls"] == [
-        "clear:/connections/golden/cache",
         "ask:how many customers do we have?",
-        "clear:/connections/golden/cache",
         "ask:how many customers are in the west region?",
     ]
+    assert [p["memory"] for p in scripted["asked"]] == [False, False]
 
 
 async def test_each_answer_is_judged_and_filed(scripted, monkeypatch):
@@ -137,8 +150,8 @@ async def test_each_answer_is_judged_and_filed(scripted, monkeypatch):
     await run(scripted)
 
     assert [p["path"] for p in scripted["posted"]] == [
-        "/connections/golden/turns/7/feedback",
-        "/connections/golden/turns/7/feedback",
+        "/turns/7/feedback",
+        "/turns/7/feedback",
     ]
     assert all(p["json"] == {"correct": True, "comment": None} for p in scripted["posted"])
 
@@ -205,25 +218,6 @@ async def test_it_refuses_without_a_terminal(scripted, monkeypatch):
     with pytest.raises(http.ApiError, match="somebody at the keyboard"):
         await run(scripted)
 
-    assert scripted["calls"] == []
-
-
-async def test_the_demo_connection_asks_first(scripted, monkeypatch, capsys):
-    """`default` is what `sql-agent turns` charts. Twenty corpus turns in it
-    buries the demo, and the cache clearing wipes what the demo taught it."""
-    streams(monkeypatch)
-    asked = {}
-
-    def confirm(text, **kw):
-        asked["text"] = text
-        raise click.Abort()
-
-    monkeypatch.setattr(corpus.click, "confirm", confirm)
-
-    with pytest.raises(click.Abort):
-        await run(scripted, connection="default")
-
-    assert "Use it anyway?" in asked["text"]
     assert scripted["calls"] == []
 
 

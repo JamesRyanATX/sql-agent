@@ -1,10 +1,11 @@
-"""One pool for the agent's memory, and one engine per registered target.
+"""One pool for the agent's memory, and one engine for the database it queries.
 
-    db.agent()        -> psycopg.AsyncConnection
-    db.target(cid)    -> sqlalchemy.ext.asyncio.AsyncConnection
+    db.agent()    -> psycopg.AsyncConnection
+    db.target()   -> sqlalchemy.ext.asyncio.AsyncConnection
 
-The agent's memory is always Postgres via psycopg; a target is SQLAlchemy and
-may be Postgres, MySQL or SQLite. The two types share no method that matters, so
+Two addresses, both from the environment: `AGENT_DATABASE_URL` and
+`TARGET_DATABASE_URL`. The agent's memory is always Postgres via psycopg; the
+target is SQLAlchemy and may be Postgres, MySQL or SQLite. The two types share no method that matters, so
 passing one where the other belongs raises rather than querying the wrong server.
 
 Read-only is enforced per dialect — see `app/dialects.py`.
@@ -19,31 +20,36 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncConnection as TargetConnection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-# `store` for the registry lookup. Acyclic: store never imports app.db.
-from app import dialects, store
+from app import dialects
 from app.config import config
 from app.settings import settings
 
+# What a user may reasonably write in TARGET_DATABASE_URL, mapped to the driver
+# that is actually installed. `postgresql://` alone resolves to psycopg2 in
+# SQLAlchemy, which is not here.
+_DRIVERS = {
+    "postgres": "postgresql+psycopg",
+    "postgresql": "postgresql+psycopg",
+    "mysql": "mysql+asyncmy",
+    "mariadb": "mysql+asyncmy",
+    "mariadb+asyncmy": "mysql+asyncmy",
+    "sqlite": "sqlite+aiosqlite",
+}
+
 _agent_pool: AsyncConnectionPool | None = None
-_target_engines: dict[str, AsyncEngine] = {}
-_registry_lock = asyncio.Lock()
-
-DEFAULT_CONNECTION = "default"
-
-
-class UnknownConnection(LookupError):
-    """No connection is registered under that id."""
+_target: AsyncEngine | None = None
+_target_lock = asyncio.Lock()
 
 
 class TargetUnreachable(RuntimeError):
-    """Registered, but we could not open a pool against it."""
+    """We could not open a connection to TARGET_DATABASE_URL."""
 
-    def __init__(self, connection_id: str, cause: str) -> None:
-        super().__init__(f"cannot reach connection {connection_id!r} ({cause})")
-        self.connection_id = connection_id
+    def __init__(self, cause: str) -> None:
+        super().__init__(f"cannot reach the target database ({cause})")
 
 
 def cause_of(e: BaseException) -> str:
@@ -85,13 +91,12 @@ async def open_pools() -> AsyncConnectionPool:
 
 
 async def close_pools() -> None:
-    global _agent_pool
-    engines = list(_target_engines.values())
+    global _agent_pool, _target
     pool, _agent_pool = _agent_pool, None
-    _target_engines.clear()
+    engine, _target = _target, None
     if pool is not None:
         await pool.close()
-    for engine in engines:
+    if engine is not None:
         await engine.dispose()
 
 
@@ -99,42 +104,6 @@ def agent_pool() -> AsyncConnectionPool:
     if _agent_pool is None:
         raise RuntimeError("pools not open — call open_pools() during startup")
     return _agent_pool
-
-
-async def resolve(connection_id: str) -> store.Connection:
-    """The registry row. A row with `origin = 'env'` gets its address from
-    `TARGET_DATABASE_URL`, which the psql-applied migration cannot write down.
-    """
-    async with agent() as conn:
-        row = await store.get_connection(conn, connection_id)
-    if row is None:
-        raise UnknownConnection(connection_id)
-    if row.origin == "env":
-        env = store.connection_from_url(
-            settings().target_database_url, id=row.id, origin="env"
-        )
-        env.label = row.label
-        return env
-    return row
-
-
-async def ensure_default_connection() -> None:
-    """Copy TARGET_DATABASE_URL's address onto the `default` row, so a listing
-    reads true. The password is not copied — it stays in the environment.
-    """
-    env = store.connection_from_url(
-        settings().target_database_url, id=DEFAULT_CONNECTION, origin="env"
-    )
-    async with agent() as conn:
-        await store.update_connection(
-            conn,
-            DEFAULT_CONNECTION,
-            host=env.host,
-            port=env.port,
-            database=env.database,
-            username=env.username,
-            sslmode=env.sslmode,
-        )
 
 
 def _engine_kwargs(dialect: str) -> dict[str, Any]:
@@ -158,41 +127,56 @@ def _engine_kwargs(dialect: str) -> dict[str, Any]:
     }
 
 
-def _guard_sqlite_path(registered: store.Connection) -> None:
+def _guard_sqlite_path(url: URL) -> None:
     """Refuse a SQLite path that does not exist. sqlite3 would create the file,
-    so a typo registers green and hands the agent an empty database.
+    so a typo starts green and hands the agent an empty database.
     """
-    if registered.dialect != "sqlite":
+    if url.get_backend_name() != "sqlite":
         return
-    if not registered.database or not pathlib.Path(registered.database).is_file():
-        raise TargetUnreachable(registered.id, "FileNotFoundError")
+    if not url.database or not pathlib.Path(url.database).is_file():
+        raise TargetUnreachable("FileNotFoundError")
 
 
-async def target_engine(connection_id: str) -> AsyncEngine:
-    """The engine for one registered target, built on first use.
+def target_url() -> URL:
+    """TARGET_DATABASE_URL, with the driver spelled out.
+
+    A bare `postgresql://` resolves to psycopg2 in SQLAlchemy, which is not
+    installed, so the scheme is normalised here rather than in everyone's .env.
+    """
+    url = make_url(settings().target_database_url)
+    return url.set(drivername=_DRIVERS.get(url.drivername, url.drivername))
+
+
+def target_dialect() -> str:
+    """`postgresql` | `mysql` | `sqlite` — which SQL the model should write."""
+    return target_url().get_backend_name()
+
+
+async def target_engine() -> AsyncEngine:
+    """The engine for the target database, built on first use.
 
     Double-checked under a lock so a burst of concurrent turns against a cold
-    connection builds one engine between them rather than one each.
+    start builds one engine between them rather than one each.
     """
-    engine = _target_engines.get(connection_id)
-    if engine is not None:
-        return engine
+    global _target
+    if _target is not None:
+        return _target
 
-    async with _registry_lock:
-        if (engine := _target_engines.get(connection_id)) is not None:
-            return engine
-        registered = await resolve(connection_id)
-        _guard_sqlite_path(registered)
+    async with _target_lock:
+        if _target is not None:
+            return _target
+        url = target_url()
+        _guard_sqlite_path(url)
         engine = create_async_engine(
-            registered.url(),
+            url,
             # `explore` holds one connection across up to 24 tool calls with
             # model round trips between them, and SQLAlchemy would otherwise
             # open a transaction on the first statement — holding a snapshot on
             # a customer's database for minutes. `target_readonly` opts back in.
             isolation_level="AUTOCOMMIT",
-            **_engine_kwargs(registered.dialect),
+            **_engine_kwargs(url.get_backend_name()),
         )
-        dialects.install(engine, registered.dialect, config().statement_timeout_ms)
+        dialects.install(engine, url.get_backend_name(), config().statement_timeout_ms)
         try:
             # `create_async_engine` is a factory and never dials, so it succeeds
             # against a host that is not listening. Without this the failure
@@ -202,20 +186,9 @@ async def target_engine(connection_id: str) -> AsyncEngine:
                     pass
         except Exception as e:
             await engine.dispose()
-            raise TargetUnreachable(connection_id, cause_of(e)) from e
-        _target_engines[connection_id] = engine
+            raise TargetUnreachable(cause_of(e)) from e
+        _target = engine
         return engine
-
-
-async def evict(connection_id: str) -> None:
-    """Drop a target engine, so the next turn re-resolves its address.
-
-    `dispose()` leaves checked-out connections running, so a PATCH landing
-    mid-turn is last-writer-wins for that turn.
-    """
-    engine = _target_engines.pop(connection_id, None)
-    if engine is not None:
-        await engine.dispose()
 
 
 @asynccontextmanager
@@ -226,25 +199,36 @@ async def agent() -> AsyncIterator[AsyncConnection]:
 
 
 @asynccontextmanager
-async def target(connection_id: str) -> AsyncIterator[TargetConnection]:
-    """A registered target, for introspection and fingerprinting.
+async def target() -> AsyncIterator[TargetConnection]:
+    """The target database, for introspection and fingerprinting.
 
     Read-only because `dialects.install` set the session that way, and AUTOCOMMIT
     so the explore loop holds no transaction open across model round trips.
     """
-    engine = await target_engine(connection_id)
+    engine = await target_engine()
     async with engine.connect() as conn:
         yield conn
 
 
 @asynccontextmanager
-async def target_readonly(connection_id: str) -> AsyncIterator[TargetConnection]:
+async def target_readonly() -> AsyncIterator[TargetConnection]:
     """The transaction the agent's generated SQL runs inside.
 
     The only place that wants a real transaction. What runs inside it is
     per-dialect and may be empty — see `app/dialects.py`.
     """
-    engine = await target_engine(connection_id)
+    async with readonly(await target_engine()) as conn:
+        yield conn
+
+
+@asynccontextmanager
+async def readonly(engine: AsyncEngine) -> AsyncIterator[TargetConnection]:
+    """The read-only transaction, on any engine.
+
+    Split out from `target_readonly` so the capability tests can apply it to an
+    engine on another dialect: the app dials one database, and the claims in
+    `app/dialects.py` are about all three.
+    """
     dialect = engine.sync_engine.dialect
     cap = dialects.for_dialect(dialect.name)
     async with engine.connect() as conn:

@@ -35,7 +35,6 @@ from tests.test_coldpath import (  # noqa: F401 — `pool` is a fixture
 )
 from tests.test_llm_openai import capture, use_openai
 
-DEFAULT_CONNECTION = "default"
 
 
 @contextmanager
@@ -77,7 +76,7 @@ def test_tracing_is_off_and_builds_nothing():
 def test_the_helpers_are_no_ops_when_off():
     """Callers never branch on whether tracing is on, so the handle has to
     absorb every keyword a real one takes."""
-    with tracing.turn(session_id="s", question="q", connection_id="default") as t:
+    with tracing.turn(session_id="s", question="q") as t:
         assert t.trace_id is None
         t.update(output={"anything": 1}, level="ERROR", status_message="x")
 
@@ -234,7 +233,7 @@ async def test_a_turn_span_wraps_the_stream_and_carries_the_trace_id(monkeypatch
     events = [
         e
         async for e in graph.stream_turn(
-            FakeCompiled(), "session-1", "how many customers?", DEFAULT_CONNECTION
+            FakeCompiled(), "session-1", "how many customers?"
         )
     ]
 
@@ -248,7 +247,7 @@ async def test_a_turn_span_wraps_the_stream_and_carries_the_trace_id(monkeypatch
         [
             e
             async for e in graph.stream_turn(
-                FakeCompiled(), "session-2", "q", DEFAULT_CONNECTION
+                FakeCompiled(), "session-2", "q"
             )
         ]
     # A 32-character hex trace id, the same one the turn row will hold.
@@ -270,7 +269,7 @@ async def test_stream_turn_still_never_raises_with_tracing_on(monkeypatch):
         events = [
             e
             async for e in graph.stream_turn(
-                Exploding(), "session-3", "q", DEFAULT_CONNECTION
+                Exploding(), "session-3", "q"
             )
         ]
 
@@ -345,7 +344,6 @@ async def test_a_turns_trace_id_round_trips(agent_conn):
     that gets you from that row to the calls that spent them."""
     turn_id = await store.start_turn(
         agent_conn,
-        connection_id=DEFAULT_CONNECTION,
         session_id=uuid4(),
         question="how many customers?",
     )
@@ -353,7 +351,7 @@ async def test_a_turns_trace_id_round_trips(agent_conn):
         agent_conn, turn_id, answer="1,840", trace_id="0123456789abcdef" * 2
     )
 
-    rows = await store.read_turns(agent_conn, connection_id=DEFAULT_CONNECTION)
+    rows = await store.read_turns(agent_conn)
     row = next(r for r in rows if r["id"] == turn_id)
     assert row["trace_id"] == "0123456789abcdef" * 2
 
@@ -363,13 +361,12 @@ async def test_a_turn_taken_without_tracing_has_no_trace_id(agent_conn):
     case, since tracing is off unless both keys are set."""
     turn_id = await store.start_turn(
         agent_conn,
-        connection_id=DEFAULT_CONNECTION,
         session_id=uuid4(),
         question="how many customers?",
     )
     await store.finish_turn(agent_conn, turn_id, answer="1,840")
 
-    rows = await store.read_turns(agent_conn, connection_id=DEFAULT_CONNECTION)
+    rows = await store.read_turns(agent_conn)
     row = next(r for r in rows if r["id"] == turn_id)
     assert row["trace_id"] is None
 
