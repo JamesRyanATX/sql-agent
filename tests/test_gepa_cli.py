@@ -9,6 +9,7 @@ Scripted model, no database, no search: `_search` is replaced by a pool.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass, field
 
@@ -19,6 +20,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 from app import llm, prompts, tracing  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 from tools.gepa import cli as gepa  # noqa: E402
+from tools.gepa import targets  # noqa: E402
 from tools.gepa.adapter import COMPONENT  # noqa: E402
 from tools.gepa.cases import ExtractCase  # noqa: E402
 from tests.test_gepa_adapter import GOOD_OUTPUT, SQL  # noqa: E402
@@ -55,12 +57,21 @@ def well_behaved(monkeypatch):
 
 @pytest.fixture
 def a_run(monkeypatch, tmp_path, well_behaved):
-    """Everything up to the gate, faked: a corpus on disk and a pool of two."""
+    """Everything up to the gate, faked: a corpus in memory and a pool of two.
+
+    The corpus is replaced on the target rather than on the command, because
+    where a corpus comes from is a property of what is being searched. `Target`
+    is frozen, so the registry entry is swapped for a copy.
+    """
     seed = prompts.get("extract")
     monkeypatch.setattr(gepa, "OUT", tmp_path)
     monkeypatch.setattr(tracing, "enabled", lambda: False)
-    monkeypatch.setattr(
-        gepa, "_corpus", lambda node, **kwargs: [_case(i) for i in range(8)]
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "extract",
+        dataclasses.replace(
+            targets.EXTRACT, corpus=lambda **kwargs: [_case(i) for i in range(8)]
+        ),
     )
     monkeypatch.setattr(
         gepa,
@@ -107,11 +118,51 @@ def test_a_node_with_no_metric_exits_two_and_says_what_is_missing(monkeypatch):
     assert "tests/probes/answer/*.json" in result.stderr
 
 
-def test_a_node_that_is_not_a_prompt_is_a_usage_error():
+def test_a_name_that_is_not_a_target_is_a_usage_error():
+    """It lists both halves of the registry, because "extarct" is a typo and
+    "config" is a thing somebody will reasonably try."""
     result = CliRunner().invoke(gepa.cli, ["extarct"])
 
     assert result.exit_code == 1
-    assert "no prompt named 'extarct'" in result.output
+    assert "no target named 'extarct'" in result.output
+    assert "extract" in result.output
+    assert "generate_sql" in result.output
+
+
+def test_probe_only_checks_the_seed_and_spends_nothing_else(well_behaved, monkeypatch):
+    """The cheap pre-check. Four model calls against the prompt on disk, and it
+    must not reach the search — the whole reason to have it is to find a broken
+    invariant before paying for a run."""
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("a search was started")
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--probe-only"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "", "a check is not a promotion"
+    assert "all 4 probes pass" in result.stderr
+
+
+def test_probe_only_exits_one_when_the_seed_fails_an_invariant(monkeypatch):
+    """A failing probe is a preflight failure, not a search result. Exit 1, and
+    the reason readable, because a person decides what to do about it."""
+    from tests.test_gepa_adapter import CENSUS_OUTPUT
+
+    async def records_a_census(**kwargs):
+        return llm.Result(
+            text=json.dumps(CENSUS_OUTPUT),
+            stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", records_a_census)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--probe-only"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "probes failed" in result.stderr
+    assert "Neither kind is a census" in result.stderr
 
 
 def test_a_winner_that_scored_below_the_seed_is_not_offered(a_run, monkeypatch):

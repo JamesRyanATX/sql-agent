@@ -31,9 +31,11 @@ from tools.gepa import metric_extract as metric
 from tools.gepa.cases import ExtractCase
 from tools.gepa.replay import Replayed, replay
 
-# The component name GEPA mutates. One component, because this optimises one
-# node; `candidate` is `{"extract": "<the prompt>"}` throughout.
-COMPONENT = "extract"
+# The key this adapter reads out of a candidate. One component, because
+# `extract` is one node with one prompt; `candidate` is `{"extract": "..."}`
+# throughout. Imported rather than spelled again, so the string lives once —
+# `targets.py` builds the seed dict that has to agree with it.
+from tools.gepa.targets import EXTRACT_COMPONENT as COMPONENT  # noqa: E402
 
 REFLECT_SYSTEM = (
     "You are improving the instructions given to a component of a larger "

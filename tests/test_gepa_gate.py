@@ -23,7 +23,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 
 from app import llm  # noqa: E402
 from tools.gepa.adapter import COMPONENT, Loop  # noqa: E402
-from tools.gepa.cli import _gate  # noqa: E402
+from tools.gepa.gates import probe_gate  # noqa: E402
 from tests.test_gepa_adapter import CENSUS_OUTPUT, GOOD_OUTPUT  # noqa: E402
 
 SEED = "the seed instruction, which honours every invariant"
@@ -37,6 +37,11 @@ class FakeResult:
 
     candidates: list[dict[str, str]]
     val_aggregate_scores: list[float] = field(default_factory=list)
+
+
+def gate(loop, result, seed: str):
+    """`probe_gate` takes the whole seed candidate, as every target's does."""
+    return probe_gate(loop, result, {COMPONENT: seed}, node="extract")
 
 
 @pytest.fixture
@@ -67,13 +72,13 @@ def test_the_seed_passes_every_probe_under_a_well_behaved_model(loop, scripted, 
     """The gate's baseline. If the seed failed a probe, that probe could never
     disqualify anything — it would be excluded from `seed_passing` and every
     candidate would inherit the failure for free."""
-    _gate(loop, FakeResult([{COMPONENT: SEED}], [1.0]), SEED, "extract")
+    gate(loop, FakeResult([{COMPONENT: SEED}], [1.0]), SEED)
     err = capsys.readouterr().err
     assert "seed passes 4/4" in err
 
 
 def test_a_candidate_that_regresses_a_probe_is_discarded(loop, scripted, capsys):
-    survivors = _gate(
+    survivors = gate(
         loop,
         FakeResult(
             [{COMPONENT: SEED}, {COMPONENT: DEGENERATE}],
@@ -82,7 +87,6 @@ def test_a_candidate_that_regresses_a_probe_is_discarded(loop, scripted, capsys)
             [0.80, 0.95],
         ),
         SEED,
-        "extract",
     )
 
     assert survivors == [], "a probe regression is disqualifying at any score"
@@ -94,33 +98,31 @@ def test_a_candidate_that_regresses_a_probe_is_discarded(loop, scripted, capsys)
 
 
 def test_a_good_candidate_survives_and_carries_its_score(loop, scripted):
-    survivors = _gate(
+    survivors = gate(
         loop,
         FakeResult(
             [{COMPONENT: SEED}, {COMPONENT: DEGENERATE}, {COMPONENT: ALSO_FINE}],
             [0.80, 0.95, 0.88],
         ),
         SEED,
-        "extract",
     )
 
-    assert [s["text"] for s in survivors] == [ALSO_FINE]
-    assert survivors[0]["score"] == 0.88
+    assert [s.candidate[COMPONENT] for s in survivors] == [ALSO_FINE]
+    assert survivors[0].score == 0.88
 
 
 def test_survivors_come_back_best_first(loop, scripted):
     a, b = ALSO_FINE, ALSO_FINE + " (a second wording)"
-    survivors = _gate(
+    survivors = gate(
         loop,
         FakeResult([{COMPONENT: SEED}, {COMPONENT: a}, {COMPONENT: b}], [0.5, 0.6, 0.9]),
         SEED,
-        "extract",
     )
-    assert [s["score"] for s in survivors] == [0.9, 0.6]
+    assert [s.score for s in survivors] == [0.9, 0.6]
 
 
 def test_the_seed_itself_is_never_offered_as_a_candidate(loop, scripted):
-    survivors = _gate(loop, FakeResult([{COMPONENT: SEED}], [1.0]), SEED, "extract")
+    survivors = gate(loop, FakeResult([{COMPONENT: SEED}], [1.0]), SEED)
     assert survivors == []
 
 
@@ -129,8 +131,8 @@ def test_a_much_shorter_candidate_is_flagged_for_reading(loop, scripted, capsys)
     prompt on purpose and measuring the result — brevity can be right. But a
     candidate that won by deleting most of the instruction must be *seen*."""
     terse = "DEGENER"  # short, and not the degenerate behaviour trigger
-    survivors = _gate(
-        loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: terse}], [0.5, 0.99]), SEED, "extract"
+    survivors = gate(
+        loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: terse}], [0.5, 0.99]), SEED
     )
 
     assert survivors, "brevity alone is not disqualifying"
