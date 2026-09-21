@@ -77,6 +77,12 @@ class Target:
     # a passing gate still does not prove. Empty is allowed.
     notes: Callable[[], str]
 
+    # The metric's weighted terms, which are the axes of this target's Pareto
+    # front and the column order of the table under it. Per target because
+    # each metric has its own terms: reading one metric's weights for every
+    # target puts `nan` in four of five columns and nobody on the front.
+    weights: Callable[[], dict[str, float]]
+
     # The cheap pre-check `--probe-only` runs: (loop, yes) -> exit status. It
     # takes `yes` because a check can itself be expensive enough to ask about.
     # None where a target has nothing cheap to offer.
@@ -175,6 +181,12 @@ def _extract_notes() -> str:
     return "\n".join(lines)
 
 
+def _extract_weights() -> dict[str, float]:
+    from tools.gepa.metric_extract import WEIGHTS
+
+    return WEIGHTS
+
+
 def _extract_check(loop, yes: bool = False) -> int:
     outcomes = gates.run_probes(
         loop, _extract_seed()[EXTRACT_COMPONENT], probes.load(EXTRACT_COMPONENT)
@@ -195,6 +207,7 @@ EXTRACT = Target(
     render=_extract_render,
     label=_extract_label,
     notes=_extract_notes,
+    weights=_extract_weights,
     check=_extract_check,
     blurb="config/prompts/extract.md",
 )
@@ -385,6 +398,12 @@ def _argument_line(schema: dict) -> str:
     ) + "."
 
 
+def _tools_weights() -> dict[str, float]:
+    from tools.gepa.metric_turn import WEIGHTS
+
+    return WEIGHTS
+
+
 def _tools_check(loop, yes: bool = False) -> int:
     """The seed over the whole golden corpus, once, before any search.
 
@@ -476,6 +495,7 @@ TOOLS = Target(
     render=_tools_render,
     label=_tools_label,
     notes=_tools_notes,
+    weights=_tools_weights,
     check=_tools_check,
     templates=_tools_templates,
     # A whole cold turn a rollout, against `extract`'s single model call.

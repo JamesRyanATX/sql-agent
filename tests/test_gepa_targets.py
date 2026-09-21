@@ -169,6 +169,17 @@ def test_a_whole_turn_target_says_what_a_rollout_costs():
     assert targets.EXTRACT.rollout_tokens == 0, "one model call — do not ask"
 
 
+def test_each_target_names_its_own_objectives():
+    """The Pareto front's axes are the metric's terms, and the two metrics do
+    not share terms. Reading one metric's weights for every target put nan in
+    four of five columns and nobody on the front — found by running it."""
+    from tools.gepa import metric_extract, metric_turn
+
+    assert targets.EXTRACT.weights() == metric_extract.WEIGHTS
+    assert targets.TOOLS.weights() == metric_turn.WEIGHTS
+    assert set(targets.EXTRACT.weights()) != set(targets.TOOLS.weights())
+
+
 def test_every_target_offers_a_cheap_check():
     """--probe-only is how you find out something is wrong for the price of a
     few model calls rather than a whole search. A target without one silently

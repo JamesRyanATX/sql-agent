@@ -113,6 +113,19 @@ def cli(
     trainset, valset = _split(cases, val_fraction, seed)
     budget = chosen.budget if budget is None else budget
     say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
+
+    # GEPA scores the seed over the whole valset before it proposes anything, so
+    # a budget that small buys a baseline and stops. The run then reports that
+    # GEPA proposed nothing, which reads as a saturated metric rather than as
+    # arithmetic. Said here, where it still costs nothing to change.
+    if budget <= len(valset):
+        say(
+            f"          {budget} calls against a {len(valset)}-case valset is "
+            f"the baseline evaluation and nothing else — raise --budget or "
+            f"lower --val-fraction",
+            fg="yellow",
+        )
+
     _confirm(chosen, seed_candidate, cases, budget=budget, yes=yes)
 
     import gepa
@@ -418,7 +431,7 @@ def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None
     wrote after reading harvested cases — the same exposure the promoted text
     already has, and handled the same way: read the diff.
     """
-    from tools.gepa.metric_extract import WEIGHTS
+    weights = target.weights()
 
     # Direct attribute access, not getattr: these are real fields on
     # `GEPAResult`, and a default here would mean the tests' fake could drift
@@ -430,7 +443,7 @@ def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None
 
     # Weight order, not alphabetical, and the same order in every row and every
     # run: the file is committed and diffed.
-    objectives = tuple(WEIGHTS)
+    objectives = tuple(weights)
     # Sorted, because these arrive as sets and an unsorted set would make the
     # file diff against itself on nothing.
     tops = {
@@ -443,7 +456,7 @@ def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None
     document = {
         "target": target.name,
         "objectives": list(objectives),
-        "weights": dict(WEIGHTS),
+        "weights": dict(weights),
         "pool": {
             "candidates": len(result.candidates),
             "on_front": len(front),

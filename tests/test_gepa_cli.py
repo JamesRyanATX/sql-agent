@@ -489,3 +489,18 @@ def test_the_config_block_has_a_reason_rather_than_looking_like_a_typo():
 
     assert result.exit_code == gepa.UNWIRED_NODE
     assert "search space is six values per node" in result.stderr
+
+
+def test_a_budget_smaller_than_the_valset_is_flagged_before_it_is_spent(
+    a_tools_run, monkeypatch
+):
+    """GEPA scores the seed over the whole valset before proposing anything, so
+    a budget that small buys a baseline and stops. The run then says GEPA
+    proposed nothing, which reads as a saturated metric rather than as
+    arithmetic. Observed on a real run at `--budget 5` against nine val cases.
+    """
+    result = CliRunner().invoke(
+        gepa.cli, ["tools", "--budget", "3", "--val-fraction", "0.5", "--yes"]
+    )
+
+    assert "the baseline evaluation and nothing else" in result.stderr
