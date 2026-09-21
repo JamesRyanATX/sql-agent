@@ -114,7 +114,7 @@ like the file, with every line the overlay decided marked.
 database itself. Against a local `make up` it needs no configuration:
 
 ```bash
-uv run sql-agent connections ls
+uv run sql-agent cache
 ```
 
 Put the venv on your PATH and you can drop the `uv run`:
@@ -131,20 +131,11 @@ SQL_AGENT_API_KEY=...                    # only if the server has API_TOKEN set
 ```
 
 ```bash
-# Point it at a database. `default` is TARGET_DATABASE_URL, already registered.
-sql-agent connections create warehouse \
-    --hostname db.internal --database analytics --username reader
-sql-agent connections create reporting --driver mysql+asyncmy \
-    --hostname mysql.internal --database reporting --username reader
-sql-agent connections create books --driver sqlite+aiosqlite \
-    --database /data/books.db          # sqlite is a path and nothing else
-sql-agent connections ls
-sql-agent connect warehouse
-
 # Ask. The subcommand is optional — a bare argument is a question.
 sql-agent "how many customers do we have?"
 sql-agent -v "how many customers are in the west region?"   # show the work
 sql-agent --no-feedback "how many customers do we have?"    # don't ask me
+sql-agent --no-memory "how many customers do we have?"      # ignore the memory
 
 # What it learned and what each turn cost.
 sql-agent cache
@@ -165,21 +156,34 @@ approved answer says the SQL behind it was worth keeping. `--no-feedback` skips
 it, and nothing is asked when tracing is off or when either stream is redirected.
 
 `make corpus` is that menu, twenty-odd times in a row. It asks every question in
-`demo/questions.txt` against a separate connection, clearing the cache first so
-each turn explores from nothing, and you judge each answer as it lands. That
-is what fills the corpus the optimiser trains on — the questions are
-aimed at the traps in `demo/demo.sql`, because a corpus the agent already answers
-perfectly measures nothing.
+`demo/questions.txt` with `--no-memory`, so each turn explores from nothing, and
+you judge each answer as it lands. That is what fills the corpus the optimiser
+trains on — the questions are aimed at the traps in `demo/demo.sql`, because a
+corpus the agent already answers perfectly measures nothing.
 
-Every command about a database takes `-c/--connection` to override the connected one. Give the
-agent a role holding `SELECT` and nothing else: it only ever reads, and the
-session it opens is read-only regardless, but that is a guarantee about the
+**`--no-memory` asks as though for the first time.** The turn ignores everything
+the agent has learned and saves nothing it learns, so it explores and costs what
+a first question costs. The memory is exactly as it was afterwards, which is what
+makes it safe to run beside a demo. `sql-agent reset` is the other one: that
+empties the memory for good.
+
+Give the agent a role holding `SELECT` and nothing else. It only ever reads, and
+the session it opens is read-only regardless, but that is a guarantee about the
 agent rather than about the credentials you handed it.
 
-**What the agent learns belongs to the connection it learned it about.** Ask
-`warehouse` about revenue and `staging` knows nothing about it — `revenue` means
-something different on each, and one shared cache would let them overwrite each
-other.
+**One database, one memory.** `TARGET_DATABASE_URL` is what the agent answers
+questions about, and it may name Postgres, MySQL or SQLite — a bare scheme is
+mapped onto the driver that is installed, and SQLite is a path:
+
+```bash
+TARGET_DATABASE_URL=postgresql://reader:...@db.internal/analytics
+TARGET_DATABASE_URL=mysql://reader:...@mysql.internal/reporting
+TARGET_DATABASE_URL=sqlite:////data/books.db
+```
+
+Pointing it somewhere else means restarting the server, and what the agent
+learned about the old database is still in its memory. `sql-agent reset` before
+you do.
 
 ## Architecture
 
@@ -210,9 +214,9 @@ into one number.
 
 It captures the question, the prompts, the generated SQL and the rows handed
 back to the model. The stack is self-hosted, so none of it leaves the machine,
-but it does mean the trace store holds whatever the registered warehouse holds.
-Read [app/tracing.py](app/tracing.py) before pointing a connection at something
-real.
+but it does mean the trace store holds whatever the target database holds. Read
+[app/tracing.py](app/tracing.py) before pointing `TARGET_DATABASE_URL` at
+something real.
 
 ```bash
 make langfuse-up   # six containers, ~2GB, UI on http://localhost:3000

@@ -1,4 +1,4 @@
-.PHONY: up down build migrate seed reset reset-all test test-live connections \
+.PHONY: up down build migrate seed reset test test-live \
         psql-agent psql-demo logs logs-agent logs-demo logs-api health \
         customer-count west-coast-customer-count cache turns config corpus \
         demo demo-verify langfuse-up langfuse-down langfuse-logs
@@ -17,10 +17,6 @@ SQL_AGENT_URL ?= http://localhost:8000/v1
 export SQL_AGENT_URL SQL_AGENT_API_KEY
 # /health is unversioned, so strip the suffix rather than keep a second variable.
 API := $(SQL_AGENT_URL:/v1=)
-
-# Everything the demo does runs against the built-in connection, whose address
-# is TARGET_DATABASE_URL. A registered one would be `-c <id>`.
-CONN ?= default
 
 # Two servers. The agent's memory and the data it queries are not in the same
 # place, so neither are the psql invocations that reach them.
@@ -95,14 +91,9 @@ seed:  ## build the demo database: role, schema, and 2,000 customers
 	@$(PSQL_DEMO) < demo/demo.sql
 	@echo "seed complete"
 
-reset:  ## wipe what the demo connection learned, and reseed — the stage button
-	uv run sql-agent reset -c $(CONN) --yes
+reset:  ## wipe everything the agent has learned, and reseed — the stage button
+	uv run sql-agent reset --yes
 	$(MAKE) seed
-
-reset-all:  ## every connection, plus the registry's turn log. Rarely what you want.
-	@$(PSQL_AGENT) -c "TRUNCATE cache_entry, turn, checkpoints, checkpoint_blobs, \
-	  checkpoint_writes RESTART IDENTITY CASCADE"
-	@echo "all learned state wiped (the connection registry is untouched)"
 
 test:
 	uv run pytest -q
@@ -129,19 +120,16 @@ gepa-%:  ## GEPA over one node's prompt: new prose on stdout, progress on stderr
 # through a pty, and a pty is a terminal — so the verdict menu would appear and
 # the tape would sit on it until the Wait timed out. Ask by hand, not on stage.
 customer-count:  ## ask the cold-path question and print the token cost
-	uv run sql-agent -c $(CONN) --no-feedback "how many customers do we have?"
+	uv run sql-agent --no-feedback "how many customers do we have?"
 
 west-coast-customer-count:  ## ask a new question the cache can compose an answer to
-	uv run sql-agent -c $(CONN) --no-feedback "how many customers do we have in the west region?"
-
-connections:  ## every database the agent can be pointed at
-	@uv run sql-agent connections ls
+	uv run sql-agent --no-feedback "how many customers do we have in the west region?"
 
 cache:  ## show what the agent has learned, as the model sees it
-	@uv run sql-agent cache -c $(CONN)
+	@uv run sql-agent cache
 
 turns:  ## tokens per turn — the demo chart, as a table
-	@uv run sql-agent turns -c $(CONN)
+	@uv run sql-agent turns
 
 config:  ## what the server is running — config.yaml under config.local.yaml
 	@uv run sql-agent config
@@ -153,12 +141,12 @@ config:  ## what the server is running — config.yaml under config.local.yaml
 # each. Verdicts land on the traces, so Langfuse has to be
 # up (`make langfuse-up`) and the server restarted with both keys.
 #
-# `CORPUS_CONN` rather than `CONN`: these turns are not the demo's, and mixing
-# twenty of them into `default` buries the chart `make turns` prints.
-CORPUS_CONN ?= golden
-
+# Every question is asked with the memory off, so a run reads nothing the demo
+# taught the agent and writes nothing back. The turns still land in the turn log
+# — which is why `demo-verify` reads the five most recent rather than all of
+# them.
 corpus:  ## ask demo/questions.txt cold and judge each answer (~20 model turns)
-	uv run sql-agent corpus -c $(CORPUS_CONN) demo/questions.txt
+	uv run sql-agent corpus demo/questions.txt
 
 demo: health reset  ## record the terminal demo — live, 20-30 min of real model time
 	$(VHS) demo/demo.tape
@@ -169,18 +157,23 @@ demo: health reset  ## record the terminal demo — live, 20-30 min of real mode
 # and how many orders each holds slide with the recording date. A gate on "2024
 # Q3 — 408" would pass today and fail in November, which is the worst kind of
 # check — one that reports a bad take when nothing is wrong.
+#
+# The five *most recent* finished turns, not every finished turn. There is one
+# turn log now, so a `make corpus` run earlier in the day sits in the same table
+# and would otherwise be counted as the take.
+LAST_FIVE = SELECT * FROM turn WHERE answer IS NOT NULL ORDER BY id DESC LIMIT 5
+
 demo-verify:  ## did the last take earn its place? read it from the turn table
 	@echo "=== turns ==="
 	@$(PSQL_AGENT) -P pager=off -c "SELECT id, left(question, 38) AS question, \
 	  explored, tokens_in + tokens_out AS tokens, answer \
-	  FROM turn WHERE answer IS NOT NULL AND connection_id = '$(CONN)' \
-	  ORDER BY id"
+	  FROM ($(LAST_FIVE)) r ORDER BY id"
 	@echo "=== gate ==="
 	@out=$$($(PSQL_AGENT) -P pager=off -t -A -c \
 	  "WITH t AS ( \
 	     SELECT row_number() OVER (ORDER BY id) AS n, explored, \
 	            tokens_in + tokens_out AS tok, answer \
-	     FROM turn WHERE answer IS NOT NULL AND connection_id = '$(CONN)') \
+	     FROM ($(LAST_FIVE)) r) \
 	   SELECT CASE WHEN ok THEN 'PASS  ' ELSE 'FAIL  ' END || label FROM ( \
 	     SELECT 1 AS i, (SELECT count(*) FROM t) = 5 AS ok, \
 	            'five turns recorded' AS label \

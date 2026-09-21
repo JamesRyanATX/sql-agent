@@ -25,11 +25,10 @@ file that silently changes nothing means an optimisation run that measures the
 seed and reports it as a candidate improvement, which is the kind of wrong that
 agrees with itself.
 
-These load **once per process**. `graph.plan` puts its system block behind an
-Anthropic cache breakpoint on the promise that the block varies with
-`connection_id` alone (PLAN.md §7.1), and a prompt re-read per turn could change
-between two turns of one server's life with no symptom but T2 quietly costing
-more. Editing a file therefore does nothing until the server restarts —
+These load **once per process**. `graph.plan` puts its system block behind a
+prompt-cache breakpoint on the promise that the block is byte-for-byte the same
+on every turn, and a prompt re-read per turn could change between two turns of
+one server's life with no symptom but T2 quietly costing more. Editing a file therefore does nothing until the server restarts —
 `docker-compose.yml` puts `config/` in uvicorn's `--reload-dir` so an edit
 restarts it in place.
 

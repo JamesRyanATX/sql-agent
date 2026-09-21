@@ -49,9 +49,9 @@ make config                          # claude-opus-5, per-node efforts, tracing 
 make test                            # green
 ```
 
-- The `golden` connection registered against the demo database with the
-  read-only `reader` role, so corpus turns stay out of `default`'s turn log.
 - The corpus recorded and judged: `make corpus`, all 23 questions answered.
+  Every question is asked with the memory off, so this leaves the demo's
+  memory alone and can be done days ahead without a reset afterwards.
   This takes 40 minutes and cannot be done on the day.
 - Every GEPA run finished, with its artifacts committed. Nothing in
   `tools/gepa/out/` survives a `git clone`, so what the talk shows must be
@@ -70,7 +70,6 @@ make reset                           # T1 is genuinely cold — this is the stag
 - Langfuse open at http://localhost:3000 on the traces view, logged in.
 - `demo/demo.gif` open in a second window. That is the network fallback for
   section 1, and it is a recording of this same script.
-- `sql-agent connect default`.
 
 ---
 
@@ -373,8 +372,8 @@ that claims a failure mode without showing it has not tested it.
 | A turn hangs past ~60s | Keep talking through the architecture; the cost line lands when it lands. Do not Ctrl-C into a dead terminal. |
 | A live turn answers **wrong** | Take it. That is section 2's whole argument, arriving early: press `2`, say why, and point out that the verdict just became training data. |
 | Langfuse shows nothing | Traces take seconds to ingest, and the read path is not the write path. Move on and show the pre-baked traces. |
-| `make corpus` refuses to start | It preflights three things: a terminal, tracing on, and the connection existing. Run `make config` and read the tracing line. |
-| The cache is not empty at T1 | `make reset`. It wipes the demo connection's learned state and reseeds. |
+| `make corpus` refuses to start | It preflights two things: somebody at a terminal, and tracing on. Run `make config` and read the tracing line. |
+| The cache is not empty at T1 | `make reset`. It empties the memory and reseeds the demo database. |
 
 ## The gap list
 

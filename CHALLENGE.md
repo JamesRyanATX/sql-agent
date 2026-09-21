@@ -56,12 +56,12 @@ Extend that, don't replace it.
 ### 1. Golden set — harvested from traces, then frozen
 
 **Langfuse is the source.** A `turn` trace already holds everything a whole-turn
-corpus needs: the question and `connection_id` on the span's input, which prose
-produced it in `metadata.prompts`, every tool call as a `tool.<name>` span with
+corpus needs: the question on the span's input, which prose produced it in
+`metadata.prompts`, every tool call as a `tool.<name>` span with
 arguments and a WARNING level on error, the executed SQL as `sql.execute`'s input
 with ERROR on failure, each node's returned delta — `fix_attempts`, `error`,
 `explored` — and per-call usage. `turn_scope()` in `tools/gepa/harvest.py`
-already reads the scoping half of that.
+already reads the prompt fingerprints out of it.
 
 What a trace does not hold is whether the answer was *right*, and that is the
 one thing a whole-turn metric needs.
@@ -83,9 +83,9 @@ one thing a whole-turn metric needs.
   `ordered` (whether row order is part of the answer), and `tables` — which
   schema areas it touches, so a split can hold out an area.
 - 15–20 cases, and it must clear `THIN_CORPUS = 12` with margin.
-- **No traces exist yet.** The first step is a scripted run of ~20 questions
-  against a dedicated connection with its cache cleared between each, so every
-  turn is cold. That run also produces ~20 distinct `extract` calls, which is the
+- **No traces exist yet.** The first step is `make corpus`: ~20 questions, each
+  asked with `--no-memory`, so every turn is cold and the demo's memory is left
+  as it was. That run also produces ~20 distinct `extract` calls, which is the
   corpus item 7 has been waiting for. A case arrives from it already certified:
   the score says the answer was right, and the `sql.execute` span says what ran.
 - `extract` keeps its own trace-based harvest either way (`harvest.py`); this is
@@ -160,13 +160,12 @@ injected, and return what happened.
   tool-description overrides (`app/tools.py`, the four `description` strings
   in the tool spec list), per-node `effort` overrides (`app/config.py`,
   `Node.effort`). Overrides are per-call, never written to disk.
-- **Cold cache every rollout.** Tool descriptions only matter on the cold path,
-  and a warm cache confounds every other component. Use `store` against a
-  scratch `connection_id` and truncate it before each rollout; do not touch
-  `default`. Say this on stage.
-- **One scratch connection per concurrency slot** (`gepa-0`, `gepa-1`, …). The
-  adapter runs rollouts concurrently, and two sharing a connection share a cache,
-  which is the confound this item exists to remove.
+- **Cold every rollout, and nothing kept.** Tool descriptions only matter on the
+  cold path, and a warm memory confounds every other component. The turn runs
+  with the memory off: it reads nothing and saves nothing, so it behaves like a
+  first-ever question every time and leaves your memory exactly as it was.
+  Nothing is cleared, which is also what makes concurrent rollouts safe —
+  they have nothing to wipe out from under each other. Say this on stage.
 - Returns: answer text, result rows, `tokens_in`/`tokens_out` per node,
   tool-call sequence (name + args), fix attempts, errors. Mirror the `Replayed`
   dataclass shape so the metric and adapter code stays thin.

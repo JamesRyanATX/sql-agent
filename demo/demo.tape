@@ -79,8 +79,6 @@ Type "PS1='$ '"
 Enter
 Type 'export PATH="$PWD/.venv/bin:$PATH"'
 Enter
-Type "sql-agent connect default"
-Enter
 Type "clear"
 Enter
 Show
@@ -171,26 +169,4 @@ Enter
 Type "sql-agent turns"
 Enter
 Wait+Screen@2m /rows\)/
-Sleep 20s
-
-# ------------------------------------------------------------ connections ----
-# Where all of that was pointed, and how to point it somewhere else. Everything
-# above belongs to one registered database — the cache, the turn log, the falling
-# number — and `connect` is how you switch to another.
-#
-# Two commands on one screen: `connected to` cannot appear in the listing above
-# it, so the second wait has no stale line to match early.
-
-Ctrl+L
-Type "# The agent is pointed at a registered database:"
-Enter
-Type "sql-agent connections ls"
-Enter
-# `(1 row)`, singular, while there is one connection — so match the stem, not
-# the plural the turns table happens to print.
-Wait+Screen@2m /row\)/
-Sleep 5s
-Type "sql-agent connect default"
-Enter
-Wait+Screen@2m /connected to/
 Sleep 20s

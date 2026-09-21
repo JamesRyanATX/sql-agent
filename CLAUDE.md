@@ -8,9 +8,10 @@ A LangGraph agent that answers business questions on a Postgres DB, caching lear
 make up && make migrate && make seed   # start API, apply DB schema, load demo data
 make test                              # run pytest (no live model calls)
 make test-live                         # include live model tests
-make cache                             # `sql-agent cache -c default`
+make cache                             # `sql-agent cache`
 make psql-agent / psql-demo            # shell to the DBs
 make reset                             # clear learned state, reseed
+make corpus                            # ask demo/questions.txt cold, judge each answer
 ```
 
 ## Configuration
@@ -24,8 +25,8 @@ make reset                             # clear learned state, reseed
 - **API** (`/v1/*`): only entry point; all logic lives in the server process.  
 - `cli/sql_agent/`: HTTP client, no imports from `app`.  
 - **Graph** (`app/graph.py`): nodes, schemas, edges; only `llm.complete` talks to models.  
-- **Store** (`app/store.py`): connection registry, cache, turn log. Functions prefixed with `reflect_`, `schema_fingerprint`, etc. operate on the **target** DB; everything else uses the **agent** DB.  
-- **DB** (`app/db.py`): `db.agent()`, `db.target(cid)`, `db.target_readonly(cid)`. Target engines use `AUTOCOMMIT`; read‑only wraps a transaction for Postgres/MySQL.  
+- **Store** (`app/store.py`): cache and turn log. Functions prefixed with `reflect_`, `schema_fingerprint`, etc. operate on the **target** DB; everything else uses the **agent** DB.  
+- **DB** (`app/db.py`): `db.agent()`, `db.target()`, `db.target_readonly()`. One target engine, built from `TARGET_DATABASE_URL` on first use. Target engines use `AUTOCOMMIT`; read‑only wraps a transaction for Postgres/MySQL.  
 - **Tools** (`app/tools.py`): four read‑only introspection tools used by the explore loop.
 
 ## Key Invariants
@@ -34,9 +35,9 @@ make reset                             # clear learned state, reseed
 - `extract` runs only on turns needing a fix; fully cached turns skip it.  
 - Recipes are verified: `grounded_in()` checks the SQL fragment is a token subsequence of the executed SQL.  
 - Pinned cache entries are never overwritten by extraction.  
-- Named entries are upserted per‑connection; the unique index is `(connection_id, name)`.  
-- All cache entries (including tombstones) load on every turn for the connection.  
-- Turn state includes `connection_id`; a resumed turn cannot switch warehouses.  
+- Named entries are upserted; the unique index is `(name) WHERE name IS NOT NULL`.  
+- All cache entries (including tombstones) load on every turn.  
+- One memory, always. `sql-agent ask --no-memory` is a turn that neither reads it nor writes to it; `memory: false` in the ask body, `memory` in `TurnState`, gating `load_cache` and the *save* in `extract` (never the `extract` model call, which the optimiser harvests).  
 - Per‑node `effort` controls model usage; there is no global override.  
 - Dialect capabilities (read‑only, DML/DDL blocks, statement timeout) live in `app/dialects.py`.  
 - SQL is executed via `exec_driver_sql`, never `text()`.  
@@ -59,15 +60,14 @@ The demo (`demo/demo.sql`) encodes five intentional pitfalls; tests in `tests/te
 
 ## Observability
 Langfuse tracing is enabled only when both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set. No partial enablement. Traces capture system prompts, model generations, SQL statements, and row counts.  
-A user verdict on a turn (`POST /v1/connections/{cid}/turns/{id}/feedback`, or the menu `sql-agent ask` shows) is a Langfuse score named `correct`, with any prose as its comment. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
+A user verdict on a turn (`POST /v1/turns/{id}/feedback`, or the menu `sql-agent ask` shows) is a Langfuse score named `correct`, with any prose as its comment. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
 
 ## Prompt Management
 Prompts live in `config/prompts/*.md`. Each file is the full prompt for a graph node; loading is memoised per process. Missing or empty prompts raise errors. The loader (`app/prompts.py`) reads from `$CONFIG_DIR/prompts/<node>.md`.
 
 ## Miscellaneous
 - The agent’s memory resides in a separate Postgres server (`agent-db`).  
-- Target connections (`target-db`) may be Postgres, MySQL, or SQLite.  
-- Secrets (`Connection.password`) are sealed via `app/secrets.py`.  
+- The target (`target-db`) may be Postgres, MySQL, or SQLite; a bare scheme is mapped onto an installed driver in `db.target_url()`.  
 - The API enforces `Authorization: Bearer $API_TOKEN`; an empty token disables auth with a warning.
 
 > Keep this document in sync with code changes; it is the source of truth for contributors.
