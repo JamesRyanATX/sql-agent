@@ -1,8 +1,8 @@
 """Record a corpus: ask each question cold, and say what the answer was worth.
 
 The optimisation downstream needs turns with a label on them, and the only
-person who can supply one is the person who just read the answer. So this is a
-sitting: a file of questions, one turn each, a verdict each, twenty minutes.
+person who can supply one is the person who just read the answer. So this asks
+a file of questions, one turn each, and waits for you to judge each answer.
 
 **Cold every turn.** The cache is cleared before each question, so no answer
 leans on what the last one learned. That is what makes every turn a full
@@ -10,7 +10,7 @@ exploration — a distinct `extract` call for the prompt corpus, and a token cou
 that means something as a baseline. It also makes the run expensive on purpose:
 a warm corpus would be cheaper and would describe an agent nobody starts from.
 
-Everything that could waste the sitting is checked before the first question:
+Everything that could waste the run is checked before the first question:
 a terminal to answer on, tracing to record onto, and a connection that exists.
 """
 
@@ -82,7 +82,7 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
             answered, fatal = await turn.take(cid, question, verbose=verbose)
             asked += 1
             if fatal or not answered:
-                # Not fatal to the sitting: one timed-out turn out of twenty is
+                # Not fatal to the whole run: one timed-out turn out of twenty is
                 # a question to re-ask later, not a reason to lose the other
                 # nineteen verdicts.
                 click.secho("  that turn failed — moving on", fg="yellow")
@@ -105,7 +105,7 @@ async def _record(path: Path, connection: str | None, verbose: bool) -> None:
 
 
 async def _preflight(cid: str, path: Path, questions: list[str]) -> None:
-    """Everything that would waste the sitting, checked before the first turn.
+    """Everything that would waste the run, checked before the first turn.
 
     Each of these is otherwise discovered after a cold turn has been paid for,
     and the third one only at the end, when the verdicts turn out to be on
@@ -113,7 +113,7 @@ async def _preflight(cid: str, path: Path, questions: list[str]) -> None:
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise http.ApiError(
-            "`corpus` is a sitting, not a batch job: it asks what each answer "
+            "`corpus` needs somebody at the keyboard: it asks what each answer "
             "was worth, and there is nobody at a terminal to answer"
         )
 

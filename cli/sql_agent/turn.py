@@ -69,7 +69,7 @@ async def judge(cid: str, answered: dict) -> bool:
     """Ask what that answer was worth, and file it against the turn's trace.
 
     Returns the verdict, which `sql-agent corpus` counts: how many of twenty
-    answers were right is the first thing anyone asks about a sitting.
+    answers were right is the first thing anyone asks after a corpus run.
 
     The moment is the point. Asked here, the person still has the answer in
     front of them and is the one who wanted it; asked later, in another tool,

@@ -1,8 +1,8 @@
-"""The sitting: twenty questions, cold each time, judged as they land.
+"""Twenty questions, cold each time, judged as they land.
 
 What matters here is not the asking — `turn.take` is the same code `ask` runs,
 tested in test_cli_feedback.py. It is everything around it that can waste an
-afternoon: a cache left warm, a preflight that lets the run start when the
+run: a cache left warm, a preflight that lets the run start when the
 verdicts have nowhere to go, a summary that lies about what was judged.
 
 Offline. `stream_events`, `delete` and `post` are scripted, and the menu answers
@@ -28,7 +28,7 @@ how many customers are in the west region?
 
 
 @pytest.fixture
-def sitting(monkeypatch, tmp_path):
+def scripted(monkeypatch, tmp_path):
     """A scripted run: what was called, in order, and what was posted."""
     calls: list[str] = []
     posted: list[dict] = []
@@ -77,8 +77,8 @@ def streams(monkeypatch, *, stdin: bool = True, stdout: bool = True) -> None:
     monkeypatch.setattr(turn_mod.sys, "stdout", Stream(turn_mod.sys.stdout, stdout))
 
 
-async def run(sitting, connection="golden") -> None:
-    await corpus._record(sitting["path"], connection, False)
+async def run(scripted, connection="golden") -> None:
+    await corpus._record(scripted["path"], connection, False)
 
 
 # ------------------------------------------------------------- reading the file
@@ -91,18 +91,18 @@ def test_the_file_is_questions_and_the_rest_is_for_people(tmp_path):
     assert corpus.read_questions(path) == ["how many customers?", "and west?"]
 
 
-async def test_a_file_of_nothing_but_comments_is_refused(sitting, monkeypatch):
+async def test_a_file_of_nothing_but_comments_is_refused(scripted, monkeypatch):
     streams(monkeypatch)
-    sitting["path"].write_text("# all notes\n\n# and no questions\n")
+    scripted["path"].write_text("# all notes\n\n# and no questions\n")
 
     with pytest.raises(http.ApiError, match="no questions"):
-        await run(sitting)
+        await run(scripted)
 
 
 # -------------------------------------------------------------------- the loop
 
 
-async def test_every_question_is_asked_cold(sitting, monkeypatch):
+async def test_every_question_is_asked_cold(scripted, monkeypatch):
     """The cache is cleared *before each* question, not once at the start.
 
     This is the whole reason the run is expensive: a warm second question
@@ -111,9 +111,9 @@ async def test_every_question_is_asked_cold(sitting, monkeypatch):
     """
     streams(monkeypatch)
 
-    await run(sitting)
+    await run(scripted)
 
-    assert sitting["calls"] == [
+    assert scripted["calls"] == [
         "clear:/connections/golden/cache",
         "ask:how many customers do we have?",
         "clear:/connections/golden/cache",
@@ -121,84 +121,84 @@ async def test_every_question_is_asked_cold(sitting, monkeypatch):
     ]
 
 
-async def test_each_answer_is_judged_and_filed(sitting, monkeypatch):
+async def test_each_answer_is_judged_and_filed(scripted, monkeypatch):
     streams(monkeypatch)
 
-    await run(sitting)
+    await run(scripted)
 
-    assert [p["path"] for p in sitting["posted"]] == [
+    assert [p["path"] for p in scripted["posted"]] == [
         "/connections/golden/turns/7/feedback",
         "/connections/golden/turns/7/feedback",
     ]
-    assert all(p["json"] == {"correct": True, "comment": None} for p in sitting["posted"])
+    assert all(p["json"] == {"correct": True, "comment": None} for p in scripted["posted"])
 
 
-async def test_the_summary_counts_what_was_judged(sitting, monkeypatch, capsys):
+async def test_the_summary_counts_what_was_judged(scripted, monkeypatch, capsys):
     """Two questions, one of them wrong. "How many were right" is the first
-    thing anyone asks about a sitting."""
+    thing anyone asks after a run."""
     streams(monkeypatch)
-    sitting["state"]["choice"] = 1  # every answer marked Not OK
+    scripted["state"]["choice"] = 1  # every answer marked Not OK
 
-    await run(sitting)
+    await run(scripted)
 
     out = capsys.readouterr().out
     assert "2 of 2 turns judged, 0 of them right" in out
 
 
-async def test_a_failed_turn_costs_that_question_and_not_the_sitting(
-    sitting, monkeypatch, capsys
+async def test_a_failed_turn_costs_that_question_and_not_the_run(
+    scripted, monkeypatch, capsys
 ):
     """One timed-out turn out of twenty is a question to re-ask, not a reason to
     lose the other nineteen verdicts."""
     streams(monkeypatch)
-    sitting["state"]["fatal"] = True
+    scripted["state"]["fatal"] = True
 
-    await run(sitting)
+    await run(scripted)
 
-    assert sitting["posted"] == []
+    assert scripted["posted"] == []
     out = capsys.readouterr().out
     assert "moving on" in out
     assert "0 of 2 turns judged" in out
 
 
-async def test_an_untraced_turn_stops_the_run(sitting, monkeypatch):
+async def test_an_untraced_turn_stops_the_run(scripted, monkeypatch):
     """Tracing was on at preflight and is not now. Every later verdict would be
     filed nowhere, so the run stops rather than spending twenty turns to
     discover it."""
     streams(monkeypatch)
-    sitting["state"]["answer"] = {**ANSWER, "trace_id": None}
+    scripted["state"]["answer"] = {**ANSWER, "trace_id": None}
 
     with pytest.raises(http.ApiError, match="not traced"):
-        await run(sitting)
+        await run(scripted)
 
 
 # --------------------------------------------------------------- the preflight
 
 
-async def test_it_refuses_when_tracing_is_off(sitting, monkeypatch):
+async def test_it_refuses_when_tracing_is_off(scripted, monkeypatch):
     """Found before the first turn, because the first turn is the expensive
     one and its verdict would have nowhere to land."""
     streams(monkeypatch)
-    sitting["state"]["tracing"] = False
+    scripted["state"]["tracing"] = False
 
     with pytest.raises(http.ApiError, match="tracing is off"):
-        await run(sitting)
+        await run(scripted)
 
-    assert sitting["calls"] == []
+    assert scripted["calls"] == []
 
 
-async def test_it_refuses_without_a_terminal(sitting, monkeypatch):
+async def test_it_refuses_without_a_terminal(scripted, monkeypatch):
     """`make corpus > log` and every CI job: nobody is there to answer, so the
     run would ask twenty questions into a pipe."""
     streams(monkeypatch, stdin=False)
 
-    with pytest.raises(http.ApiError, match="sitting, not a batch job"):
-        await run(sitting)
+    with pytest.raises(http.ApiError, match="somebody at the keyboard"):
+        await run(scripted)
 
-    assert sitting["calls"] == []
+    assert scripted["calls"] == []
 
 
-async def test_the_demo_connection_asks_first(sitting, monkeypatch, capsys):
+async def test_the_demo_connection_asks_first(scripted, monkeypatch, capsys):
     """`default` is what `sql-agent turns` charts. Twenty corpus turns in it
     buries the demo, and the cache clearing wipes what the demo taught it."""
     streams(monkeypatch)
@@ -211,7 +211,7 @@ async def test_the_demo_connection_asks_first(sitting, monkeypatch, capsys):
     monkeypatch.setattr(corpus.click, "confirm", confirm)
 
     with pytest.raises(click.Abort):
-        await run(sitting, connection="default")
+        await run(scripted, connection="default")
 
     assert "Use it anyway?" in asked["text"]
-    assert sitting["calls"] == []
+    assert scripted["calls"] == []

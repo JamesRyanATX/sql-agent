@@ -149,8 +149,8 @@ config:  ## what the server is running — config.yaml under config.local.yaml
 # --- the corpus: questions, asked cold, judged by hand ----------------------
 #
 # The optimisation downstream needs turns with a label on them, and the label
-# is a person's. This is the sitting where that happens: ~20 questions, a cold
-# turn each, a verdict each. Verdicts land on the traces, so Langfuse has to be
+# is a person's. That happens here: ~20 questions, a cold turn each, a verdict
+# each. Verdicts land on the traces, so Langfuse has to be
 # up (`make langfuse-up`) and the server restarted with both keys.
 #
 # `CORPUS_CONN` rather than `CONN`: these turns are not the demo's, and mixing
