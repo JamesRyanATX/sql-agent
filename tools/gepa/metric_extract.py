@@ -16,11 +16,13 @@ defence a number like 0.35 has.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from tools.gepa import detect
 from tools.gepa.probes import graph_tokens
 from tools.gepa.replay import Replayed
+
+# Shared with `metric_turn`, and re-exported here because every caller in the
+# tree already reads it as `metric_extract.Score`.
+from tools.gepa.score import Score  # noqa: F401
 
 WEIGHTS = {
     # The production gate, not a re-implementation of it, clamped so that
@@ -44,22 +46,6 @@ WEIGHTS = {
 ENTRY_BAND = (2, 6)
 # A claim is a note a colleague reads aloud, not a paragraph.
 CLAIM_LIMIT = 200
-
-
-@dataclass
-class Score:
-    """A scalar for the optimiser and prose for the reflection step.
-
-    The scalar decides selection; the feedback is what lets the reflection model
-    propose a targeted mutation rather than a random one.
-    """
-
-    value: float
-    terms: dict[str, float] = field(default_factory=dict)
-    feedback: list[str] = field(default_factory=list)
-
-    def text(self) -> str:
-        return "\n\n".join(self.feedback) if self.feedback else "No problems found."
 
 
 def score(r: Replayed) -> Score:
