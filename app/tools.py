@@ -42,6 +42,8 @@ from sqlalchemy.exc import CompileError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import quoted_name
 
+from app import overrides
+
 SAMPLE_LIMIT = 12
 
 T = TypeVar("T")
@@ -330,6 +332,29 @@ SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+def schemas() -> list[dict[str, Any]]:
+    """What the explore loop offers the model this turn.
+
+    `SCHEMAS` unless an optimisation run has put different descriptions in
+    force, in which case each tool keeps its name and its input schema and gets
+    the candidate's prose. Only the description, because `run_tool` dispatches
+    on the name and splats the arguments: a candidate that renamed a tool or
+    added a property would break the call rather than score badly for it, and a
+    broken call is not a measurement.
+
+    A name the four tools do not have is ignored. It says the candidate is
+    describing a tool that does not exist, which the feedback should say and
+    the run should survive.
+    """
+    proposed = overrides.current().tools
+    if not proposed:
+        return SCHEMAS
+    return [
+        {**schema, "description": proposed.get(schema["name"], schema["description"])}
+        for schema in SCHEMAS
+    ]
+
 
 _DISPATCH = {
     "list_tables": list_tables,

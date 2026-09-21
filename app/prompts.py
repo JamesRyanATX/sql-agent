@@ -21,6 +21,7 @@ import hashlib
 from functools import lru_cache
 from pathlib import Path
 
+from app import overrides
 from app.settings import settings
 
 
@@ -77,8 +78,14 @@ def _loaded() -> dict[str, str]:
 
 
 def get(name: str) -> str:
-    """The instruction block for a node."""
-    return _loaded()[name]
+    """The instruction block for a node.
+
+    An optimisation run can put different text in force for one turn, which is
+    checked here rather than below the cache: `_loaded()` stays the files, so
+    nothing an in-flight trial does can outlive it or reach another turn.
+    """
+    override = overrides.current().prompts.get(name)
+    return override if override is not None else _loaded()[name]
 
 
 def fingerprint() -> dict[str, str]:

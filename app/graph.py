@@ -340,7 +340,7 @@ async def explore(state: TurnState) -> TurnState:
                 system=system,
                 messages=messages,
                 effort=config().effort_for("explore"),
-                tools=tools.SCHEMAS,
+                tools=tools.schemas(),
                 node="explore",
             )
             tokens_in += result.tokens_in

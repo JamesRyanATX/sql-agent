@@ -20,6 +20,9 @@ from typing import Any, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# The function, not the module: `overrides()` below is already taken — it is
+# the overlay's key list, which is a different question entirely.
+from app.overrides import current as current_overrides
 from app.settings import settings
 
 FILE = "config.yaml"
@@ -140,7 +143,26 @@ class Config(BaseModel):
         return self.node(name).model or self.model
 
     def effort_for(self, name: str, default: str = "medium") -> str:
-        """How hard it should think. See PLAN.md §7.1 before lowering one."""
+        """How hard it should think. See PLAN.md §7.1 before lowering one.
+
+        An optimisation run may put a different effort in force for one turn.
+        `none` is refused here for the same reason the file-time validator
+        refuses it: on Opus 5 it can turn a tool call into visible text that
+        never runs, and a candidate proposing it would score as a broken graph
+        rather than as the bad idea it is.
+        """
+        # The same fallback `node()` does, so an override on `explore` covers
+        # the `explore.summary` call the way a config block would.
+        proposed = current_overrides().efforts.get(name)
+        if proposed is None and "." in name:
+            proposed = current_overrides().efforts.get(name.split(".", 1)[0])
+        if proposed is not None:
+            if proposed == "none" and self.model_for(name).provider == "anthropic":
+                raise ValueError(
+                    f"effort: none on {name} — the Anthropic backend has no such "
+                    f"level, and disabling thinking on Opus 5 breaks tool calls"
+                )
+            return proposed
         return self.node(name).effort or default
 
 
