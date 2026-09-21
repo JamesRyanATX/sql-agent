@@ -75,7 +75,7 @@ async def test_crossing_the_urls_fails_authentication(agent_conn):
     rather than connecting and failing later on a missing table — which reads
     like a bug in the agent instead of a bug in the config."""
     agent_creds = settings().agent_database_url.rsplit("@", 1)[0]
-    demo_host = settings().target_admin_url.rsplit("@", 1)[1]
+    demo_host = settings().test_admin_url.rsplit("@", 1)[1]
 
     with pytest.raises(psycopg.OperationalError):
         await psycopg.AsyncConnection.connect(f"{agent_creds}@{demo_host}")
@@ -210,7 +210,7 @@ async def test_a_user_supplied_dsn_still_cannot_write(client, agent_conn):
     from app import db, dialects
 
     owner = make_url(
-        store.connection_from_url(settings().target_admin_url, id="_owner")
+        store.connection_from_url(settings().test_admin_url, id="_owner")
         .url()
         .render_as_string(hide_password=False)
     )

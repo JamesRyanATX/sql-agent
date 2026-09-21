@@ -35,6 +35,10 @@ projects two quarters forward, without opening the schema again.
 ## Quickstart
 
 ```bash
+# Two files to copy. Keys go in .env; which model runs is config.local.yaml.
+cp .env.example .env                                        # paste your key
+cp config/config.local.yaml.example config/config.local.yaml
+
 # Bring up environment, including demo database with 2k customers
 make up && make migrate && make seed
 
@@ -48,10 +52,9 @@ make cache
 make turns
 ```
 
-Copy `.env.example` to `.env` and put your `ANTHROPIC_API_KEY` in it. That file
-holds secrets and addresses; everything else is
+`.env` holds secrets and addresses. Everything else is
 [config/config.yaml](config/config.yaml), which is tracked and ships pointed at
-`claude-opus-5`:
+`claude-opus-5` through Anthropic directly:
 
 ```yaml
 model:
@@ -200,7 +203,16 @@ flowchart TD
 
 ### Telemetry
 
-The token counter says a turn cost 11,500 tokens. Tracing says where they went.
+The token counter says a turn cost 11,500 tokens. Tracing says where they went:
+a span per graph node, a generation per model call with its tokens and its cache
+reads, and a span per introspection tool call — the 24 a cold turn collapses
+into one number.
+
+It captures the question, the prompts, the generated SQL and the rows handed
+back to the model. The stack is self-hosted, so none of it leaves the machine,
+but it does mean the trace store holds whatever the registered warehouse holds.
+Read [app/tracing.py](app/tracing.py) before pointing a connection at something
+real.
 
 ```bash
 make langfuse-up   # six containers, ~2GB, UI on http://localhost:3000

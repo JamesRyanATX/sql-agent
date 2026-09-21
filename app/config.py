@@ -138,7 +138,7 @@ class Config(BaseModel):
 
     # GEPA's teacher, which proposes candidate prompts. Its own block because it
     # is the one call that is not part of a turn, and usually wants a stronger
-    # model. `optim/adapter.py` calls it with node="gepa.reflect".
+    # model. `tools/gepa/adapter.py` calls it with node="gepa.reflect".
     gepa: Node = Field(default_factory=lambda: Node(effort="max"))
 
     NODES: ClassVar[tuple[str, ...]] = (

@@ -328,7 +328,7 @@ async def test_execute_is_read_only(pool, monkeypatch):
 
     # On the demo server — `customer` is not in the agent's database at all.
     async with await psycopg.AsyncConnection.connect(
-        settings().target_admin_url, row_factory=dict_row
+        settings().test_admin_url, row_factory=dict_row
     ) as c:
         cur = await c.execute("SELECT count(*) AS n FROM customer")
         assert (await cur.fetchone())["n"] == 2_000

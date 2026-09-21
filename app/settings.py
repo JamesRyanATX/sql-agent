@@ -17,9 +17,12 @@ class Settings(BaseSettings):
     # owns. Every other target comes out of the `connection` table.
     target_database_url: str = "postgresql://reader:reader@localhost:5432/business"
 
-    # The owner connection. Nothing in app/ reads it — it is for the test
-    # harness and for applying demo/demo.sql from outside Docker.
-    target_admin_url: str = "postgresql://business:business@localhost:5432/business"
+    # The suite's superuser handle, and nothing in app/ reads it. It creates and
+    # drops the test databases, loads their data as owner, and is the other half
+    # of the isolation tests that prove `reader` cannot write. Named TEST_ rather
+    # than TARGET_ because it is not a target: the agent never connects as this
+    # role and its engines cannot issue DDL at all.
+    test_admin_url: str = "postgresql://business:business@localhost:5432/business"
 
     # --- the API ------------------------------------------------------------
     # Everything under /v1 requires this token. Empty disables enforcement and

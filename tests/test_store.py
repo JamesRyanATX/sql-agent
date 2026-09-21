@@ -65,7 +65,7 @@ async def fp() -> AsyncIterator[TargetConnection]:
     which is what makes that work.
     """
     engine = create_async_engine(
-        store.connection_from_url(settings().target_admin_url, id="_fp").url()
+        store.connection_from_url(settings().test_admin_url, id="_fp").url()
     )
     try:
         async with engine.connect() as c:

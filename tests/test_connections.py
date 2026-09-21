@@ -303,7 +303,7 @@ async def test_test_warns_when_the_role_can_write(client, registered):
     """Advisory, never a gate — a warehouse role with INSERT on one unrelated
     table is common, and refusing it would mean the feature does not work. The
     guarantee is the read-only session in app/db.py."""
-    owner = conninfo_to_dict(settings().target_admin_url)
+    owner = conninfo_to_dict(settings().test_admin_url)
     await registered("owner", username=owner["user"], password=owner["password"])
     body = (await client.post("/v1/connections/owner/test")).json()
     assert body["ok"] is True

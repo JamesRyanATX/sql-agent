@@ -210,7 +210,7 @@ def generation(
 
 # --------------------------------------------------------------- the read half
 #
-# Everything above writes; this reads. Here rather than in `optim/`, because
+# Everything above writes; this reads. Here rather than in `tools/gepa/`, because
 # `import langfuse` belongs to one module. tests/test_cli_isolation.py enforces it.
 
 
@@ -224,7 +224,7 @@ def observations(
 ) -> Iterator[dict[str, Any]]:
     """Everything recorded under one observation name, oldest page first.
 
-    Two shapes are used. `kind="GENERATION"` with a node name is `optim/`'s
+    Two shapes are used. `kind="GENERATION"` with a node name is `tools/gepa/`'s
     per-node dataset of exact inputs and outputs. `name="turn", kind="SPAN"` is
     the scope: the turn span's `input.connection_id` says which warehouse a
     recorded call was about, which cannot come from a join to `turn.trace_id`

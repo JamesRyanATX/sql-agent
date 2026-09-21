@@ -636,7 +636,7 @@ async def infer_tables(sql: str, connection_id: str) -> list[str]:
     return sorted(by_fold[k] for k in by_fold.keys() & seen)
 
 
-# The two anchors `extract_message` writes and `optim/` splits back out. Named
+# The two anchors `extract_message` writes and `tools/gepa/` splits back out. Named
 # rather than inline because a harvested case is replayed verbatim and only the
 # SQL is parsed back out of it — a literal duplicated across two packages drifts
 # silently, and the metric would score recipes against the wrong query.

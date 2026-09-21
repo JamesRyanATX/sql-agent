@@ -8,7 +8,7 @@ Blocks resolve **once per process**: `graph.plan` puts its system block behind a
 Anthropic cache breakpoint promising it varies with `connection_id` alone, so a
 prompt changing mid-process would show up only as T2 costing more.
 
-Imports stdlib and `app.settings` only, so `optim/` can read a seed candidate
+Imports stdlib and `app.settings` only, so `tools/gepa/` can read a seed candidate
 without pulling in langgraph and sqlalchemy.
 
 Keys are the `node=` labels `llm.complete` records as Langfuse generation names.

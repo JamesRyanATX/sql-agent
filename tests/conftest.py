@@ -132,22 +132,22 @@ def _register(conn, cid: str, url: str, *, origin: str) -> None:
 def test_databases() -> str:
     dev = Settings()
     agent_url = _swap_db(dev.agent_database_url, AGENT_TEST)
-    admin_url = _swap_db(dev.target_admin_url, DEMO_TEST)
+    admin_url = _swap_db(dev.test_admin_url, DEMO_TEST)
     reader_url = _swap_db(dev.target_database_url, DEMO_TEST)
-    admin_url_b = _swap_db(dev.target_admin_url, DEMO_TEST_B)
+    admin_url_b = _swap_db(dev.test_admin_url, DEMO_TEST_B)
     reader_url_b = _swap_db(dev.target_database_url, DEMO_TEST_B)
 
     for live, test in (
         (dev.agent_database_url, agent_url),
-        (dev.target_admin_url, admin_url),
+        (dev.test_admin_url, admin_url),
         (dev.target_database_url, reader_url),
     ):
         assert live != test, f"already pointed at a test database: {test}"
 
     _recreate(dev.agent_database_url, AGENT_TEST)
-    _recreate(dev.target_admin_url, DEMO_TEST)
-    _recreate(dev.target_admin_url, DEMO_TEST_B)
-    _recreate(dev.target_admin_url, PORTABLE_PG)
+    _recreate(dev.test_admin_url, DEMO_TEST)
+    _recreate(dev.test_admin_url, DEMO_TEST_B)
+    _recreate(dev.test_admin_url, PORTABLE_PG)
 
     # The agent's own schema, then LangGraph's checkpoint tables — which the
     # app creates in its lifespan, not in a migration. Without this the agent
@@ -173,7 +173,7 @@ def test_databases() -> str:
     # Point everything at them *before* any app module resolves settings.
     os.environ["AGENT_DATABASE_URL"] = agent_url
     os.environ["TARGET_DATABASE_URL"] = reader_url
-    os.environ["TARGET_ADMIN_URL"] = admin_url
+    os.environ["TEST_ADMIN_URL"] = admin_url
     # Same reasoning as the databases: whatever is in the developer's .env must
     # not change what the suite tests. An API_TOKEN there would otherwise make
     # every /v1 call 401 on one machine and pass on another. The auth tests set
@@ -235,7 +235,7 @@ async def target_conn() -> AsyncIterator[AsyncConnection]:
 
     This is not the connection the app uses. For that, see `reader_conn`.
     """
-    async for conn in _connect(settings().target_admin_url):
+    async for conn in _connect(settings().test_admin_url):
         yield conn
 
 
@@ -273,7 +273,7 @@ async def reader_conn() -> AsyncIterator[TargetConnection]:
 @pytest.fixture
 async def target_conn_b() -> AsyncIterator[AsyncConnection]:
     """The second business database, as its owner. See `OTHER_CONNECTION`."""
-    async for conn in _connect(_swap_db(settings().target_admin_url, DEMO_TEST_B)):
+    async for conn in _connect(_swap_db(settings().test_admin_url, DEMO_TEST_B)):
         yield conn
 
 
@@ -316,7 +316,7 @@ def portable_url(dialect: str, tmp: pathlib.Path) -> str:
             "MYSQL_TEST_URL", "mysql://root:root@localhost:3307/portable"
         )
     else:
-        raw = _swap_db(Settings().target_admin_url, PORTABLE_PG)
+        raw = _swap_db(Settings().test_admin_url, PORTABLE_PG)
     return (
         store.connection_from_url(raw, id="_portable")
         .url()
