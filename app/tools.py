@@ -275,6 +275,17 @@ async def count_distinct(
 
 
 # ---------------------------------------------------------------- tool schemas
+#
+# These `description` strings are prose the model reads on every cold turn, and
+# `make gepa-tools` searches them. They stay here rather than in
+# `config/tools/*.md` beside the node prompts: the symmetry would be real, but
+# it costs a loader, a directory contract and a new startup failure mode for
+# four strings, and a reader of this file can currently see a whole tool — name,
+# description and schema — in one dict.
+#
+# The trigger, written down so it is a decision rather than a habit: if these
+# get promoted from a search more than twice, move them and give them
+# `app/prompts.py`'s loader.
 
 SCHEMAS: list[dict[str, Any]] = [
     {

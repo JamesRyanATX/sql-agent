@@ -23,7 +23,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 
 from app import llm  # noqa: E402
 from tools.gepa.adapter import COMPONENT, Loop  # noqa: E402
-from tools.gepa.gates import probe_gate  # noqa: E402
+from tools.gepa.gates import probe_gate, turn_gate  # noqa: E402
 from tests.test_gepa_adapter import CENSUS_OUTPUT, GOOD_OUTPUT  # noqa: E402
 
 SEED = "the seed instruction, which honours every invariant"
@@ -202,3 +202,154 @@ def test_nothing_reaches_the_search_before_there_is_a_corpus(tmp_path, monkeypat
     )
 
     assert CliRunner().invoke(gepa.cli, ["extract"]).exit_code != 0
+
+
+# ------------------------------------------------- the gate on known answers
+#
+# `turn_gate` reads GEPA's own per-case validation scores rather than re-running
+# anything, so these need no model, no database and no loop. That is unusually
+# lucky and worth exploiting: the gate that decides what gets promoted is the
+# cheapest thing in this directory to test.
+
+
+@dataclass
+class TurnResult:
+    """Enough GEPAResult for the turn gate: a pool, its means, and per case."""
+
+    candidates: list[dict[str, str]]
+    val_aggregate_scores: list[float] = field(default_factory=list)
+    val_subscores: list[dict[str, float]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FakeCase:
+    name: str
+    question: str
+
+
+CASES = [
+    FakeCase("customers_active", "how many customers do we have?"),
+    FakeCase("customers_west", "how many customers are in the west region?"),
+    FakeCase("revenue_total", "what was our total revenue?"),
+]
+
+SEED_TOOLS = {"list_tables": "the seed description"}
+RIVAL = {"list_tables": "a rival description"}
+
+
+def scores(*values: float) -> dict[str, float]:
+    return dict(zip([c.name for c in CASES], values))
+
+
+def test_a_candidate_that_lost_a_case_the_seed_answered_is_discarded(capsys):
+    """CHALLENGE item 5, and the reason the docstring there says "do not
+    average". This candidate's mean is higher — 0.60 against 0.47 — and it got
+    a question wrong that the seed got right. A mean-maximising search takes
+    that trade every time, which is exactly why the gate is outside the
+    objective.
+    """
+    survivors = turn_gate(
+        None,
+        TurnResult(
+            [SEED_TOOLS, RIVAL],
+            [0.47, 0.60],
+            [scores(0.9, 0.5, 0.0), scores(0.9, 0.0, 0.9)],
+        ),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert survivors == [], "a lost case is disqualifying at any score"
+    err = capsys.readouterr().err
+    assert "DISCARDED" in err
+    # The question, not the case id: a person decides what to do next.
+    assert "how many customers are in the west region?" in err
+
+
+def test_a_candidate_that_lost_nothing_survives_with_its_score():
+    """The other half. It gains a case and loses none, which is the shape a
+    promotion is supposed to have."""
+    survivors = turn_gate(
+        None,
+        TurnResult(
+            [SEED_TOOLS, RIVAL],
+            [0.47, 0.70],
+            [scores(0.9, 0.5, 0.0), scores(0.9, 0.6, 0.6)],
+        ),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert [s.candidate for s in survivors] == [RIVAL]
+    assert survivors[0].score == 0.70
+
+
+def test_a_case_the_seed_also_failed_is_not_a_regression():
+    """The seed never answered `revenue_total`, so failing it cannot be a thing
+    this candidate broke. Otherwise a permanently hard case would empty the pool
+    on every run and the gate would be saying nothing."""
+    survivors = turn_gate(
+        None,
+        TurnResult(
+            [SEED_TOOLS, RIVAL],
+            [0.47, 0.50],
+            [scores(0.9, 0.5, 0.0), scores(0.9, 0.6, 0.0)],
+        ),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert [s.candidate for s in survivors] == [RIVAL]
+
+
+def test_a_candidate_with_no_validation_row_is_discarded_rather_than_assumed():
+    """Unscored is not the same as unregressed. Keeping it would promote a
+    candidate nothing ever checked."""
+    survivors = turn_gate(
+        None,
+        TurnResult([SEED_TOOLS, RIVAL], [0.47, 0.99], [scores(0.9, 0.5, 0.0)]),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert survivors == []
+
+
+def test_the_seed_is_never_offered_as_its_own_improvement():
+    survivors = turn_gate(
+        None,
+        TurnResult([SEED_TOOLS], [0.47], [scores(0.9, 0.5, 0.0)]),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert survivors == []
+
+
+def test_survivors_come_back_best_first():
+    third = {"list_tables": "a third description"}
+    survivors = turn_gate(
+        None,
+        TurnResult(
+            [SEED_TOOLS, RIVAL, third],
+            [0.40, 0.60, 0.90],
+            [scores(0.9, 0, 0), scores(0.9, 0.5, 0), scores(0.9, 0.9, 0.9)],
+        ),
+        SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert [s.score for s in survivors] == [0.90, 0.60]
+
+
+def test_a_seed_that_never_reached_the_valset_says_so(capsys):
+    """Then there is nothing to have regressed against. Keeping the pool and
+    saying the gate is not checking beats an empty result that looks like every
+    candidate failed."""
+    survivors = turn_gate(
+        None, TurnResult([RIVAL], [0.6], [scores(0.9, 0.9, 0.9)]), SEED_TOOLS,
+        cases=CASES,
+    )
+
+    assert [s.candidate for s in survivors] == [RIVAL]
+    assert "the gate is not checking" in capsys.readouterr().err

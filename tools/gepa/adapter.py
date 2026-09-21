@@ -21,15 +21,18 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 
-from app import llm
+from app import llm, overrides
 from app.config import config
 from tools.gepa import metric_extract as metric
+from tools.gepa import metric_turn, reference
 from tools.gepa.cases import ExtractCase
 from tools.gepa.replay import Replayed, replay
+from tools.gepa.replay_turn import TurnReplayed, replay_turn
+from tools.gepa.score import Score
 
 # The key this adapter reads out of a candidate. One component, because
 # `extract` is one node with one prompt; `candidate` is `{"extract": "..."}`
@@ -175,6 +178,162 @@ class ExtractAdapter(GEPAAdapter):
                 }
             )
         return {COMPONENT: records}
+
+
+@dataclass
+class TurnTrajectory:
+    """What one golden case did under one candidate, kept for reflection."""
+
+    case: Any
+    replayed: TurnReplayed
+    score: Score
+
+
+class TurnAdapter(GEPAAdapter):
+    """Score a candidate by running whole cold turns under it.
+
+    Knows nothing about what its components *are*. `to_overrides` is how a
+    candidate reaches the running graph and `focus` is how one component's own
+    slice of a turn reaches the reflection step; both come from the target. That
+    is what lets tool descriptions, node prompts and the config block be this
+    adapter rather than three.
+
+    **Concurrency is three, not four.** `explore` holds one target-database
+    connection for the whole of a turn, and `TARGET_POOL_MAX` is five. A fourth
+    concurrent rollout plus the batch's reference queries sits at the pool's
+    limit, and SQLAlchemy's pool *blocks* rather than erroring — so the symptom
+    is a rollout that times out and scores zero, which the metric then reads as
+    a bad candidate. A confound that looks like a measurement is the worst
+    failure available here. Raising this means raising the pool in the same
+    breath.
+    """
+
+    def __init__(
+        self,
+        loop: Loop,
+        *,
+        to_overrides: Callable[[dict[str, str]], overrides.Overrides],
+        focus: Callable[[str, TurnReplayed], dict[str, Any]] | None = None,
+        concurrency: int = 3,
+    ) -> None:
+        self._loop = loop
+        self._to_overrides = to_overrides
+        self._focus = focus or (lambda component, replayed: {})
+        self._semaphore = asyncio.Semaphore(concurrency)
+        # What the seed spent per case, filled by the first evaluation and then
+        # left alone. The cost and tool-call terms are one-sided against it.
+        self._baseline: dict[str, metric_turn.Baseline] = {}
+        self.calls = 0
+
+    def evaluate(
+        self,
+        batch: list[Any],
+        candidate: dict[str, str],
+        capture_traces: bool = False,
+    ) -> EvaluationBatch[TurnTrajectory, dict[str, Any]]:
+        applied = self._to_overrides(candidate)
+        rolled: list[TurnReplayed] = self._loop.run(self._batch(applied, batch))
+        self.calls += len(rolled)
+
+        # Once per batch, not once per rollout. One transaction is one `now()`,
+        # which is the fairness the date-windowed questions need, and it is
+        # nineteen executions instead of nineteen per rollout against a pool the
+        # rollouts are already using. See `reference.py`.
+        truth = self._loop.run(reference.resolve(batch))
+
+        scores = [
+            metric_turn.score(r, case, truth[case.name], baseline=self._baseline.get(case.name))
+            for r, case in zip(rolled, batch)
+        ]
+        self._remember(batch, rolled)
+
+        return EvaluationBatch(
+            outputs=[
+                {
+                    "case": case.name,
+                    "answer": r.answer,
+                    "sql": r.sql,
+                    "rows": len(r.rows),
+                    "tools": r.tool_names,
+                    "fix_attempts": r.fix_attempts,
+                    "tokens": r.tokens,
+                }
+                for r, case in zip(rolled, batch)
+            ],
+            scores=[s.value for s in scores],
+            trajectories=(
+                [TurnTrajectory(c, r, s) for c, r, s in zip(batch, rolled, scores)]
+                if capture_traces
+                else None
+            ),
+            objective_scores=[s.terms for s in scores],
+        )
+
+    def _remember(self, batch: list[Any], rolled: list[TurnReplayed]) -> None:
+        """The first turn to answer a case sets that case's baseline.
+
+        Not stored on the case: what a turn costs is a fact about a model
+        version, and `demo/golden/` is committed. First-seen rather than
+        best-seen, so the target a candidate is measured against does not move
+        underneath the run.
+        """
+        for case, r in zip(batch, rolled):
+            if case.name not in self._baseline and not r.error and r.rows:
+                self._baseline[case.name] = metric_turn.Baseline(
+                    tokens=r.tokens, tool_calls=len(r.tools)
+                )
+
+    async def _batch(
+        self, applied: overrides.Overrides, batch: list[Any]
+    ) -> list[TurnReplayed]:
+        async def one(case: Any) -> TurnReplayed:
+            async with self._semaphore:
+                return await replay_turn(case.question, candidate=applied)
+
+        return list(await asyncio.gather(*(one(c) for c in batch)))
+
+    def make_reflective_dataset(
+        self,
+        candidate: dict[str, str],
+        eval_batch: EvaluationBatch[TurnTrajectory, dict[str, Any]],
+        components_to_update: list[str],
+    ) -> dict[str, Sequence[dict[str, Any]]]:
+        """Worst cases first, with the component's own slice foregrounded.
+
+        Round-robin mutates one component per iteration, so this is almost
+        always one key. `focus` is why it matters: "it called `sample_column`
+        three times on one column" is a sentence about `sample_column`'s
+        description, and an undifferentiated turn summary is not.
+        """
+        records: dict[str, Sequence[dict[str, Any]]] = {}
+        ordered = sorted(eval_batch.trajectories or [], key=lambda t: t.score.value)
+
+        for component in components_to_update:
+            records[component] = [
+                {
+                    "Inputs": {"the question": t.case.question},
+                    "Generated Outputs": _turn_summary(t.replayed),
+                    **self._focus(component, t.replayed),
+                    "Feedback": t.score.text(),
+                    "score": round(t.score.value, 3),
+                    "score_breakdown": {
+                        k: round(v, 3) for k, v in t.score.terms.items()
+                    },
+                }
+                for t in ordered
+            ]
+        return records
+
+
+def _turn_summary(r: TurnReplayed) -> str:
+    """What the turn did, for a reader who has the feedback beside it."""
+    lines = [f"tools, in order: {', '.join(r.tool_names) or '(none)'}"]
+    if r.fix_attempts:
+        lines.append(f"fix attempts: {r.fix_attempts}")
+    lines.append(f"SQL: {r.sql or '(none written)'}")
+    lines.append(f"answer: {r.answer or '(none)'}")
+    lines.append(f"tokens: {r.tokens}")
+    return "\n".join(lines)
 
 
 def reflection_lm(loop: Loop) -> Any:

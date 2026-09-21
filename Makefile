@@ -101,17 +101,28 @@ test:
 test-live:  ## includes tests that call the Anthropic API and cost tokens
 	uv run pytest -q -m live
 
-# --- prompts: GEPA ----------------------------------------------------------
+# --- GEPA: searching the text a human wrote once -----------------------------
 #
-# One target per node: `make gepa-extract`. A node with no metric gets a target
-# that says so. `gepa` is a dependency group, so none of this is in the image.
+# One make target per searchable thing. `make gepa-extract` is a node's prompt;
+# `make gepa-tools` is the four tool descriptions in app/tools.py, scored by
+# running whole turns against demo/golden/. Anything else says why it is not
+# searchable rather than failing. `gepa` is a dependency group, so none of this
+# is in the image.
 #
-# `@` because make echoes recipes to stdout, and stdout is the new prompt.
+#   make gepa-tools                                    read it
+#   make gepa-tools > new.md                           keep it
+#   make gepa-extract GEPA_ARGS=--probe-only           check the invariants
+#   make gepa-extract GEPA_ARGS='--pareto demo/gepa/extract.pareto.json'
+#
+# `make gepa-tools` costs real money and asks before it spends any. Redirecting
+# it means nobody is there to agree, so it refuses unless GEPA_ARGS=--yes.
+#
+# `@` because make echoes recipes to stdout, and stdout is the artifact.
 # Not `.PHONY`: make skips pattern rules for phony targets, and nothing named
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
 
-gepa-%:  ## GEPA over one node's prompt: new prose on stdout, progress on stderr
+gepa-%:  ## GEPA over one searchable thing: new text on stdout, progress on stderr
 	@$(GEPA) $* $(GEPA_ARGS)
 
 # --- demo: presentation & recording -----------------------------------------

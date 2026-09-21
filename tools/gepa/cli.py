@@ -60,7 +60,7 @@ def pareto(name: str) -> Path:
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("target")
 @click.option("-v", "--verbose", is_flag=True, help="Per-probe and per-candidate detail.")
-@click.option("--budget", default=150, show_default=True, help="max metric calls")
+@click.option("--budget", type=int, default=None, help="max metric calls [per target]")
 @click.option("--val-fraction", default=0.3, show_default=True)
 @click.option("--seed", default=0, show_default=True)
 @click.option(
@@ -70,6 +70,7 @@ def pareto(name: str) -> Path:
 )
 @click.option("--probe-only", is_flag=True, help="check the invariants and stop")
 @click.option("--days", default=30, show_default=True, help="how far back to harvest")
+@click.option("--yes", is_flag=True, help="do not ask before spending")
 @click.option(
     "--pareto",
     "pareto_to",
@@ -79,12 +80,13 @@ def pareto(name: str) -> Path:
 def cli(
     target: str,
     verbose: bool,
-    budget: int,
+    budget: int | None,
     val_fraction: float,
     seed: int,
     resume: bool,
     probe_only: bool,
     days: int,
+    yes: bool,
     pareto_to: Path | None,
 ) -> None:
     """GEPA over one searchable thing. The new text goes to stdout.
@@ -109,7 +111,9 @@ def cli(
     _fresh_run_dir(chosen.name, resume)
     cases = _not_too_thin(chosen.corpus(days=days, resume=resume, verbose=verbose))
     trainset, valset = _split(cases, val_fraction, seed)
+    budget = chosen.budget if budget is None else budget
     say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
+    _confirm(chosen, seed_candidate, cases, budget=budget, yes=yes)
 
     import gepa
 
@@ -125,6 +129,7 @@ def cli(
             budget=budget,
             seed=seed,
             verbose=verbose,
+            templates=chosen.templates() if chosen.templates else None,
         )
 
         say(
@@ -156,7 +161,7 @@ def cli(
             )
             raise SystemExit(NO_IMPROVEMENT)
 
-        survivors = chosen.gate(loop, result, seed_candidate)
+        survivors = chosen.gate(loop, result, seed_candidate, cases)
 
     if not survivors:
         say(
@@ -205,14 +210,60 @@ def _resolve(name: str) -> Target:
             f"{', '.join(sorted(targets.UNWIRED))}"
         )
 
-    say(f"`{name}` has no metric, so there is nothing to search.\n", fg="yellow")
+    say(f"`{name}` is not searchable, so there is nothing to run.\n", fg="yellow")
     say(targets.UNWIRED[name])
-    say("\nWiring one up is four things, and the first is the hard one:")
-    say(f"  a metric scoring one recorded call    tools/gepa/metric_{name}.py")
-    say("  a replay that makes that call         tools/gepa/replay.py")
-    say(f"  probes for its prose-only invariants  tests/probes/{name}/*.json")
-    say("  a harvest that builds its corpus      tools/gepa/harvest.py")
+    say(
+        "\nWiring one up is a `Target` in tools/gepa/targets.py. Where a whole\n"
+        "turn can score it, most of the work is already here — `TurnAdapter`\n"
+        "and demo/golden/ — and what is left is the seed, a reflection template\n"
+        "and a budget. Where it cannot, the metric comes first, and the metric\n"
+        "is the hard part."
+    )
     raise SystemExit(UNWIRED_NODE)
+
+
+def _confirm(
+    target: Target,
+    seed_candidate: dict[str, str],
+    cases: list[Any],
+    *,
+    budget: int,
+    yes: bool,
+) -> None:
+    """Say what the run is about to spend, and ask.
+
+    Only where a rollout is expensive. `extract` is one model call a rollout and
+    asking about it would train people to type `--yes`, which is how a
+    confirmation stops being read.
+
+    Everything here goes to stderr, the confirmation included: a prompt on
+    stdout would land in the middle of the artifact.
+    """
+    if not target.rollout_tokens:
+        return
+
+    components = len(seed_candidate)
+    tokens = budget * target.rollout_tokens
+    say(f"\n{target.name}    {target.blurb}")
+    say(f"  budget      {budget} rollouts at roughly "
+        f"{target.rollout_tokens:,} tokens each — about {tokens:,} tokens")
+    say(f"  components  {components}, mutated round-robin: about "
+        f"{budget // max(components, 1)} proposals each at this budget")
+    say(f"  corpus      {len(cases)} cases")
+    say(
+        "\nEvery turn runs with the memory off: it reads nothing the agent has "
+        "learned and saves nothing it learns. Nothing is written to app/ or "
+        "config/, and nothing is committed."
+    )
+
+    if yes:
+        return
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            "this run costs real money and there is nobody at a terminal to "
+            "agree to it — pass --yes if that is deliberate"
+        )
+    click.confirm("Start?", default=True, abort=True, err=True)
 
 
 def _fresh_run_dir(name: str, resume: bool) -> None:
@@ -267,9 +318,16 @@ def _search(
     budget: int,
     seed: int,
     verbose: bool,
+    templates: dict[str, str] | None = None,
 ):
     """`gepa.optimize`, with its own stdout pointed at stderr: its engine logs
-    to stdout, and one line of that is one line in the middle of the prompt."""
+    to stdout, and one line of that is one line in the middle of the prompt.
+
+    `reflection_prompt_template` is a dict keyed by component name, validated
+    when the run is constructed — so a template missing its placeholders fails
+    here rather than forty minutes in.
+    """
+    extra = {"reflection_prompt_template": templates} if templates else {}
     with contextlib.redirect_stdout(sys.stderr):
         return gepa.optimize(
             seed_candidate=seed_candidate,
@@ -281,6 +339,7 @@ def _search(
             run_dir=str(run_dir(node)),
             seed=seed,
             display_progress_bar=verbose,
+            **extra,
         )
 
 

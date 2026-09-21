@@ -40,6 +40,8 @@ class FakeResult:
     val_aggregate_subscores: list[dict[str, float]] | None = None
     per_objective_best_candidates: dict[str, set[int]] | None = None
     objective_pareto_front: dict[str, float] | None = None
+    # Per candidate, per validation case. The turn gate's whole evidence base.
+    val_subscores: list[dict[str, float]] = field(default_factory=list)
 
 
 @pytest.fixture
@@ -113,9 +115,9 @@ def test_a_node_with_no_metric_exits_two_and_says_what_is_missing(monkeypatch):
 
     assert result.exit_code == gepa.UNWIRED_NODE
     assert result.stdout == "", "nothing on stdout means nothing to paste"
-    assert "no metric" in result.stderr
+    assert "not searchable" in result.stderr
     assert "decided the other way" in result.stderr, "the reason, not just a no"
-    assert "tests/probes/answer/*.json" in result.stderr
+    assert "tools/gepa/targets.py" in result.stderr, "and where the work is"
 
 
 def test_a_name_that_is_not_a_target_is_a_usage_error():
@@ -353,3 +355,137 @@ def test_a_candidate_that_scored_nothing_anywhere_is_left_off(a_run, monkeypatch
         e["index"] for e in json.loads(gepa.pareto("extract").read_text())["front"]
     }
     assert on_front == {0}
+
+
+# --------------------------------------------------------- more than one thing
+#
+# The command is target-generic now. These are the properties that only show up
+# once a second target exists, and the one about money.
+
+TOOLS_SEED = None  # filled by the fixture; the live descriptions
+
+
+@pytest.fixture
+def a_tools_run(monkeypatch, tmp_path, well_behaved):
+    """A finished tools search, faked from the gate backwards.
+
+    The corpus is the real `demo/golden/` — it is tracked, it costs nothing to
+    read, and using it means the split and the gate see the shape they will see
+    for real.
+    """
+    seed = targets.TOOLS.seed()
+    better = {**seed, "list_tables": "Every table, with its column count."}
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [seed, better],
+            [0.60, 0.80],
+            val_subscores=[
+                {"customers_active": 1.0, "customers_west": 0.0},
+                {"customers_active": 1.0, "customers_west": 0.6},
+            ],
+        ),
+    )
+    return seed, better
+
+
+def budget_of(monkeypatch, seed, argv: list[str]) -> int:
+    """What the search was actually handed, as opposed to what the help says."""
+    seen = {}
+
+    def record(gepa_module, **kwargs):
+        seen.update(kwargs)
+        return FakeResult([seed], [1.0])
+
+    monkeypatch.setattr(gepa, "_search", record)
+    CliRunner().invoke(gepa.cli, argv)
+    return seen["budget"]
+
+
+def test_a_whole_turn_target_brings_its_own_budget(a_tools_run, monkeypatch):
+    """`--budget` used to default to 150 for everything. A whole-turn rollout is
+    about 11,500 tokens, so that default silently means 1.7 million — the most
+    expensive thing an unnoticed default could do in this repo."""
+    assert budget_of(monkeypatch, a_tools_run[0], ["tools", "--yes"]) == 60
+
+
+def test_the_cheap_target_keeps_the_budget_it_always_had(a_run, monkeypatch):
+    assert budget_of(monkeypatch, {COMPONENT: a_run}, ["extract"]) == 150
+
+
+def test_an_explicit_budget_still_wins(a_tools_run, monkeypatch):
+    assert budget_of(monkeypatch, a_tools_run[0], ["tools", "--budget", "4", "--yes"]) == 4
+
+
+def test_an_expensive_run_says_what_it_will_spend_before_it_spends(a_tools_run):
+    result = CliRunner().invoke(gepa.cli, ["tools", "--yes"])
+
+    assert result.exit_code == 0
+    assert "60 rollouts" in result.stderr
+    assert "690,000 tokens" in result.stderr
+    assert "components  4" in result.stderr
+    # Not on stdout, where the artifact is.
+    assert "rollouts" not in result.stdout
+
+
+def test_an_expensive_run_refuses_a_pipe_rather_than_spending_into_it(
+    a_tools_run, monkeypatch
+):
+    """`make gepa-tools > new.md` and every CI job: nobody is there to agree to
+    the money, and the run would spend it anyway."""
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("it spent the money")
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["tools"])
+
+    assert result.exit_code == 1
+    assert "nobody at a terminal" in result.output
+    assert result.stdout == ""
+
+
+def test_a_cheap_run_does_not_ask(a_run, monkeypatch):
+    """One model call a rollout. Asking about it would train people to type
+    `--yes`, which is how a confirmation stops being read."""
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert result.exit_code == 0
+    assert "Start?" not in result.stderr
+
+
+def test_the_tools_winner_is_a_document_with_every_tool_in_it(a_tools_run):
+    """Four components cannot be one prompt file, so stdout becomes a section
+    per tool — all four, including the three nobody mutated."""
+    result = CliRunner().invoke(gepa.cli, ["tools", "--yes"])
+
+    assert result.exit_code == 0
+    for name in a_tools_run[0]:
+        assert f"## {name}\n" in result.stdout
+    assert "Every table, with its column count." in result.stdout
+    # The diff names where a person would go to change it.
+    assert "app/tools.py SCHEMAS[list_tables]" in result.stderr
+
+
+def test_an_unwired_target_gives_the_reason_that_is_still_true(monkeypatch):
+    """`plan`'s old reason was that it needed outcome labelling. It has that
+    now, so the reason had to be replaced rather than left to read like one."""
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("a search was started")
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["plan"])
+
+    assert result.exit_code == gepa.UNWIRED_NODE
+    assert "degenerate optimum" in result.stderr
+    assert "outcome labelling" not in result.stderr
+
+
+def test_the_config_block_has_a_reason_rather_than_looking_like_a_typo():
+    """`make gepa-config` is a thing somebody will try, and "no target named"
+    reads as a misspelling rather than as work nobody has done."""
+    result = CliRunner().invoke(gepa.cli, ["config"])
+
+    assert result.exit_code == gepa.UNWIRED_NODE
+    assert "search space is six values per node" in result.stderr

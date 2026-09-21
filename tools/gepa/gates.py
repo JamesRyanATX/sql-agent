@@ -5,10 +5,18 @@ Outside GEPA's objective, and that is the whole point. Weights cannot express
 small gain the moment the arithmetic allows it, and the failures worth refusing
 here are exactly the rare catastrophic ones.
 
-`probe_gate` checks invariants that exist only as prose in a prompt, by
-replaying authored cases: a recorded count going stale, a recipe grounded in a
-fragment too short to be wrong. Those have no ground truth, so an authored
-predicate is the only witness there is.
+Two gates, because there are two kinds of thing to defend, and they parallel
+rather than share. `probe_gate` checks invariants that exist only as prose in a
+prompt, by replaying authored cases: a recorded count going stale, a recipe
+grounded in a fragment too short to be wrong. Those have no ground truth, so an
+authored predicate is the only witness there is. `turn_gate` checks questions
+whose answers are known, which is the stronger thing to have and is available
+only where a golden corpus exists.
+
+Generalising the probe machinery to cover both was the alternative, and it is
+not worth it: a probe's case is an `ExtractCase` and every predicate reads a
+`Replayed`, so it is extract-shaped end to end. Both gates return the same type
+and take the same arguments, which is all `cli.py` needs to not care.
 
 Moved out of `cli.py` so `targets.py` can name a gate without importing the
 command.
@@ -134,3 +142,80 @@ def report(outcomes: list[Outcome], label: str) -> list[Outcome]:
     else:
         say(f"all {len(outcomes)} probes pass", fg="green")
     return failures
+
+
+# --------------------------------------------------------------- known answers
+
+
+def turn_gate(loop, result, seed: dict[str, str], *, cases) -> list[Survivor]:
+    """A candidate that got a golden case wrong which the seed got right is
+    discarded, whatever it scored.
+
+    Read out of GEPA's own per-case validation scores rather than re-run.
+    `metric_turn` scores a wrong answer zero regardless of cost, so
+    `val_subscores[i][case] > 0` *is* "candidate i answered that case". The
+    naive version — every pooled candidate re-run over every case — is about
+    290,000 tokens on top of a search that cost 700,000, and a gate should not
+    cost half of what it protects.
+
+    **Nothing is averaged.** A mean is exactly what lets a candidate buy one
+    catastrophic case with a broad small gain, which is the trade this refuses.
+
+    `loop` is unused and stays in the signature so `cli.py` can call either gate
+    the same way.
+    """
+    subscores = result.val_subscores or []
+    scores = result.val_aggregate_scores or []
+    questions = {case.name: case.question for case in cases}
+
+    seed_index = next(
+        (i for i, candidate in enumerate(result.candidates) if candidate == seed),
+        None,
+    )
+    if seed_index is None or seed_index >= len(subscores):
+        # GEPA drops the seed from the pool only if it was never evaluated, and
+        # then there is nothing to have regressed *against*. Saying so is better
+        # than an empty gate that looks like it ran.
+        say(
+            "\nthe seed is not in the pool with a validation row, so there is "
+            "nothing to have regressed against — the gate is not checking",
+            fg="yellow",
+        )
+        answered: set = set()
+    else:
+        answered = {case for case, s in subscores[seed_index].items() if s > 0}
+        say(
+            f"\nthe seed answers {len(answered)}/{len(subscores[seed_index])} "
+            f"golden cases correctly"
+        )
+
+    survivors: list[Survivor] = []
+    for i, candidate in enumerate(result.candidates):
+        if i == seed_index:
+            continue
+        score = scores[i] if i < len(scores) else 0.0
+
+        if i >= len(subscores):
+            say(
+                f"  candidate {i} (val {score:.3f}) DISCARDED — no validation "
+                f"row, so nothing says it did not regress",
+                fg="red",
+            )
+            continue
+
+        theirs = subscores[i]
+        lost = sorted(case for case in answered if theirs.get(case, 0.0) <= 0)
+        if lost:
+            say(
+                f"  candidate {i} (val {score:.3f}) DISCARDED — lost "
+                f"{len(lost)} case(s) the seed answered",
+                fg="red",
+            )
+            for case in lost:
+                say(f"      {questions.get(case, case)}")
+            continue
+
+        say(f"  candidate {i} (val {score:.3f}) survives", fg="green")
+        survivors.append(Survivor(index=i, candidate=candidate, score=score))
+
+    return sorted(survivors, key=lambda s: -s.score)
