@@ -10,8 +10,10 @@ Agent Loop Chicago, **Nov 17**. 35 minutes, live, with a computer.
 This is the run sheet: what to say, what to type, what appears on screen, and
 what to do when it does not. Read the "Status" column before rehearsing —
 what is built and what is not changes as work lands, and the blocking work is
-named where it bites. Sections 2, 3 and 6 are blocked on one thing: a `make
-corpus` run, which is about five minutes and unattended.
+named where it bites. Sections 1 to 5 have all been run against a live model;
+section 6 has not been built. What is missing before Nov 17 is a promotion —
+both searches ran and neither produced one worth committing, for reasons the
+gap list names.
 
 ## Live, or pre-baked
 
@@ -227,8 +229,10 @@ computed, indistinguishable in the same field.
 
 ## 3. GEPA on one node's prompt — 7 min
 
-**Status: the tooling works, but it has never run on a real corpus. It is
-blocked on section 2's corpus, and then on one search.**
+**Status: run, on a real corpus of 37 cases harvested from the corpus run. The
+winner scores 0.989 against the seed's 0.958 and clears all four probes. Not
+promoted: it is 3.6 times longer than the seed and the metric cannot see prompt
+length. That is section 4's punchline, so hold it until then.**
 
 ### Say
 
@@ -292,9 +296,8 @@ probe gate, the diff.
 
 ## 4. What a Pareto frontier of prompts looks like — 3 min
 
-**Status: not built yet. GEPA computes the per-objective scores on every
-evaluation and hands them back on the result; what is missing is the code that
-writes them down. The gap list says where.**
+**Status: built and run. The front below is measured, from the run committed at
+`demo/gepa/extract.pareto.json`. Open the file, or read the table off a slide.**
 
 ### Say
 
@@ -305,15 +308,52 @@ writes them down. The gap list says where.**
   everything. Picking from it is a judgement call, and it should be visible that
   a judgement is being made.
 
-Show the five-dimensional front over the candidate pool, and pick one, out loud,
-for a stated reason.
+### Show
+
+Six candidates, four on the front:
+
+| cand | val | grounding | census | names | shape | cost | chars |
+|---|---|---|---|---|---|---|---|
+| 0 (seed) | 0.958 | 0.91 | 1.00 | 1.00 | 0.97 | 0.93 | 2,076 |
+| 1 | 0.964 | 0.91 | 1.00 | 1.00 | 0.97 | 0.99 | 6,540 |
+| 2 | 0.963 | 0.91 | 1.00 | 1.00 | 0.95 | **1.00** | 5,968 |
+| 4 | 0.989 | **1.00** | 1.00 | 1.00 | 0.98 | 0.91 | 7,459 |
+| best | — | 1.00 | 1.00 | 1.00 | 0.98 | 1.00 | |
+
+- **Candidates 2 and 4 are the argument, and they mirror each other exactly.**
+  One buys cost at 1.00 and pays grounding down to 0.91; the other buys
+  grounding at 1.00 and pays cost down to 0.91. Neither dominates. A single
+  weighted number picks between them without telling you it did.
+- **The bottom row is reached by nobody.** No candidate in the pool has all five,
+  which is what a front is for saying.
+- **The seed is on it.** What you already have is not dominated, and a search
+  that reports otherwise is a search worth distrusting.
+
+### Pick one, out loud
+
+Candidate 4, because grounding carries 0.35 of the weight and it is the proxy
+for the production gate — `grounded_in()` is what stops a recipe claiming
+something the query never did. Buying that with cost is the right trade for this
+product, and saying so is the judgement the front exists to make visible.
+
+Then say the uncomfortable half: **candidate 4 is 3.6 times longer than the
+seed, and no term on that table can see it.** `cost` charges the model's output
+tokens, and a prompt is input. Every candidate in the run grew — by 132%, 187%,
+215% and 259%. Nothing opposed it. The gate now warns in both directions and the
+metric is getting a length term, and until it has one I have not promoted this.
+
+That is not an aside. A metric is a proxy, and a search is a machine for finding
+the gap between your proxy and your intent. Here is mine, found by reading the
+artifact rather than the exit code.
 
 ---
 
 ## 5. Things that do not look like prompts — 6 min
 
-**Status: 5a is built — `make gepa-tools` — and has never been run against a
-model. 5b is not built and may not be worth building; see the honesty check.**
+**Status: 5a is built and run. The candidate it proposed is committed at
+`demo/gepa/tools.candidate.md`, not promoted — the gain is two cases out of
+nine, which is the noise floor. 5b is not built and may not be worth building;
+see the honesty check.**
 
 ### Say
 
@@ -424,9 +464,7 @@ of `CHALLENGE.md` that specifies it.
 | Blocks | What is missing | Where |
 |---|---|---|
 | §2 | Nothing reads a verdict back. An approved turn should become a golden case, with the SQL it ran as the reference | a scores reader in `app/tracing.py`, and a second harvest beside `extract_cases` — CHALLENGE §1 |
-| §3 | `make gepa-extract` against a real corpus, promoted and committed | CHALLENGE §7 |
-| §4 | A committed front, and the code that writes it | `tools/gepa/cli.py`, after `_search`. `GEPAResult` carries `val_aggregate_subscores`, `per_objective_best_candidates` and `objective_pareto_front`, populated whenever the adapter returns per-term scores, which ours does. gepa 0.1.4 never writes them anywhere, so about fifty lines must. `--pareto <path>` for the tracked copy. |
-| §5 | A real `make gepa-tools` run, promoted into `app/tools.py` and committed | built and tested; never run against a model |
+| §3, §5 | A promotion, committed. Both searches ran and neither produced one I would promote: `extract`'s winner is 3.6x longer and the metric cannot see length, `tools`' gain is 2 cases in 9 | a `length` term in `metric_extract.WEIGHTS`, then re-run; and a second `tools` run on another split to see whether the gain reproduces |
 | §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted | `make gepa-tools GEPA_ARGS=--probe-only` is the before half |
 | §6 | A second search with the gate disabled, kept whatever it produces | CHALLENGE, "What the talk has to show" |
 
