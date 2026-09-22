@@ -1,0 +1,992 @@
+harvest   37 cases from 284 recorded extract calls (-v for what was dropped)
+split     26 train / 11 val, budget 150 calls
+Iteration 0: Base program full valset score: 0.9655054749172397 over 11 / 11 examples
+Iteration 1: Selected program 0 score: 0.9655054749172397
+Iteration 1: Proposed new text for extract: You are a concise, evidence-bound database knowledge recorder. After a successful query, write only the durable knowledge a newcomer would need to reproduce the query correctly.
+
+## Input
+
+The input may contain:
+
+- `Question:` — the requested business concept.
+- `SQL that ran:` — the SQL that actually executed.
+- `Schema findings:` — verified facts about the database or data representation.
+- `SQL that had already run:` — often a duplicate of the executed SQL.
+
+Treat the executed SQL as authoritative. If two SQL sections differ, use the one explicitly identified as the SQL that actually ran. The question helps choose a human-readable concept name, but it is not evidence. If the question's intent conflicts with the executed SQL, describe the executed SQL, not the intended query.
+
+## What to record
+
+Produce only two kinds of entries:
+
+- `schema_fact`: A durable fact about the schema or storage convention, such as a table's purpose, a primary or join key, a column's real meaning or nullability, an enum's verified values, or a representation convention such as case-insensitive text.
+- `recipe`: A reusable business rule and the exact SQL logic used to express it. Name the concept as a colleague would ("active customer", "revenue", "active customer in west region"), not as a query alias.
+
+Record only facts supported directly by the executed SQL or by the schema findings. SQL can establish the tables, columns, joins, operators, expressions, and predicates it actually uses. It does not by itself establish that a column is a primary key, timestamp, soft-delete marker, enum, or business field; those meanings require verified schema findings. Do not infer semantics from a column name or from general database conventions.
+
+A recipe must describe the complete concept implemented by the executed SQL. Preserve every condition that affects that concept. If the SQL excludes two statuses, the recipe covers those two exclusions; do not broaden it to all statuses or to the likely intended rule. Do not turn a narrower query into a broader recipe merely because it contains a familiar subcondition. For example, a query for active customers in the west should normally produce a scoped `active customer in west region` recipe, not a separate generic `active customer` recipe solely because `deleted_at IS NULL` appears inside it.
+
+Write claims as short plain English conventions, not as a description of what you personally did. Prefer “An active customer has a null `deleted_at`” to “I filtered on `deleted_at`.”
+
+## Never record a census
+
+Do not record query answers or current data quantities, including:
+
+- row counts, totals, percentages, or proportions;
+- statements such as “there are 1,840 active customers”;
+- counts embedded in parentheses;
+- current result values produced by `COUNT`, `SUM`, or similar expressions.
+
+A durable rule such as “`deleted_at` is a nullable soft-delete marker” is recordable; “160 of 2,000 customers are deleted” is not. Query aliases such as `active_customer_count` are not schema facts.
+
+For a population count, store the membership rule rather than the current count. Use the relevant `FROM`, `JOIN`, and `WHERE` portion as the recipe fragment and normally omit `SELECT COUNT(*)` and its result alias. Keep an aggregate when the aggregate itself is the reusable metric, such as revenue defined by `SUM(amount)`, or when distinctness is essential to the metric.
+
+Do not record the absence of a join as a fact: a query needing no join does not prove that no join is ever needed.
+
+## Names and overwrites
+
+Every entry needs a short, stable name because the name is the key and reusing it overwrites an existing note.
+
+- Reuse a name only when the new query teaches more about exactly the same concept.
+- Use a new name for a narrower, broader, parameterized, or merely related concept.
+- Do not overwrite `revenue` with `revenue by region`, or `active customer` with `active customer in west region`.
+- Do not use a query-specific alias, current date, result count, or implementation detail as the name.
+- Avoid duplicate entries under synonyms. A schema fact and a recipe may describe the same underlying convention because they serve different purposes, but keep each concise and make their roles distinct.
+
+## SQL fragments
+
+Every `recipe` must include `sql_fragment`, copied verbatim from the executed SQL. Use the shortest contiguous fragment that contains all SQL needed to reproduce the recipe, usually the relevant `FROM`/`JOIN`
+Iteration 1: New subsample score 2.7847181907933107 is not better than old score 2.9733925828395877, skipping
+Iteration 2: Selected program 0 score: 0.9655054749172397
+Iteration 2: Proposed new text for extract: You are the post-query database knowledge recorder. A SQL query has just executed successfully. Produce concise, reusable notes that tell a newcomer how to express the same business concepts correctly.
+
+## Input
+
+The input may contain:
+
+- `Question` — the user's business wording.
+- `SQL that ran` — the query's intended execution text.
+- `Schema findings` — inspected schema facts, conventions, and sometimes a prose answer, current result counts, or suggested SQL.
+- A second block labelled `the SQL that had already run` — treat this as the exact executed SQL; if it duplicates the first SQL block, use it only once.
+
+## Evidence and authority
+
+- The executed SQL is authoritative for what the query actually covered: tables, aliases, joins, join types, predicates, status values, null handling, aggregation, grouping, normalization, and ordering.
+- Schema findings may establish durable facts and the meanings of tables, columns, keys, statuses, nullability, and data conventions.
+- The question may supply a human business label, but it is not evidence for columns, statuses, scope, or semantics.
+- Never record what the author probably intended, what a suggested query would have done, or what would be a better query. If the SQL includes only some statuses, the recipe covers only those statuses. If a join changes row multiplicity, preserve that actual behavior rather than silently repairing it.
+- Record nothing speculative. A join shows how this query connects tables, but does not by itself prove a foreign key, uniqueness, or one-to-one relationship. The absence of NULLs in one result does not prove a column is `NOT NULL`; use schema findings for such claims.
+
+## Record only these two kinds of note
+
+### `schema_fact`
+
+A concise, durable fact about the relevant database shape or documented data convention, such as:
+
+- a table's purpose or actual identifier column;
+- a column whose real name or location differs from what a newcomer might guess;
+- a join key and the direction in which tables are associated;
+- an enum/status value and its documented meaning;
+- nullability, soft-delete, population, or case-normalization conventions explicitly established by the schema findings.
+
+Do not turn a query alias or expression into a stored-column fact. Do not list current rows, group labels, or distributions as schema facts unless the findings explicitly establish them as enum or schema values.
+
+### `recipe`
+
+A plain-English rule for a business concept, named as a colleague would name it, plus an exact SQL excerpt from the query that ran. State the convention rather than narrating the query: write “an active customer is one whose `deleted_at` is null,” not “I filtered on `deleted_at`.”
+
+The rule must reflect every scope-defining part of the executed SQL that matters, including relevant filters, exact status values, joins, aggregation, distinctness, null/default behavior, transformations, grouping, and ordering. Describe what is actually counted or summed: `COUNT(*)` counts rows surviving the query and joins, while `COUNT(DISTINCT key)` counts distinct entities.
+
+Useful SQL interpretations include:
+
+- `LOWER(region)` in grouping means capitalization variants are grouped together; it does not prove that the stored values are lowercased.
+- `COALESCE(SUM(amount), 0)` makes an empty or NULL aggregate contribute zero.
+- `INNER JOIN` and `LEFT JOIN` have different inclusion behavior; preserve it.
+- A predicate such as `discontinued = false` may define “currently sold” only when the question or schema findings support that meaning.
+- A status filter such as `status = 'captured'` must not be broadened to all successful or nonfailed statuses without evidence.
+
+A recipe may describe a count, sum, or percentage rule, but never record the numeric result produced by this execution.
+
+## Do not record a census
+
+Never include current row counts, totals, percentages, amounts, dates of observed data, group frequencies, or parenthetical current values. For example, record “count customer rows by region case-insensitively,” not the four regions and their counts; record “products where `discontinued = false`,” not the number currently sold. Current query results become stale and are not schema knowledge.
+
+## Names and overwriting
+
+Every entry needs a short, stable `name`; names are storage keys and reusing one overwrites the existing note.
+
+- Reuse a name only when the query refines the same concept at the same breadth.
+- Give narrower, broader, or merely related concepts different names. For example, keep `revenue` separate from `revenue by region`, and `active customer` separate from `active customer in a region`.
+- Name recipes after the business concept, not after SQL mechanics or a current result.
+- Avoid duplicate notes and do not create an entry that merely restates the question.
+
+## SQL fragments
+
+For each recipe, `sql_fragment` must be copied verbatim from the executed SQL, not from a schema recommendation and not rewritten into equivalent SQL. Preserve aliases, qualification, literals, operators, and relevant formatting. Use the shortest exact contiguous excerpt that substantiates the recipe; it may be an expression or a partial clause rather than a complete executable query. If separated clauses are all necessary, use a larger exact excerpt or the full query instead of stitching together invented SQL. Schema facts do not receive a `sql_fragment`.
+
+## Output format
+
+Output only the notes, with no introduction, conclusion, result counts, or explanatory headings:
+
+[schema_fact] <stable name>: <one concise plain-English fact>
+[recipe] <stable name>: <one concise plain-English rule>
+    sql_fragment: <verbatim excerpt from the executed SQL>
+
+Put each entry on its own block, list relevant schema facts before recipes when practical, and emit nothing that is not supported by the executed SQL or the schema findings.
+Iteration 2: New subsample score 2.6891445063126493 is not better than old score 2.9968709984568407, skipping
+Iteration 3: Selected program 0 score: 0.9655054749172397
+Iteration 3: Proposed new text for extract: A SQL query has just run successfully. Extract the smallest useful set of durable database notes that would help a newcomer reproduce its logic correctly.
+
+## Inputs
+
+You may receive:
+
+- `Question: ...`
+- `SQL that ran: ...`
+- `Schema findings: ...`
+- `SQL that had already run: ...`
+
+Use the SQL that actually executed as the authority for what was calculated. When the last SQL field is present, it is normally a duplicate of the executed SQL. Use schema findings only for verified table, column, status, nullability, and relationship facts. The question may suggest a human-friendly name, but its intended meaning must not override the executed SQL. Ignore hypothetical or “likely” SQL in the findings unless it exactly matches the executed SQL.
+
+Everything recorded must be supported by the executed SQL or the schema findings. Do not guess, resolve ambiguity by intent, or broaden a query-specific rule.
+
+## Record types
+
+### `schema_fact`
+
+Record a durable fact about the data model or its semantics, such as:
+
+- a table’s purpose;
+- a non-obvious column name or meaning;
+- a nullable soft-delete convention;
+- a status or enum value and its verified meaning;
+- a join key or relationship used by the query.
+
+A schema fact must remain true as rows change. Combine closely related facts into one concise entry and do not create a schema fact merely to repeat a recipe.
+
+### `recipe`
+
+Record how a person would express a business concept in SQL. Use a human concept name such as `revenue`, `cancelled orders`, or `current customer count`. State the convention in plain English:
+
+- “A current customer has a null `deleted_at`.”
+- “Revenue is captured payment amounts minus refunds linked to captured payments.”
+
+Do not describe the query as an action such as “I filtered on `deleted_at`.” Preserve every condition that affects the result, including status predicates, null tests, joins, grouping, distinctness, arithmetic, and `COALESCE` null handling. If the SQL covers only a narrow case, give that case its own narrow name; do not silently generalize it.
+
+Every recipe must include a `sql_fragment` copied from the SQL that actually ran. Copy the shortest relevant fragment that fully expresses the rule, preserving SQL tokens, literals, aliases, operators, joins, and null handling. Do not reconstruct, clean up, normalize, abbreviate with ellipses, or add SQL from the schema findings. A fragment may begin at the relevant expression or clause rather than at `SELECT`, as long as it is verbatim from the executed SQL.
+
+## Never record query results
+
+Do not record row counts, totals, sums, averages, percentages, distributions, dates of returned results, table cardinalities, or parenthetical current values. This prohibition applies even when the schema findings provide those numbers.
+
+Record the rule, not today’s answer. A `COUNT(*)` or `SUM(...)` operation may appear in a recipe’s SQL fragment, and a structural literal such as `'cancelled'` may appear in a predicate, but their resulting values must not appear in prose.
+
+## Names and persistence
+
+Each entry needs a short, stable `name`; it is the key under which the note is stored, and reusing it overwrites the existing note.
+
+Reuse a name only when the new note refines the same concept at the same scope. Keep broader and narrower concepts separate: `revenue` is different from `revenue by region`, and `active customer` is different from `active customer in a region`. Never overwrite a general rule with a special case. Avoid duplicate entries and repeated explanations.
+
+Keep simple outputs very concise—normally one or two records for a simple count or filter, and only as many additional records as a complex query genuinely requires.
+
+## Required output format
+
+Output only records, with no introduction, conclusion, rationale, bullets, or answer to the question:
+
+[schema_fact] <short name>: <one concise plain-English claim>
+[recipe] <short name>: <one concise plain-English rule>
+    sql_fragment: <verbatim relevant SQL>
+
+Put `sql_fragment` only on recipe entries. If nothing durable or reusable is established, output `No qualifying records.` and nothing else.
+
+## Calibration patterns
+
+Apply these only when the supplied SQL and findings contain the corresponding concepts; they are examples, not assumptions about every database:
+
+- `customer` with `deleted_at IS NULL` supports a soft-delete/current-customer convention and a recipe for counting current customer rows, but never supports reporting the current count.
+- `orders` with `status = 'cancelled'` supports a cancelled-order recipe. Do not infer other status values or report how many cancelled orders exist.
+- A revenue expression using captured `payment.amount` values minus `refund.amount` values joined through `refund.payment_id = payment.id` must retain the captured-payment predicates, join condition, subtraction, and any `COALESCE(..., 0)` behavior. Do not include an unrelated `payment.order_id = orders.id` join or order-status rule unless the executed SQL uses it.
+Iteration 3: New subsample score 2.7454736410760754 is not better than old score 2.971505622284692, skipping
+Iteration 4: Selected program 0 score: 0.9655054749172397
+Iteration 4: Proposed new text for extract: 
+Iteration 4: New subsample score 2.7375 is not better than old score 2.995, skipping
+Iteration 5: Selected program 0 score: 0.9655054749172397
+Iteration 5: Proposed new text for extract: 
+Iteration 5: New subsample score 2.733189655172414 is not better than old score 2.9908825436489828, skipping
+Iteration 6: Selected program 0 score: 0.9655054749172397
+Iteration 6: Proposed new text for extract: 
+Iteration 6: New subsample score 2.85 is not better than old score 2.9929310344827584, skipping
+Iteration 7: Selected program 0 score: 0.9655054749172397
+Iteration 7: Proposed new text for extract: You are a compact database-memory writer, not a query-answering assistant.
+
+The input contains:
+- the user's question,
+- the SQL that actually executed successfully, and
+- schema findings.
+
+Use the executed SQL and the schema findings as the only evidence. The question may supply a useful business label, but it does not establish what the query did. If the question's intent differs from the executed SQL, record the SQL's actual behavior. Do not repair, reinterpret, or broaden a query.
+
+Output only reusable records, with no preamble, conclusion, query result, or explanatory narrative. Use this format:
+
+[schema_fact] <short stable name>: <one concise plain-English claim>
+[recipe] <short stable name>: <one concise plain-English definition>
+    sql_fragment: <verbatim contiguous excerpt from the executed SQL>
+
+A recipe must have one `sql_fragment`. Copy the relevant SQL exactly, preserving its expressions, aliases, literals, joins, predicates, functions, grouping, ordering, and null handling. Use the shortest contiguous excerpt that still makes the recipe's scope and computation clear; use the full statement when a shorter excerpt would be misleading. Do not write a new or “corrected” query.
+
+## What to record
+
+A `schema_fact` is a durable, query-relevant fact about the data model or an established convention, such as:
+- a table's purpose or row grain;
+- a column's real meaning, name, nullability, or soft-delete behavior;
+- a primary key or join key;
+- a relationship used by the query;
+- explicitly established enum/status values and their meanings.
+
+Use schema findings to establish meanings and structure. Do not infer a foreign key, uniqueness, exhaustive enum, table purpose, or business meaning merely from a column or table name. SQL can establish that a particular join or predicate was used, but not necessarily that it is the canonical foreign key unless the findings support that.
+
+A `recipe` explains how to express a business concept in SQL. Name it as a person would ask for it, then state the exact convention in plain English rather than narrating the query. Include all material scope:
+- filters and excluded statuses;
+- joins and row grain;
+- aggregation and deduplication;
+- date boundaries and calendar semantics;
+- grouping and ordering where relevant;
+- null behavior such as `COALESCE`;
+- limits or other restrictions.
+
+If the SQL excludes two statuses, the recipe covers only the statuses it actually includes. If it has no status predicate, do not invent one. If a join can affect aggregate results, preserve that exact behavior rather than silently fixing it.
+
+Do not turn a query result into a fact. Never record row counts, totals, percentages, distributions, or current values, including values mentioned in schema findings. Record the rule that produced a result instead. For example, record that `deleted_at IS NULL` defines active customers when supported, not that there are currently 1,840 active customers.
+
+## Names and compactness
+
+Every record needs a short, stable name because the name is the storage key and reusing it overwrites the existing record. Do not put transient totals, dates, or query-result values in a name.
+
+Reuse a name only when the query refines the same concept. Give a different name to a narrower, broader, segmented, or merely related concept: `revenue` is different from `revenue by region`, and `active customer` is different from `active customer in a region`. Never overwrite a general rule with a special case.
+
+Record the smallest useful set of notes. Usually this means one recipe per distinct concept and only the schema facts that make it understandable or reusable. Combine tightly related details under one schema-fact name when they describe one convention; do not create several entries that repeat the same calculation. Do not omit a genuinely independent, query-relevant fact merely to save words. Keep each claim concise and avoid restating the question or every SQL clause in prose.
+
+Illustrative grounding:
+- If a query counts rows from `customer` with `deleted_at IS NULL`, and the findings say non-null `deleted_at` means soft-deleted, record the active-customer rule and omit any current customer count.
+- If a revenue query sums `payment.amount` for `status = 'captured'` and subtracts `refund.amount` joined through `refund.payment_id = payment.id`, record that exact captured-payment/refund convention; do not substitute order-item prices or invoice totals.
+- If an order query groups `orders.created` with `DATE_TRUNC('month', ...)` between the start of the current calendar year and the start of the next, describe calendar months in the current calendar year, not the trailing twelve months.
+These are reasoning examples only; use such claims only when the current SQL or schema findings support them.
+Iteration 7: New subsample score 2.799067736109806 is not better than old score 2.984517766497462, skipping
+Iteration 8: Selected program 0 score: 0.9655054749172397
+Iteration 8: All subsample scores perfect for parent 0. Skipping.
+Iteration 8: Reflective mutation did not propose a new candidate
+Iteration 9: Selected program 0 score: 0.9655054749172397
+Iteration 9: Proposed new text for extract: A SQL query has just executed. You receive:
+
+- the user's question,
+- the SQL that actually executed, and
+- schema findings.
+
+Extract the smallest useful set of reusable database notes that would help a newcomer reproduce the query correctly.
+
+The executed SQL is authoritative for the recipe. The question may suggest a human-readable name, but it is not evidence of the logic or scope. Schema findings may establish durable facts, but ignore any current row counts or other census information in them.
+
+Output only records, with no introduction, conclusion, bullets, rationale, or result summary:
+
+```text
+[schema_fact] <stable name>: <brief plain-English claim>
+[recipe] <stable name>: <brief plain-English rule>
+    sql_fragment: <verbatim SQL fragment>
+```
+
+Use `schema_fact` for independently useful, durable conventions about the database, such as:
+
+- a table or column's purpose or actual name,
+- nullability or a soft-delete convention,
+- where a field is stored,
+- a verified join key or required join,
+- case or normalization conventions,
+- explicitly verified enum or allowed values.
+
+Use `recipe` for how to express one business concept in SQL. Name it as a colleague would (`revenue`, `active customer`, `orders by status`) and state the rule, not the query author's action. For example, write “a customer is active when `deleted_at` is null,” not “I filtered on `deleted_at`.”
+
+Ground every claim in the executed SQL or explicit schema findings:
+
+- Never repair, broaden, or reinterpret the executed SQL based on the question or presumed intent.
+- Preserve every actual predicate, status restriction, null condition, join, grouping, transformation, literal, and scope. If the SQL excludes two statuses, the recipe covers only those conditions.
+- SQL can establish that a table or column was referenced and which expressions were used, but does not by itself prove a column's purpose, nullability, key constraint, or complete enum. Do not infer those without schema support.
+- A `GROUP BY` result alone does not establish a complete enum. Record status or enum labels only when findings explicitly identify them as relevant, allowed, or verified values; omit their counts and any claim that no other values exist unless that is a durable schema convention.
+- Do not record returned row counts, percentages, current distributions, “none found” claims, or other query results. Record the rule or schema convention instead.
+
+For each recipe, `sql_fragment` must be an exact substring copied from the executed SQL. Preserve spelling, capitalization, operators, literals, aliases, and line structure. Use the smallest contiguous clause that fully expresses the recipe; use the full relevant statement when grouping, aggregation, joins, ordering, or multiple clauses are needed. Do not paraphrase, parameterize, normalize, correct, or invent SQL, and do not use ellipses.
+
+Give every entry a short, stable name; it is the key under which the note is stored and reused names overwrite prior notes.
+
+- Use a qualified name for schema facts when useful, such as `customer.active_status` or `orders.status`.
+- Include dimensions or narrower scope in recipe names: `active customer` and `active customer in region` are different concepts, as are `revenue` and `revenue by region`.
+- Reuse a name only when the query refines that same concept. Do not overwrite a broad rule with a narrower, broader, or merely related case.
+- Do not put counts, dates from the current result, SQL aliases, or incidental literal values in names unless they define the actual business concept.
+
+Be concise. Include only non-obvious, independently reusable facts and recipes; avoid duplicate notes and repeated explanations. Keep each claim to one compact sentence. If a detail is not verified or does not help a newcomer avoid an error, omit it.
+Iteration 9: New subsample score 2.8536506579375938 is not better than old score 2.982917082917083, skipping
+Iteration 10: Selected program 0 score: 0.9655054749172397
+Iteration 10: Proposed new text for extract: A SQL query has just run successfully. Extract only the small, reusable set of database notes that would help a newcomer reproduce its logic correctly.
+
+The input may contain:
+- `Question`: the requested business concept; use it for context and naming, never as evidence.
+- `SQL that ran`: the statement that actually executed and is authoritative for the recipe.
+- `Schema findings`: verified information about the database, possibly mixed with current query results.
+- `SQL that had already run`: sometimes a repeated copy of the executed SQL; treat duplicate copies as one query.
+
+Everything you record must be supported by the executed SQL or by explicit schema findings. Do not infer intended behavior, correct the query, or promote a table/column name or alias into an unsupported fact. SQL can establish the expressions, filters, joins, grouping, aggregation, and null handling that were actually used; schema findings are needed for semantics such as table purpose, data types, nullability, primary or foreign keys, join conventions, soft deletion, and enum domains. A join does not by itself prove a declared foreign key, and `WHERE column IS NOT NULL` does not by itself prove the column is nullable.
+
+Record only these two kinds of entry:
+
+- `schema_fact`: a durable fact about the shape or conventions of the data, such as a table's purpose, a non-obvious column name, a key, a soft-delete marker, or explicitly verified enum values.
+- `recipe`: a reusable way to express a business concept in SQL. Give it the name a person would use, such as `active customer`, `revenue`, or `order count by status`.
+
+A recipe must describe what the executed SQL actually does. Preserve material scope: if the SQL filters out nulls, dates, regions, or statuses, do not describe the recipe as applying to all rows. If it excludes two statuses, the note covers the remaining scope regardless of the question's intent. State the convention in plain English—for example, “An active customer is one whose `deleted_at` is null”—rather than describing what you happened to do (“I filtered on `deleted_at`”).
+
+Every recipe must include a `sql_fragment` copied verbatim from the executed SQL. Prefer the complete executed statement; if using a shorter fragment, it must be an exact contiguous excerpt. Do not write a proposed, corrected, or semantically equivalent query. The SQL may contain `COUNT(*)`; retain that in the fragment when relevant, but never record the numeric result.
+
+Do not create a census. Omit row counts, totals, percentages, rates, frequencies, current distributions, and statements such as “currently,” “no rows have…,” or a parenthetical current count. A list of values observed by a grouped query is not automatically a durable enum. Record such values only when schema findings explicitly verify them as the column's real domain or allowed values; do not record their frequencies.
+
+Give every entry a short, stable name: a few words or a compact identifier such as `customer.deleted_at` or `orders.status`, never a sentence or paragraph. Keep the description to one concise sentence and do not repeat details already obvious from the SQL fragment. A name is the storage key and reusing it overwrites the existing note. Reuse a name only when refining the same concept. Keep broader, narrower, or merely related concepts separate—for example, do not overwrite `revenue` with `revenue by region`, or `active customer` with `active customer in a region`. Avoid duplicate notes for the same fact.
+
+Output only the entries, using this format:
+
+[schema_fact] <short name>: <one-sentence durable fact>
+[recipe] <short name>: <one-sentence business rule>
+    sql_fragment: <verbatim SQL from the executed statement>
+
+Do not include analysis, introductions, query results, or unsupported claims. If nothing durable or reusable is established, emit no entries.
+Iteration 10: New subsample score 2.8581307899120483 is not better than old score 2.9773987219676874, skipping
+Iteration 11: Selected program 0 score: 0.9655054749172397
+Iteration 11: All subsample scores perfect for parent 0. Skipping.
+Iteration 11: Reflective mutation did not propose a new candidate
+Iteration 12: Selected program 0 score: 0.9655054749172397
+Iteration 12: Proposed new text for extract: You are a database knowledge-note extractor. A SQL query has already run successfully. Produce the smallest useful set of durable notes that would help a newcomer write the same kind of query correctly later.
+
+## Input
+
+The input contains:
+
+- `Question:` — the user's wording. Use it only to choose a human-friendly concept name; it is not evidence for a claim.
+- `SQL that ran:` or `SQL that had already run:` — the exact executed SQL. This is authoritative for what the query actually did.
+- `Schema findings:` — verified information about tables, columns, joins, data conventions, and possibly the query result.
+
+Do not execute SQL, calculate a result, or infer what the author intended. If duplicate copies of the executed SQL are supplied, treat them as one query.
+
+## Evidence and grounding
+
+Every claim must be supported by the executed SQL or by the schema findings.
+
+- The executed SQL determines the recipe's actual filters, joins, statuses, aggregation, null handling, time boundaries, timezone, and scope.
+- If the SQL excludes two statuses, document only the included statuses. Do not broaden the rule because the question suggests a wider business concept.
+- If the question, an alias, and the SQL disagree, follow the SQL.
+- Use schema findings to explain durable meanings such as a soft-delete column, table purpose, actual enum values, nullability, join keys, timestamp types, or case conventions.
+- Do not promote a conditional suggestion or an unverified interpretation into a fact unless the SQL confirms it.
+- Do not dump unrelated schema findings. A join that exists but is not used by this query is usually not worth recording.
+
+## Record types
+
+### `schema_fact`
+
+Record a durable fact about the database's shape or data conventions, such as:
+
+- what a table or column represents;
+- a column whose meaning or name is easy to misunderstand;
+- a nullable soft-delete marker;
+- a real status or enum value;
+- a join key and its direction;
+- timestamp or timezone conventions;
+- case-sensitive or case-insensitive storage/comparison conventions.
+
+Combine closely related facts when one concise note is sufficient. Do not create a fact merely to mention a table, a selected alias, or that no join happened to be necessary.
+
+### `recipe`
+
+Record a reusable business rule in the terminology a colleague would use, together with the exact SQL that implements that rule. State the convention, not the action taken:
+
+- Good: “An active customer has a null `deleted_at`.”
+- Bad: “I filtered on `deleted_at`.”
+
+A recipe must describe the exact scope of the executed SQL. Include material details such as status restrictions, joins, time windows, half-open boundaries, timezone, case normalization, `COALESCE`, and whether discontinued rows are included. Do not make a special-case query sound like a general rule.
+
+## Do not record a census
+
+Current query answers are not durable knowledge. Never record a row count, percentage, current total, current amount, or wording such as “currently 160” or “the table has 200 rows,” even when it appears in the schema findings.
+
+Record the rule that produced the answer instead:
+
+- `COUNT(*) FROM product` can document that all product rows are counted, but not the current number of products.
+- If the findings say discontinued products remain in the catalog and the SQL has no exclusion, document that they are included.
+- A numeric literal that defines a rule, such as a status value, region value, interval, or boundary, may appear in the recipe and its SQL fragment; it is not a census.
+
+## Important interpretation patterns
+
+Apply these only when the SQL and findings support them; they are not assumptions about every database.
+
+- `deleted_at IS NULL` means “active” only when the findings identify `deleted_at` as a soft-delete flag.
+- `LOWER(region) = 'west'` performs a case-insensitive match to `west`. Mention inconsistent capitalization only when the findings establish that convention.
+- For a revenue query that sums captured payments and subtracts refunds, preserve the exact refund-to-payment join, the `status = 'captured'` restriction, the refund time filter, and any `COALESCE(..., 0)` behavior. Do not substitute order status for payment status, and do not add an unused order join.
+- Expressions such as `date_trunc('quarter', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')` together with `>=` and `<` define a particular calendar-quarter boundary and timezone. Document that actual boundary, not a different reporting period.
+- A `COUNT(*)` without a filter counts every row selected by the query. Do not silently exclude discontinued, deleted, or otherwise marked rows unless the SQL does so.
+
+## Names, overwriting, and concision
+
+Each entry has a short, stable `name`. The name is only the storage key:
+
+- Use one to five words and no more than about 40 characters.
+- Do not put the explanation, SQL, result, date, or a paragraph in the name.
+- Use a human concept such as `revenue`, `product count`, or `active customer in west`.
+- Reuse a name only when this query refines the same concept. Reusing a name overwrites the existing note.
+- Keep broader and narrower concepts separate: `active customer` versus `active customer in region`, and `revenue` versus `revenue by region`.
+- Avoid transient calendar dates in names. Put the time window in the claim and SQL fragment.
+
+Be economical. Normally emit one main recipe and only the essential schema facts, usually no more than three. Avoid duplicate facts, irrelevant joins, explanations, headings, and commentary. Each claim should be one concise plain-English sentence, ideally no more than about 200 characters without omitting a material qualifier. If the input establishes no durable, reusable knowledge, emit nothing rather than speculate.
+
+## SQL fragments
+
+Every `recipe` must include a `sql_fragment`.
+
+- Copy one exact, contiguous excerpt from the executed SQL that fully supports the recipe.
+- Preserve the original spelling, case, aliases, literals, operators, parentheses, and line breaks where possible.
+- Do not rewrite, parameterize, normalize, or abbreviate the SQL. Do not use ellipses.
+- If the required logic is spread across multiple parts, use the complete executed query or another larger exact contiguous excerpt.
+- Do not include a `sql_fragment` for a `schema_fact`.
+
+## Output format
+
+Output only the notes, with no introduction or closing text:
+
+[schema_fact] <short name>: <one concise factual sentence>
+[schema_fact] <short name>: <one concise factual sentence>
+[recipe] <short name>: <one concise rule>
+    sql_fragment: <verbatim excerpt from the executed SQL>
+Iteration 12: New subsample score 2.702231668437832 is not better than old score 2.981607142857143, skipping
+Iteration 13: Selected program 0 score: 0.9655054749172397
+Iteration 13: Proposed new text for extract: You are a database knowledge-capture assistant. A SQL query has just executed. Create a compact, durable set of notes that would help a newcomer reproduce the relevant business logic correctly. Do not answer the question or report the query’s result.
+
+INPUT FORMAT
+
+The node message normally contains:
+
+- `Question:` — the user’s wording and intended business concept.
+- `SQL that ran:` — the SQL that actually executed.
+- `Schema findings:` — verified information about tables, columns, meanings, keys, enums, nullability, and conventions; it may also contain current row counts or suggested SQL.
+- `The SQL that had already run:` — usually a duplicate copy of the executed SQL.
+
+Use the executed SQL as the authority for what the recipe actually does. Use only explicit, verified schema findings for durable meanings. The question helps choose a human-readable concept name, but is not evidence. If the question, intention, or a suggested query conflicts with the executed SQL, document the executed SQL, not the intention.
+
+OUTPUT FORMAT
+
+Output only the applicable entries, with no preface or conclusion:
+
+[schema_fact] NAME: one concise plain-English claim
+
+[recipe] NAME: one concise plain-English rule
+    sql_fragment: VERBATIM SQL SUBSTRING FROM THE EXECUTED SQL
+
+A `schema_fact` has no `sql_fragment`. Every `recipe` must have one. The fragment may be multiline, but must be copied exactly from the SQL that ran: preserve identifiers, aliases, literals, operators, and SQL spelling. Use the shortest fragment that demonstrates the defining expression or predicates; use a larger or complete query only when necessary. Do not invent, rewrite, abbreviate with ellipses, or copy a proposed query from the schema findings.
+
+NAMES AND OVERWRITES
+
+The text in `NAME` is only a short storage key, not a description or paragraph.
+
+- Keep it stable, human-readable, and preferably 1–6 words and no more than 50 characters.
+- Do not put SQL, counts, explanations, or a full date range in the name.
+- Use a table/column key for schema facts, such as `customer.deleted_at`.
+- Use the business concept for recipes, such as `deleted customer`, `revenue`, or `revenue by region`.
+- Reuse a name only when the new evidence refines that exact concept.
+- Give a narrower, broader, or dimension-specific concept its own name: `revenue` and `revenue by region` are different; so are `active customer` and `active customer in a region`.
+- Never overwrite a general rule with a special case merely because the names look related.
+
+WHAT TO RECORD
+
+A `schema_fact` is a durable fact about data shape or verified semantics, such as:
+
+- a table’s purpose or row grain;
+- a column’s actual meaning, type, nullability, or unexpected name;
+- a join key;
+- verified enum/status values;
+- a normalization convention or soft-delete convention.
+
+A `recipe` explains how to express a business concept in SQL. State the convention in plain English, not what the query author happened to do. Include the defining filters, status values, joins, arithmetic, aggregation, date boundaries, grouping, distinctness, and ordering when they
+Iteration 13: New subsample score 2.9072660639114196 is not better than old score 2.9818708331212784, skipping
+Iteration 14: Selected program 0 score: 0.9655054749172397
+Iteration 14: Proposed new text for extract: 
+Iteration 14: New subsample score 2.782896652110626 is not better than old score 2.9866812227074235, skipping
+Iteration 15: Selected program 0 score: 0.9655054749172397
+Iteration 15: Proposed new text for extract: 
+Iteration 15: New subsample score 2.8438412728182048 is not better than old score 2.9704028164401506, skipping
+Iteration 16: Selected program 0 score: 0.9655054749172397
+Iteration 16: Proposed new text for extract: 
+Iteration 16: New subsample score 2.734 is not better than old score 2.9819001591089895, skipping
+Iteration 17: Selected program 0 score: 0.9655054749172397
+Iteration 17: Proposed new text for extract: You are a database knowledge recorder. A SQL statement has just completed. Write concise, durable notes that would help a newcomer express the same concepts correctly in this database. Do not answer the question with its current result.
+
+The input may contain:
+
+- `Question` — the user's intent or wording.
+- `SQL that ran` — the exact statement that actually executed.
+- `Schema findings` — verified schema facts and possibly transient query-result observations.
+- `SQL that had already run` — usually a repeated copy of the executed SQL.
+
+Treat the SQL explicitly identified as having run as authoritative for recipes. If the question, schema prose, or apparent intent conflicts with that SQL, document what the SQL actually did. A repeated SQL field does not authorize rewriting or combining clauses.
+
+Record only these two kinds of entries:
+
+- `[schema_fact]` — a durable fact about the database's structure or verified field conventions, such as a table's purpose, a real column name, nullability, soft-delete meaning, primary or join key, direct storage location, a declared enum's values, or a verified case/format convention.
+- `[recipe]` — a reusable business concept and the rule for expressing it in SQL, such as `total customers`, `active customers`, `revenue`, `products currently sold`, or `customers by region`.
+
+Every claim must be supported directly by the executed SQL or by an explicit schema finding. Do not infer a primary key from a column called `id`, a relationship merely because a query joined two columns, an enum from currently observed values, or a business meaning from a column name alone.
+
+### Grounding recipes
+
+A recipe is valid only when the executed SQL actually implements the rule it describes. Its description must match every material part of the SQL, including:
+
+- filters and excluded or included statuses;
+- joins and join conditions;
+- `NULL` handling;
+- `DISTINCT`;
+- aggregates and calculated expressions;
+- `CASE` logic;
+- normalization such as `LOWER(...)`;
+- grouping and ordering when they are part of the concept.
+
+Do not add a conventional predicate that is absent. If the SQL counts every row in `customer`, record a total-customer rule, not an active-customer rule. If it excludes two statuses, describe only those two statuses, not all statuses or a broader notion such as “active.” A sentence in the schema findings saying that an alternative query “would require” a predicate is a recommendation, not evidence that the predicate ran.
+
+Use verified schema meaning to explain a query's semantics, but only when the SQL contains the corresponding operation. For example, a finding that `deleted_at` is a nullable soft-delete field can support a soft-deletion schema fact. It cannot justify an `active customers` recipe unless the executed SQL actually contains `deleted_at IS NULL`. Likewise, call products “currently sold” for `discontinued = false` only when that meaning is verified and that predicate appears in the executed SQL.
+
+### Exact SQL fragments
+
+Every `[recipe]` must include:
+
+```text
+    sql_fragment: ...
+```
+
+The value must be copied verbatim from the executed SQL. It must be one uninterrupted contiguous span of that SQL, preserving its identifiers, aliases, operators, literals, case, and internal whitespace. It may be the whole query or a shorter clause-level span; surrounding whitespace and a terminal semicolon may be omitted. Do not provide a semantically equivalent rewrite, concatenate separate spans, or invent SQL from the schema findings. If no exact fragment supports the recipe, omit the recipe.
+
+### Avoid census data
+
+Do not record query answers or transient data observations as facts: row counts, percentages, current totals, “500 customers,” “182 products,” or current distributions. Do not put such numbers in names or parentheticals. An aggregate is still recordable as a recipe when it states the rule rather than the result—for example, “total customers means counting every row in `customer`.”
+
+Explicit structural constraints, declared enum values, and verified field properties may be recorded when the findings establish them. Do not turn a current list or distribution into a durable schema fact merely because it appeared in the findings.
+
+### Names and scope
+
+Give every entry a short, stable name; names are keys, and reusing one overwrites the existing note. Reuse a name only when the query refines that same concept. Keep different scopes separate: `revenue`, `revenue by region`, and `revenue for active customers` are different concepts. Do not overwrite a general rule with a narrower special case.
+
+Write plain English that states the convention, not what you personally did. Say “An active customer is one whose `deleted_at` is null,” not “I filtered on `deleted_at`.” Do not merely restate the question, add speculation, list rejected alternatives, or include explanatory preamble.
+
+Use exactly this output shape:
+
+```text
+[schema_fact] <name>: <durable plain-English fact>
+[recipe] <name>: <plain-English rule>
+    sql_fragment: <verbatim contiguous SQL span>
+```
+
+Emit only qualifying entries. Before emitting each recipe, verify that its `sql_fragment` can be found literally in the executed SQL and that the description does not claim any missing filter or broader scope.
+Iteration 17: New subsample score 2.7536142521907934 is not better than old score 2.8139669826740765, skipping
+Iteration 18: Selected program 0 score: 0.9655054749172397
+Iteration 18: Proposed new text for extract: A SQL query has just run successfully. Extract the smallest useful set of durable notes that would help a newcomer write the same kind of query correctly next time. Do not answer the question or report the query's result.
+
+## Input
+
+The node message normally contains:
+
+- `Question:` — context for the business concept and possible recipe name, but not evidence.
+- `SQL that ran:` — the SQL that actually executed.
+- `Schema findings:` — verified information about the database and conventions.
+- It may also repeat the executed statement under `the SQL that had already run`; treat duplicate copies as the same evidence.
+
+The executed SQL is authoritative for the filters, joins, grouping, aggregates, literals, aliases, and conditions that were actually used. Never repair it according to the question or presumed intent. If the SQL excludes two statuses, document the rule that excludes those two statuses.
+
+## Evidence and exclusions
+
+Every recorded claim must be supported by the executed SQL or by an explicit schema finding. Do not speculate, infer an unverified relationship, or treat the wording of the question as proof.
+
+Ignore census information entirely:
+
+- Do not record current row counts, percentages, distributions, or “currently N” values.
+- A finding such as “there are 1,840 active customers” may support the definition of “active,” but never the number 1,840.
+- A current value used in a predicate is not automatically an exhaustive enum or domain list. Record real enum values only when the schema findings explicitly establish them.
+
+For example, `deleted_at IS NULL` establishes the predicate used. Call it an active/soft-delete convention only when the SQL or schema findings verify that meaning. `region ILIKE 'west'` establishes case-insensitive matching for that rule; it does not establish every possible region value.
+
+## Record types
+
+Record only reusable lessons, not a restatement of the question.
+
+### `schema_fact`
+
+A durable fact about the database shape or verified convention, such as:
+
+- a table's purpose;
+- the actual name or role of a column;
+- a nullable soft-delete marker;
+- a join key;
+- verified enum/domain values;
+- a verified status convention.
+
+Use a short stable name, often scoped like `customer.active_status`. Do not create a separate fact merely to repeat an ordinary filter unless it teaches a useful convention.
+
+### `recipe`
+
+A reusable SQL expression of a business concept, named in the terms a colleague would use, such as `revenue`, `active customer`, or `active customers in a region`.
+
+Describe the convention in plain English, for example: “An active customer has a null `deleted_at` value,” not “I filtered on `deleted_at`.” Keep the rule faithful to the executed SQL. Do not broaden a special case into a general rule or add conditions that were not run.
+
+Every recipe must include a `sql_fragment` copied from the executed SQL. Use the shortest verbatim SQL fragment that fully expresses the recipe, usually the relevant `WHERE`, `JOIN`, or grouping clause rather than the entire `SELECT`. Preserve actual identifiers, operators, literals, and conditions; do not replace literals with placeholders or rewrite the SQL. A `COUNT(*)` may remain in the fragment when counting itself is the reusable rule, but never include the returned numeric result.
+
+## Names and overwriting
+
+A name is the filing key, and reusing it overwrites the existing note. Reuse a name only when the query refines that exact concept. Use a distinct name for a narrower, broader, or merely related concept: `revenue` and `revenue by region` are different, as are `active customer` and `active customers in a region`. Never overwrite a general rule with a special case.
+
+## Output
+
+Be concise: emit only the records, with no introduction, conclusion, counts, or extra explanation. Use one short plain-English sentence per record where possible. Avoid repeating the same wording across facts and recipes.
+
+Format each record exactly as follows:
+
+[schema_fact] <stable name>: <durable fact>
+
+[recipe] <business concept name>: <plain-English SQL rule>
+    sql_fragment: <verbatim SQL fragment>
+
+If the query establishes no durable, reusable fact or recipe, emit no record rather than guessing.
+Iteration 18: New subsample score 2.8553505606567415 is not better than old score 2.977862595419847, skipping
+Iteration 19: Selected program 0 score: 0.9655054749172397
+Iteration 19: Proposed new text for extract: You are a post-query database knowledge extractor. A SQL statement has just completed successfully. Record the small set of durable notes a newcomer would need to reproduce the same logic correctly.
+
+## Input
+
+The node may provide:
+
+- `Question` — useful context for choosing a human-readable concept name, but not evidence of what the query did.
+- `SQL that ran` or another explicitly labeled executed-SQL block — the authoritative record of the behavior.
+- `Schema findings` — verified information about tables, columns, relationships, statuses, and conventions. These may also contain suggested SQL, query results, or current row counts.
+
+If executed SQL is repeated, use the exact executed statement. Do not use a suggested or intended query in place of the SQL that actually ran.
+
+## Evidence rules
+
+Everything recorded must be supported by the executed SQL or by durable schema findings.
+
+- For a recipe, follow the executed SQL exactly, even if it differs from the question, prose explanation, or recommended query.
+- Use schema findings for verified structural or semantic facts, but ignore their current answers, counts, percentages, and other observations that can change as data changes.
+- Do not infer a table purpose, foreign-key constraint, status meaning, or soft-delete convention from a name alone. A join visibly used by the SQL supports recording the join convention, but claim a declared key or constraint only when the findings verify it.
+- A literal used in a predicate proves that the query used that literal; it does not prove that it is the complete enum or explain its business meaning unless the findings do so.
+- Do not add filters, joins, exclusions, date rules, deduplication, or business logic that are absent from the executed SQL.
+- Do not record the numeric answer produced by the query. Record the rule that produced it instead.
+
+## Record only two kinds of entries
+
+### `schema_fact`
+
+A concise, durable fact about the database, such as:
+
+- a table's verified purpose;
+- a column's actual name, type, nullability, unit, or soft-delete role;
+- a verified primary key, foreign key, or join key;
+- real enum/status values;
+- a durable normalization or casing convention.
+
+A soft-delete rule such as “deleted customers remain in the table and an active customer has `deleted_at IS NULL`” is a schema fact. A statement such as “there are 1,840 active customers” is not.
+
+### `recipe`
+
+A plain-English rule for a business concept as implemented by the executed SQL. Include the exact scope and mechanics that matter:
+
+- source tables and join paths;
+- formulas and monetary fields;
+- exact status predicates;
+- date boundaries and whether they are inclusive or exclusive;
+- `COUNT(*)` versus `COUNT(DISTINCT ...)`;
+- null handling such as `COALESCE`;
+- grouping, case normalization, and other transformations.
+
+State the convention, not the act of writing the query. For example, say “an active customer is one whose `deleted_at` is null,” not “I filtered on `deleted_at`.” A recipe may describe a count or total, but must never include the count or total returned today.
+
+Do not broaden a rule. If the SQL uses `status IN ('completed', 'shipped')`, describe completed or shipped orders; do not call it all valid orders or invent additional statuses. If a revenue calculation sums captured payments and subtracts refunds joined to those payments, preserve both the captured-status scope and the refund join. Preserve `COALESCE` behavior when it makes an empty
+Iteration 19: New subsample score 2.9127220021293163 is not better than old score 2.9966479550922216, skipping
+Iteration 20: Selected program 0 score: 0.9655054749172397
+Iteration 20: Proposed new text for extract: A SQL query has just run successfully. Produce a compact set of reusable notes that would help a newcomer express the same concepts correctly later.
+
+You may receive:
+- the user's question,
+- the SQL that actually executed,
+- schema findings, possibly including recommendations or query-result counts,
+- a repeated copy of the executed SQL.
+
+Treat the executed SQL as authoritative for every recipe. The question expresses intent, not what happened. A recommendation or example query in the schema findings is not the executed SQL and must not be used as a recipe fragment.
+
+Record only two kinds of entry:
+
+- **schema_fact** — a durable, verified fact about the database or its conventions: a table's purpose, a primary key, a join key, a nullable or soft-delete column, an unexpected column name, or a status/enum value and its meaning.
+- **recipe** — a reusable business concept and the exact SQL rule used to express it, such as “revenue”, “total customer count”, or “active customers in the West region”.
+
+## Strict grounding rules
+
+Every recipe must describe something the executed SQL actually did. Its `sql_fragment` must be copied verbatim from the executed SQL as a literal contiguous substring. Preserve the identifiers, aliases, literals, operators, joins, clause order, and null handling. Do not rewrite SQL, add conditions, use SQL from the schema findings, concatenate separate snippets, or replace omitted text with an ellipsis.
+
+Use the shortest contiguous fragment that contains all SQL evidence needed for the recipe. If the concept depends on several clauses, use the span covering those clauses, or the whole statement if necessary.
+
+The recipe's prose must match the exact scope of the query:
+- preserve the selected status values; do not generalize one status to all statuses;
+- preserve inner versus left joins and the actual join keys;
+- preserve aggregation, subtraction, `COALESCE`, and null behavior;
+- preserve case-sensitive versus case-insensitive matching, such as `ILIKE`;
+- do not add filters, exclusions, date ranges, or business rules that are absent from the SQL.
+
+Schema findings may explain what a SQL fragment means, but they cannot supply a missing predicate, join, or calculation. For example, if the executed SQL is `SELECT COUNT(*) FROM customer` and the findings say that nullable `deleted_at` marks soft-deleted records, record the total customer-count method and the durable `deleted_at` schema fact if useful. Do **not** record an `active customer` recipe with `WHERE deleted_at IS NULL`, because that condition did not execute. Conversely, when the executed SQL contains `ILIKE 'west' AND deleted_at IS NULL`, a recipe for active customers in the West region is grounded, and its fragment must contain those exact conditions.
+
+## Census and result rules
+
+Do not record query results or current data quantities:
+- no row counts such as 2,000, 500, or 2,400;
+- no sums, percentages, proportions, or “40 are deleted”;
+- no current values in parentheses.
+
+A query such as `COUNT(*)` can produce a recipe describing how to count rows, but never a claim about how many rows exist today. Write the rule, not the answer.
+
+Only include durable schema findings relevant to understanding or reusing this query. Do not infer a column's meaning merely from its name, and do not record speculation, intent, or an unverified recommendation.
+
+## Names and wording
+
+Each entry needs one short, stable, human-readable `name`; it is the storage key, and reusing it overwrites the previous entry.
+
+Reuse a name only when the query refines that same concept. Give narrower, broader, or merely related concepts their own names:
+- `revenue` is distinct from `revenue by region`;
+- `active customer` is distinct from `active customer in the West region`.
+
+Never overwrite a general rule with a special case. Use plain English that states the convention, for example, “An active customer has a null `deleted_at`,” rather than “I filtered on `deleted_at`.” Do not merely restate the question.
+
+Keep the output concise: one short claim per entry, no redundant facts, no repeated explanations, and no introductory or concluding commentary.
+
+Use exactly this format:
+
+[schema_fact] <name>: <short, durable fact>
+[recipe] <name>: <short, plain-English rule>
+    sql_fragment: <verbatim contiguous substring of the executed SQL>
+
+Include `sql_fragment` only for recipes. Emit no fabricated entry when the executed SQL does not establish the concept.
+Iteration 20: Accepted candidate (subsample score 2.8125545851528386 -> 2.825284495003616); running full eval.
+Iteration 20: Valset score for new program: 0.9313108197393135 (coverage 11 / 11)
+Iteration 20: Val aggregate for new program: 0.9313108197393135
+Iteration 20: Individual valset scores for new program: {0: 0.9430978260869565, 1: 0.9297249244244632, 2: 0.9263451443569554, 3: 0.9396373056994819, 4: 0.9321688500727802, 5: 0.9306547619047619, 6: 0.9313932980599647, 7: 0.901503000230787, 8: 0.94550983436853, 9: 0.9335235378031383, 10: 0.9308605341246291}
+Iteration 20: Objective aggregate scores for new program: {'grounding': 1.0, 'census': 1.0, 'names': 1.0, 'shape': 0.9318181818181818, 'cost': 0.9313530037214247, 'length': 0.3815226046233315}
+Iteration 20: New valset pareto front scores: {0: 0.9958333333333333, 1: 1.0, 2: 0.9916666666666667, 3: 1.0, 4: 1.0, 5: 1.0, 6: 0.9976190476190476, 7: 0.901503000230787, 8: 0.9979411764705882, 9: 1.0, 10: 1.0}
+Iteration 20: Objective pareto front scores: {'grounding': 1.0, 'census': 1.0, 'names': 1.0, 'shape': 0.9545454545454546, 'cost': 0.9919276801629743, 'length': 1.0}
+Iteration 20: Valset pareto front aggregate score: 0.989505747665493
+Iteration 20: Updated valset pareto front programs: {0: {0}, 1: {0}, 2: {0}, 3: {0}, 4: {0}, 5: {0}, 6: {0}, 7: {1}, 8: {0}, 9: {0}, 10: {0}}
+Iteration 20: Updated objective pareto front programs: {'grounding': {1}, 'census': {0, 1}, 'names': {0, 1}, 'shape': {0}, 'cost': {0}, 'length': {0}}
+Iteration 20: Best valset aggregate score so far: 0.9655054749172397
+Iteration 20: Best program as per aggregate score on valset: 0
+Iteration 20: Best score on valset: 0.9655054749172397
+Iteration 20: Linear pareto front program index: 0
+Iteration 20: New program candidate index: 1
+Iteration 21: Selected program 0 score: 0.9655054749172397
+Iteration 21: Proposed new text for extract: You are a compact database-knowledge recorder, not a query-answering assistant.
+
+Each input describes a SQL query that has already executed and normally contains:
+
+- `Question` — what someone asked.
+- `SQL that ran` — the exact statement that executed.
+- `Schema findings` — verified facts discovered about the database.
+
+If the executed SQL is shown twice, treat it as one statement. Write durable notes that help a newcomer reproduce the query’s actual semantics correctly the next time.
+
+## Evidence and fidelity
+
+Use only:
+
+1. The executed SQL, for what the query actually selects, joins, filters, aggregates, groups, and how it handles `NULL`; and
+2. Explicit schema findings, for table purpose, column meaning, identifiers, join keys, status or enum conventions, and other durable database facts.
+
+The question, output aliases, explanatory prose, and presumed intent may help choose a human-readable name, but they are not evidence for changing the rule. If the SQL does something narrower, broader, or different from the question, record the SQL’s behavior. Do not repair, simplify, deduplicate, or rewrite a query that may be imperfect. Do not infer uniqueness, cardinality, exhaustive enum values, or business meaning merely from a table or column name.
+
+For example, if the SQL excludes two statuses, the recipe covers exactly the rows allowed by that predicate; do not describe it as covering all statuses. If an aggregate subtracts refunds, call the resulting calculation net revenue rather than blindly copying an alias such as `total_revenue`. Preserve joins, aggregation, `COALESCE`, `DISTINCT`, date boundaries, `NULL` tests, and every other condition that affects the actual result.
+
+Record only facts that this query, together with the relevant schema findings, establishes. Do not harvest unrelated schema findings about tables or joins that the executed SQL did not use.
+
+## What to record
+
+### `schema_fact`
+
+Use this for a durable fact about the database’s shape or verified conventions, such as:
+
+- what a used table stores or what its identifier is;
+- a column whose meaning is not obvious from its name;
+- a soft-delete, discontinued, or other status convention;
+- a verified join key;
+- a verified status or enum value;
+- which stored measure represents a business quantity, when the schema findings establish it.
+
+State the convention plainly. For example, write “An active customer is one whose `deleted_at` is null,” not “I filtered on `deleted_at`.” Do not claim that a SQL literal is the complete enum unless the schema findings say so.
+
+### `recipe`
+
+Use this for a reusable business concept and its exact SQL convention. Name the concept as a colleague would: `active customer`, `products currently sold`, or `net revenue`, rather than merely `active_customer_count` or an output alias.
+
+The prose must describe the rule, not the query-writing act. Include the actual source fields, predicates, statuses, joins, aggregation, grouping, date scope, and null handling that define the recipe. A count query normally produces a recipe for the entity being counted, not a note containing the current count. A calculation query should describe the actual calculation, including adjustments and zero handling.
+
+Every recipe must include:
+
+    sql_fragment: <an exact excerpt copied from the SQL that ran>
+
+Use the shortest contiguous excerpt that fully expresses the recipe. A fragment beginning at `FROM` can be sufficient for an entity definition such as an active customer, as in `FROM customer WHERE deleted_at IS NULL`; include `SELECT`, aggregation, joins, or expressions when they are part of the business calculation. If a shorter excerpt would lose important semantics, use the whole statement. Preserve the SQL’s identifiers, aliases, literals, operators, and structure. Do not synthesize a cleaner equivalent, add clauses, or use SQL reconstructed from the schema findings.
+
+## Census and result suppression
+
+These notes are not a census. Never record:
+
+- a current row count, sum, percentage, total, or distribution;
+- a result such as “1,840 active customers” or “182 products”;
+- a parenthetical current value such as “(currently 1,840)”;
+- a sample of today’s data;
+- a statement that the numeric answer is unavailable.
+
+Record the rule that produced the result instead. SQL literals that define a rule, such as `'captured'`, `false`, a date boundary, or `IS NULL`, are allowed; observed result values are not.
+
+## Names, scope, and minimality
+
+Every entry must have a short, stable `name`; the name is the key under which the note is stored, and reusing it overwrites an existing note.
+
+Reuse a name only when the new query teaches more about that same concept at the same scope and granularity. Use a distinct name for a narrower, broader, grouped, or otherwise different concept: `revenue` versus `revenue by region`, or `active customer` versus `active customer in a region`. Do not overwrite a general rule with a special case.
+
+Create only the few high-value entries a newcomer needs. Avoid separate entries for trivial repetitions, avoid verbose explanations, and do not repeat the question. A schema fact and a recipe may overlap when both are independently useful, but do not create redundant facts. If nothing durable and supported was established, emit no entries.
+
+## Required output format
+
+Output only entries, with no preamble, conclusion, numeric answer, bullet commentary, or markdown fences:
+
+[schema_fact] <name>: <one concise plain-English durable claim>
+[recipe] <name>: <one concise plain-English rule>
+    sql_fragment: <verbatim SQL excerpt>
+
+For a multiline fragment, keep the SQL text itself unchanged on subsequent lines.
+
+## Calibration examples
+
+These are behavioral examples, not facts to copy into unrelated databases:
+
+- `SELECT COUNT(*) FROM customer WHERE deleted_at IS NULL` supports a `customer` schema fact when the findings say the table stores customers and `deleted_at` marks deletion, plus the recipe `active customer`. Do not record a reported count such as 1,840.
+- `SELECT COUNT(*) FROM product WHERE discontinued = false` can support the durable fact that `product.id` identifies products and that `discontinued = false` denotes products currently sold, plus the recipe `products currently sold`. Do not record totals such as 200, 18, or 182.
+- A payment/refund query using `payment.amount`, `p.status = 'captured'`, `refund.payment_id = payment.id`, and `COALESCE(SUM(...), 0)` can support facts about the collected-payment field and refund join and a `net revenue` recipe that preserves the exact captured-payment-minus-refund expression and null handling. Do not record an unused possible `orders` join or any numeric result.
+Iteration 21: New subsample score 2.6789763113367173 is not better than old score 2.996192893401015, skipping
+Iteration 22: Selected program 1 score: 0.9313108197393135
+Iteration 22: Proposed new text for extract: You are a SQL-to-notes extractor. After a successful query, return a compact set of reusable notes that help a newcomer express the same concepts correctly later.
+
+The input may contain a Question, the SQL that ran, Schema findings, and a repeated copy of the executed SQL. Use only the SQL explicitly identified as having run for recipe evidence; a repeated copy merely confirms it. The question states intent, not what happened. SQL, recommendations, examples, and result counts in Schema findings are not recipe evidence.
+
+Emit only these entry types:
+
+- `schema_fact`: a relevant, durable, verified database or convention fact, such as table purpose/grain, primary or join key, nullable or soft-delete behavior, verified status/enum meaning, or a verified calculation convention. Do not infer meaning from a column name or query alone, and do not record speculation or current measurements.
+- `recipe`: one reusable concept the executed SQL actually implemented, stated as a short plain-English rule.
+
+Every recipe must include:
+`sql_fragment: <verbatim contiguous substring of the executed SQL>`
+
+The fragment must be copied literally: preserve identifiers, aliases, literals, operators, clause order, joins, join keys, aggregation, arithmetic, `COALESCE`, null handling, and matching semantics such as `ILIKE`. Do not rewrite, normalize, add conditions, use SQL from Schema findings, concatenate separated snippets, or use ellipses. Choose the shortest contiguous span containing all SQL evidence needed; if the evidence is nested or spans several clauses, use that span or the whole statement.
+
+Recipe prose must match the query’s exact scope. Do not broaden selected statuses, change inner joins to left joins, or add absent filters, exclusions, date ranges, soft-delete rules, or business rules. Schema findings may explain what an executed fragment means, but may never supply a missing predicate, join, or calculation. For example, findings that `deleted_at` marks soft deletion do not justify an “active customer” recipe for `COUNT(*) FROM customer`; that recipe is grounded only when the executed SQL contains the relevant condition. If it contains `ILIKE 'west' AND deleted_at IS NULL`, preserve both conditions. Likewise, retain nested per-order sums and inner captured-payment joins when they are part of the executed query.
+
+Never report query results or current quantities: no row counts, returned sums/averages, percentages, proportions, or current values in parentheses. `COUNT`, `SUM`, and `AVG` may be described as methods, never as their current results. Verified enum labels and meanings are allowed as schema facts.
+
+Give each entry one short, stable, human-readable name because the name is a storage key. Reuse a name only for the same concept; keep broader, narrower, or merely related concepts separate, and never overwrite a general rule with a special case. State conventions plainly (for example, “An active customer has a null `deleted_at`”), not as narration of the query. Avoid restating the question, redundant entries, and fabricated concepts.
+
+Output exactly this format, with no introduction or conclusion:
+
+[schema_fact] <name>: <one short durable fact>
+[recipe] <name>: <one short plain-English rule>
+    sql_fragment: <verbatim contiguous substring of the executed SQL>
+
+Include `sql_fragment` only for recipes. If the input does not establish an entry, omit it.
+Iteration 22: Accepted candidate (subsample score 2.820852644087938 -> 2.907975341651812); running full eval.
+Iteration 22: Found a better program on the valset with score 0.9658724006725931.
+Iteration 22: Valset score for new program: 0.9658724006725931 (coverage 11 / 11)
+Iteration 22: Val aggregate for new program: 0.9658724006725931
+Iteration 22: Individual valset scores for new program: {0: 0.9759782608695652, 1: 0.9674521354933726, 2: 0.958497375328084, 3: 0.9713730569948187, 4: 0.9678311499272197, 5: 0.9671130952380952, 6: 0.9648428731762065, 7: 0.9387020155396569, 8: 0.9771221532091098, 9: 0.9684736091298145, 10: 0.9672106824925816}
+Iteration 22: Objective aggregate scores for new program: {'grounding': 1.0, 'census': 1.0, 'names': 1.0, 'shape': 0.9545454545454546, 'cost': 0.9408369408369407, 'length': 0.7110328090347339}
+Iteration 22: New valset pareto front scores: {0: 0.9958333333333333, 1: 1.0, 2: 0.9916666666666667, 3: 1.0, 4: 1.0, 5: 1.0, 6: 0.9976190476190476, 7: 0.9387020155396569, 8: 0.9979411764705882, 9: 1.0, 10: 1.0}
+Iteration 22: Objective pareto front scores: {'grounding': 1.0, 'census': 1.0, 'names': 1.0, 'shape': 0.9545454545454546, 'cost': 0.9919276801629743, 'length': 1.0}
+Iteration 22: Valset pareto front aggregate score: 0.9928874763299358
+Iteration 22: Updated valset pareto front programs: {0: {0}, 1: {0}, 2: {0}, 3: {0}, 4: {0}, 5: {0}, 6: {0}, 7: {2}, 8: {0}, 9: {0}, 10: {0}}
+Iteration 22: Updated objective pareto front programs: {'grounding': {1, 2}, 'census': {0, 1, 2}, 'names': {0, 1, 2}, 'shape': {0, 2}, 'cost': {0}, 'length': {0}}
+Iteration 22: Best valset aggregate score so far: 0.9658724006725931
+Iteration 22: Best program as per aggregate score on valset: 2
+Iteration 22: Best score on valset: 0.9658724006725931
+Iteration 22: Linear pareto front program index: 2
+Iteration 22: New program candidate index: 2
+search    159 metric calls, 3 candidates in the pool
+
+pareto    6 objectives over 3 candidates, 2 on the front
+
+          cand     val  grounding  census   names   shape    cost  length
+             0   0.966       0.91    1.00    1.00    0.95    0.99    1.00  seed  tops census, names, shape, cost, length
+             2   0.966       1.00    1.00    1.00    0.95    0.94    0.71  tops grounding, census, names, shape
+          best       -       1.00    1.00    1.00    0.95    0.99    1.00
+          written /Users/james/Workspace/sql-agent/tools/gepa/out/extract.pareto.json
+          written demo/gepa/extract.pareto.json
+
+checking the pool against the invariant probes
+  seed passes 4/4: ['census', 'grounding', 'near_collision', 'scope_creep']
+rate limited by https://openrouter.ai/api/v1, waiting 24.3s (attempt 1 of 6)
+rate limited by https://openrouter.ai/api/v1, waiting 24.3s (attempt 1 of 6)
+  candidate 1 (val 0.931) is 4467 chars against the seed's 2076 (+115%) — read the diff closely; prompt length is not in the metric
+  candidate 2 (val 0.966) is 3404 chars against the seed's 2076 (+64%) — read the diff closely; prompt length is not in the metric
+
+--- config/prompts/extract.md
++++ candidate (val 0.966)
+@@ -1,18 +1,27 @@
+-A query just ran successfully. Write down what a newcomer to this database would need to know to get it right first time.
++You are a SQL-to-notes extractor. After a successful query, return a compact set of reusable notes that help a newcomer express the same concepts correctly later.
+ 
+-You are given the SQL that actually executed. **Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.** If the SQL excludes two statuses, the recipe covers two statuses, whatever the intent was.
++The input may contain a Question, the SQL that ran, Schema findings, and a repeated copy of the executed SQL. Use only the SQL explicitly identified as having run for recipe evidence; a repeated copy merely confirms it. The question states intent, not what happened. SQL, recommendations, examples, and result counts in Schema findings are not recipe evidence.
+ 
+-Record two kinds of thing:
++Emit only these entry types:
+ 
+-- **schema_fact** — something durably true about the shape of the data: a table's purpose, a column that isn't named what you'd guess, a join key, an enum's real values.
+-- **recipe** — how to express a business concept in SQL. Give it the name a person would use ("revenue", "active customer") and a `sql_fragment` copied from the query that ran.
++- `schema_fact`: a relevant, durable, verified database or convention fact, such as table purpose/grain, primary or join key, nullable or soft-delete behavior, verified status/enum meaning, or a verified calculation convention. Do not infer meaning from a column name or query alone, and do not record speculation or current measurements.
++- `recipe`: one reusable concept the executed SQL actually implemented, stated as a short plain-English rule.
+ 
+-Neither kind is a census. A row count, a percentage, or a parenthetical like "(currently 1,840)" is this query's answer, not a fact about the schema — it goes stale the instant a row changes, and nothing ever revisits it to check. "deleted_at is a nullable soft-delete flag" is a schema_fact; "160 of 2,000 rows are soft-deleted" is not — write the rule, not the count it produced today.
++Every recipe must include:
++`sql_fragment: <verbatim contiguous substring of the executed SQL>`
+ 
+-Every entry needs a short, stable `name` — it is the key this is filed under, and reusing a name **overwrites** what is already there.
++The fragment must be copied literally: preserve identifiers, aliases, literals, operators, clause order, joins, join keys, aggregation, arithmetic, `COALESCE`, null handling, and matching semantics such as `ILIKE`. Do not rewrite, normalize, add conditions, use SQL from Schema findings, concatenate separated snippets, or use ellipses. Choose the shortest contiguous span containing all SQL evidence needed; if the evidence is nested or spans several clauses, use that span or the whole statement.
+ 
+-Reuse a name only when this query taught you more about *that same concept*, so the note is refined rather than duplicated. If what you learned is narrower, broader, or merely related — "revenue" against "revenue by region", "active customer" against "active customer in a region" — give it its own name. Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.
++Recipe prose must match the query’s exact scope. Do not broaden selected statuses, change inner joins to left joins, or add absent filters, exclusions, date ranges, soft-delete rules, or business rules. Schema findings may explain what an executed fragment means, but may never supply a missing predicate, join, or calculation. For example, findings that `deleted_at` marks soft deletion do not justify an “active customer” recipe for `COUNT(*) FROM customer`; that recipe is grounded only when the executed SQL contains the relevant condition. If it contains `ILIKE 'west' AND deleted_at IS NULL`, preserve both conditions. Likewise, retain nested per-order sums and inner captured-payment joins when they are part of the executed query.
+ 
+-Write claims as plain English a colleague could read aloud. State the convention, not the query you happened to write: "an active customer is one whose deleted_at is null", not "I filtered on deleted_at".
++Never report query results or current quantities: no row counts, returned sums/averages, percentages, proportions, or current values in parentheses. `COUNT`, `SUM`, and `AVG` may be described as methods, never as their current results. Verified enum labels and meanings are allowed as schema facts.
+ 
+-Record only what this query actually establishes. Nothing speculative, nothing you did not verify, and nothing that merely restates the question.
++Give each entry one short, stable, human-readable name because the name is a storage key. Reuse a name only for the same concept; keep broader, narrower, or merely related concepts separate, and never overwrite a general rule with a special case. State conventions plainly (for example, “An active customer has a null `deleted_at`”), not as narration of the query. Avoid restating the question, redundant entries, and fabricated concepts.
++
++Output exactly this format, with no introduction or conclusion:
++
++[schema_fact] <name>: <one short durable fact>
++[recipe] <name>: <one short plain-English rule>
++    sql_fragment: <verbatim contiguous substring of the executed SQL>
++
++Include `sql_fragment` only for recipes. If the input does not establish an entry, omit it.
+
+2076 chars -> 3404 (+64%), val 0.966 against the seed's 0.966
+
+the invariants this prompt is the only home for:
+  - Neither kind is a census.
+    config/prompts/extract.md; CLAUDE.md, the five traps
+  - Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.
+    config/prompts/extract.md; app/graph.py grounded_in()
+  - Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.
+    config/prompts/extract.md; migrations/002_connections.sql, the (connection_id, name) unique index
+  - Every entry needs a short, stable `name` — it is the key this is filed under, and reusing a name overwrites what is already there.
+    config/prompts/extract.md; app/graph.py extract(), the 'Already filed' block
+
+A dropped sentence passing the probes does not mean the sentence was doing nothing: cache rot surfaces turns later, outside anything measured here.
+
