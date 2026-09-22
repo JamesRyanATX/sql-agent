@@ -30,7 +30,7 @@ Settle this first, because it decides whether the talk fits.
 | Pre-baked | Takes | Why it cannot be live |
 |---|---|---|
 | Recording all nineteen golden cases | ~5 min | Nineteen cold turns, unattended |
-| `gepa-tools --probe-only` | ~20 min | Nineteen cold turns, one per golden case |
+| `gepa-tools` or `gepa-config --probe-only` | ~20 min | Nineteen cold turns, one per golden case; the same turns either way |
 | Every GEPA search | 20 min – 2 hrs | 60–150 metric calls |
 | The overfit run | ~15 min | A second search |
 
@@ -368,50 +368,89 @@ artifact rather than the exit code.
 
 ## 5. Things that do not look like prompts — 6 min
 
-**Status: 5a is built and run. The candidate it proposed is committed at
-`demo/gepa/tools.candidate.md`, not promoted — the gain is two cases out of
-nine, which is the noise floor. 5b is not built and may not be worth building;
-see the honesty check.**
+**Status: 5a is built and run; the candidate it proposed is committed at
+`demo/gepa/tools.candidate.md`, not promoted. 5b is built and not yet run on
+the talk's model: `make gepa-config` exists, its feedback names the node that
+spent the tokens, and what every reflection read is kept beside the run. The
+two runs it needs are in the gap list.**
 
 ### Say
 
 - GEPA represents a candidate as a **dict of named text components** and will
   mutate any of them. For `extract` that dict has one key, because a node has
   one prompt. Nothing made it one key except our own code.
-- The thesis is that dict. Anything that is text and that a human wrote once is
-  a component.
+- Three rungs, each less like a prompt than the last. Section 3 was the first.
 
-### 5a. Tool descriptions
+### 5a. Tool descriptions — the rung that is still prose
 
 The agent's four introspection tools carry descriptions somebody wrote once and
-never revisited. They are prose, they are in the prompt on every cold turn, and
-nobody has ever measured them.
+never revisited. They live outside the prompt files, nobody calls them prompts,
+and they are in the model's context on every cold turn.
 
-They are now four keys of one candidate, scored by running whole cold turns
-against `demo/golden/` — nineteen questions with a known answer. A candidate
-that gets a question wrong which the seed got right is discarded whatever it
-scored, and nothing is averaged.
+They are four keys of one candidate, scored by running whole cold turns against
+`demo/golden/` — nineteen questions with a known answer. A candidate that gets a
+question wrong which the seed got right is discarded whatever it scored, and
+nothing is averaged.
 
 ```bash
 make gepa-tools GEPA_ARGS=--probe-only   # the seed over all 19, ~220k tokens
 make gepa-tools                          # the search, ~690k tokens, asks first
 ```
 
-Show the before and after: T1 tokens and tool-call count, seed versus promoted,
-on the same question. The probe-only run is the before half.
+- **Say what it found.** One tool changed, a gain of two cases in nine, six of
+  seven proposals rejected. Then say why, because the feedback says why: the
+  seed's failures are the revenue questions — cancelled orders, the historical
+  price — and no wording of `describe_table` fixes "use the order line's price,
+  not the product's". The reflection kept reading SQL semantics, and the
+  component could not act on them. A search that finds nothing is a result, and
+  this is what one looks like.
+- The objection from the room is right: a description is a prompt with a
+  different address. Which is why the next rung is not prose at all.
 
-### 5b. Config — `max_tool_calls`, currently 24
+### 5b. Config — the per-node `effort` block
 
-- One integer, with a legible failure on each side. Too low and the cold turn
-  gives up mid-exploration. Too high and it wanders through eleven thousand
-  tokens.
-- It is coupled to the tool descriptions being searched beside it, which is the
-  point of searching them in one candidate: better descriptions need fewer
-  calls.
-- **The honesty check**: the search space here is tiny, so the argument for GEPA
-  over a for-loop is not the search, it is the feedback. If the reflection is
-  not visibly reading the tool-call trace, this section should be cut. Show the
-  reflection input and output, not just the number that changed.
+```yaml
+plan:         {effort: low}      fix:      {effort: high}
+explore:      {effort: high}     extract:  {effort: low}
+generate_sql: {effort: high}     answer:   {effort: low}
+```
+
+- Six enum values the model never reads. This is the abstract's phrase, "the
+  config that picks which model runs which step", and nobody has measured it.
+- **One component, not six.** Five legal values over six nodes is 15,625
+  configurations, and a grid at 220k tokens an evaluation is billions. A loop
+  can move one node at a time. The reflection can move `explore` down and
+  `generate_sql` up in one proposal, because it read which node spent the
+  tokens and which node wrote the wrong SQL. Per node the space is tiny, so the
+  argument for GEPA here is the feedback and not the search — which is why the
+  feedback is what gets shown.
+- **The gate is the schema.** A candidate is parsed through the same `Node`
+  model `config.yaml` is. An illegal level fails with pydantic's own message,
+  `none` on Claude is refused with the file validator's reason, and a candidate
+  that names a model is refused outright. Nothing new was written to say
+  "never".
+- Say what the metric cannot see, because the reflection is told the same.
+  `plan` makes no call on a cold turn, so its effort is carried and never
+  measured. `extract` and `answer` are charged and not judged: one writes to a
+  memory these turns never read, the other writes the sentence above the rows
+  that are compared. What is measured is `explore`, `generate_sql` and `fix`,
+  and `explore` is where most of a cold turn's tokens go — measured on the dev
+  model, 73% of the corpus's spend. That is where a search has room.
+
+```bash
+make gepa-config GEPA_ARGS=--probe-only  # the seed over all 19, and where its tokens went
+make gepa-config                         # the search, ~690k tokens, asks first
+```
+
+Show one reflection from `tools/gepa/out/run/config/reflections.jsonl`: the
+per-node ledger it read (`explore (high)  6,210 tokens ...`), the YAML it
+proposed, and what that scored. That is one of the two ASI triplets CHALLENGE
+asks for, and it is the honesty check with an answer: if the proposal did not
+move the node the ledger named, say so and cut 5b.
+
+Then the sentence after. The same block takes a model name per node. The metric
+counts tokens, and Anthropic-direct reports no dollars, so that search needs a
+price table before it is honest. Not built.
 
 ---
 
@@ -483,5 +522,6 @@ of `CHALLENGE.md` that specifies it.
 |---|---|---|
 | §2 | Nothing reads a verdict back. An approved turn should become a golden case, with the SQL it ran as the reference | a scores reader in `app/tracing.py`, and a second harvest beside `extract_cases` — CHALLENGE §1 |
 | §3, §5 | A promotion, committed. Both searches ran and neither produced one I would promote: `extract`'s winner is 3.6x longer and the metric cannot see length, `tools`' gain is 2 cases in 9 | a `length` term in `metric_extract.WEIGHTS`, then re-run; and a second `tools` run on another split to see whether the gain reproduces |
-| §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted | `make gepa-tools GEPA_ARGS=--probe-only` is the before half |
+| §5b | The effort search, run on the talk's model, with `config.local.yaml` moved aside. Nothing has been run yet; the dev overlay sets every node to `none` on a different model, and a profile found there says nothing about Opus | `make gepa-config GEPA_ARGS=--probe-only` (~220k tokens), then `make gepa-config GEPA_ARGS='--pareto demo/gepa/config.pareto.json'` (~690k), then copy `tools/gepa/out/run/config/reflections.jsonl` and the stderr somewhere tracked before the next run wipes them |
+| §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted, and for 5b where the seed's tokens went by node | `--probe-only` on either whole-turn target is the before half; it now prints the per-node split |
 | §6 | A second search with the gate disabled, kept whatever it produces | CHALLENGE, "What the talk has to show" |

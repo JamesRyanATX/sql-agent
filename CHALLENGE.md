@@ -3,10 +3,11 @@
 **Goal.** Optimise two things in `sql-agent` that are not prompts — the four
 `description` strings in `app/tools.py` and the per-node `effort` settings in
 `config/config.yaml` — so the Agent Loop Chicago talk (Nov 17) can show a real
-before/after diff on each. Today only `extract` is wired
-(`tools/gepa/cli.py: WIRED = {"extract"}`), and the `UNWIRED` dict there gives a
-written reason for each of the other five nodes. Those reasons are the
-requirements for this work, not objections to it.
+before/after diff on each. All three are wired now: `TARGETS` in
+`tools/gepa/targets.py` holds `extract`, `tools` and `config`, and the
+`UNWIRED` dict beside it gives a written reason for each of the other five
+nodes. Those reasons were the requirements for this work, not objections to
+it, and the two searches that have run are described where they bite.
 
 ## What is missing is a whole turn scored against a known answer
 
@@ -217,13 +218,20 @@ reflection.
   rendering of the per-node config block.
 - Wire **tool descriptions first**: prose, GEPA-native, plausible win on
   explore-loop efficiency (fewer `sample_column` / `describe_table` calls on
-  T1). Then **config**, as a second component in the same candidate.
+  T1). Then **config**. **Built** as its own target rather than a second
+  component beside the tools: one YAML component holding all six efforts, so
+  a reflection can move two nodes in one proposal. It is parsed through the
+  same `Node` model the file is, which is the gate; the feedback carries a
+  per-node token ledger with the effort each node ran at, which is what the
+  old UNWIRED reason asked for. Not yet run on the talk's model.
 - `cli.py`: `WIRED` grows; `UNWIRED` loses entries as they are wired, and the
   remaining entries keep their reasons. `make gepa-tools`, `make gepa-config`
   via the existing `gepa-%` pattern rule. stdout stays the artifact.
 - Reflection system prompt (`REFLECT_SYSTEM`) needs a per-component variant:
   "you are improving a tool description" / "you are choosing model effort per
-  node" — the generic one will rewrite YAML as prose.
+  node" — the generic one will rewrite YAML as prose. **Done** through GEPA's
+  own `reflection_prompt_template` dict: `TOOL_TEMPLATE` per tool and
+  `CONFIG_TEMPLATE` for the block, both validated before a token is spent.
 - `EvaluationBatch.objective_scores` is already populated per term, and the
   comment there already argues for `frontier_type="objective"`. That is what the
   front the talk shows is drawn from; keep it populated for the turn metric too.
@@ -256,8 +264,11 @@ None of them fall out of a run by themselves.
 - **Two ASI triplets.** The feedback text going in, the rewritten component
   coming out, the score delta. One triplet whose feedback the metric wrote, one
   whose feedback a person typed at the item-2 prompt, shown side by side in the
-  same field. The `gepa.reflect` calls are already traced, so this is capture
-  rather than instrumentation. This is the slide that answers "how is this not
+  same field. The input half is now written beside every run as
+  `tools/gepa/out/run/<target>/reflections.jsonl` — one line per reflection,
+  the candidate and exactly the records the teacher was handed. GEPA's own log
+  kept only the proposals. The human-typed triplet still waits on item 2's
+  reader. This is the slide that answers "how is this not
   gradient descent, and why does it still have a direction".
 - **A deliberate overfit run.** Three training cases, regression gate disabled,
   kept whatever it produces, then what the held-out cases say about the winner.
@@ -272,9 +283,11 @@ None of them fall out of a run by themselves.
   generation model, validate the winner on Opus — defensible, and a slide.
 - If tool descriptions change, `extract` output changes, and the cache changes.
   Cold-every-rollout sidesteps this for the demo. Say so.
-- Config as a text component has a tiny search space; the argument for GEPA over
-  a loop is the feedback-driven reflection, not the search. If the reflection
-  isn't visibly using the tool-call trace, cut config from the talk.
+- Config as a text component has a tiny search space per node; the argument
+  for GEPA over a loop is the feedback-driven reflection, not the search. The
+  check is now a file: open `reflections.jsonl` for the accepted iteration and
+  see whether the proposal moved the node the per-node ledger named. If it did
+  not, cut config from the talk.
 - `harvest.py` notes that Langfuse has inputs and Postgres has outcomes, and only
   Postgres gets reset. Scoring the trace resolves that rather than routing around
   it: the label lives on the trace, beside the inputs, in the store that is not
@@ -291,7 +304,9 @@ None of them fall out of a run by themselves.
    from traces, because the numbers are reachable without a model and waiting
    for `make corpus` would have blocked the metric and the adapter behind it.
 2. `make gepa-tools` exits 0 with a diff on stderr and prose on stdout, from a
-   real run, and the promotion is committed.
+   real run, and the promotion is committed. `make gepa-config` the same, with
+   YAML on stdout that pastes into `config/config.yaml`. The command exists
+   and is tested; neither run has produced a promotion.
 3. The feedback prompt exists, is TTY-gated, writes a score and comment to the
    turn's trace, and the harvest reads both it and a score set in the UI.
 4. Before/after committed as numbers: T1 tokens and tool-call count, seed vs.
