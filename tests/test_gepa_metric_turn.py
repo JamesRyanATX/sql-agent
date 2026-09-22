@@ -356,3 +356,88 @@ def test_the_weights_can_be_varied_without_editing_the_file():
 
     assert default.terms == varied.terms, "the measurement does not move"
     assert default.value != varied.value, "only what it is worth does"
+
+
+# ------------------------------------------------------------ where it went
+#
+# The config target searches six efforts, and a reflection choosing between
+# them needs to read which node spent what. A turn total cannot say that.
+
+
+def spent(**per_node) -> dict[str, tuple[int, int]]:
+    return {node: (tin, tout) for node, (tin, tout) in per_node.items()}
+
+
+def test_a_dearer_turn_says_which_node_spent_it_and_at_what_effort():
+    result = score(
+        turn(
+            tokens_in=18000,
+            tokens_out=1000,
+            per_node=spent(explore=(14000, 600), generate_sql=(3000, 300), answer=(1000, 100)),
+            efforts={"explore": "high", "generate_sql": "high", "answer": "low"},
+        ),
+        case(),
+        reference((1840,)),
+        baseline=Baseline(tokens=9500, tool_calls=4),
+    )
+
+    text = result.text()
+    assert "Where they went:" in text
+    assert "explore (high)" in text and "14,600 tokens" in text
+    # Dearest first, so the line to act on is the first one read.
+    assert text.index("explore (high)") < text.index("generate_sql (high)")
+    assert text.index("generate_sql (high)") < text.index("answer (low)")
+
+
+def test_a_wrong_answer_names_the_effort_the_sql_was_written_at():
+    result = score(
+        turn(
+            rows=[{"customers": 2000}],
+            efforts={"generate_sql": "medium", "fix": "high"},
+        ),
+        case(),
+        reference((1840,)),
+    )
+
+    assert "written by `generate_sql` at effort medium" in result.text()
+    assert "corrected by `fix`" not in result.text(), "no fix ran"
+
+
+def test_a_corrected_wrong_answer_names_both():
+    result = score(
+        turn(
+            rows=[{"customers": 2000}],
+            fix_attempts=1,
+            efforts={"generate_sql": "low", "fix": "medium"},
+        ),
+        case(),
+        reference((1840,)),
+    )
+
+    assert "at effort low and corrected by `fix` at effort medium" in result.text()
+
+
+def test_a_record_without_efforts_says_nothing_about_them():
+    """Records made before efforts were kept, and any harness that does not
+    set them. A sentence with a blank in it is worse than no sentence."""
+    result = score(turn(rows=[{"customers": 2000}]), case(), reference((1840,)))
+
+    assert "at effort" not in result.text()
+    assert metric_turn.by_node(turn()) == "(no per-node figures on this record)"
+
+
+# ----------------------------------------------------------------- rejected
+
+
+def test_a_rejected_candidate_scores_zero_on_every_term_with_the_reason():
+    """Raised by a target's parser, caught by the adapter, scored here. Every
+    term present and zero, so the front is not reshaped by a missing key, and
+    the reason in the prose so the reflection stops proposing it."""
+    result = metric_turn.rejected("plan: effort none — Claude has no such level")
+
+    assert result.value == 0.0
+    assert set(result.terms) == set(metric_turn.TERMS)
+    assert all(v == 0.0 for v in result.terms.values())
+    assert "rejected before any turn ran" in result.text()
+    assert "Claude has no such level" in result.text()
+    assert "fell over" not in result.text(), "not the harness's fault"

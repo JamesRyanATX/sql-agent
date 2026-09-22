@@ -57,6 +57,12 @@ def pareto(name: str) -> Path:
     return OUT / f"{name}.pareto.json"
 
 
+def reflections(name: str) -> Path:
+    """What every reflection read, one JSON line each. Inside the run dir, so
+    it is wiped with the run and never outlives the candidates it explains."""
+    return run_dir(name) / "reflections.jsonl"
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("target")
 @click.option("-v", "--verbose", is_flag=True, help="Per-probe and per-candidate detail.")
@@ -131,9 +137,13 @@ def cli(
     import gepa
 
     with Loop() as loop:
+        adapter = chosen.adapter(loop)
+        # Set here rather than by the target: where a run keeps its files is
+        # the command's business, and every adapter has the attribute.
+        adapter.reflections = reflections(chosen.name)
         result = _search(
             gepa,
-            adapter=chosen.adapter(loop),
+            adapter=adapter,
             reflection=reflection_lm(loop),
             seed_candidate=seed_candidate,
             trainset=trainset,

@@ -19,8 +19,10 @@ module that talks to a model.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
@@ -88,12 +90,19 @@ class ExtractAdapter(GEPAAdapter):
     """Score a candidate `extract` prompt over a batch of recorded cases."""
 
     def __init__(
-        self, loop: Loop, *, effort: str | None = None, concurrency: int = 4
+        self,
+        loop: Loop,
+        *,
+        effort: str | None = None,
+        concurrency: int = 4,
+        reflections: Path | None = None,
     ) -> None:
         self._loop = loop
         self._effort = effort
         self._semaphore = asyncio.Semaphore(concurrency)
         self.calls = 0
+        # Where to keep what the reflection model was handed. See `keep`.
+        self.reflections = reflections
 
     def evaluate(
         self,
@@ -177,6 +186,7 @@ class ExtractAdapter(GEPAAdapter):
                     "score_breakdown": {k: round(v, 3) for k, v in t.score.terms.items()},
                 }
             )
+        keep(self.reflections, candidate, {COMPONENT: records})
         return {COMPONENT: records}
 
 
@@ -215,11 +225,13 @@ class TurnAdapter(GEPAAdapter):
         to_overrides: Callable[[dict[str, str]], overrides.Overrides],
         focus: Callable[[str, TurnReplayed], dict[str, Any]] | None = None,
         concurrency: int = 3,
+        reflections: Path | None = None,
     ) -> None:
         self._loop = loop
         self._to_overrides = to_overrides
         self._focus = focus or (lambda component, replayed: {})
         self._semaphore = asyncio.Semaphore(concurrency)
+        self.reflections = reflections
         # What the seed spent per case, filled by the first evaluation and then
         # left alone. The cost and tool-call terms are one-sided against it.
         self._baseline: dict[str, metric_turn.Baseline] = {}
@@ -231,7 +243,11 @@ class TurnAdapter(GEPAAdapter):
         candidate: dict[str, str],
         capture_traces: bool = False,
     ) -> EvaluationBatch[TurnTrajectory, dict[str, Any]]:
-        applied = self._to_overrides(candidate)
+        try:
+            applied = self._to_overrides(candidate)
+        except metric_turn.Rejected as e:
+            return self._rejected(batch, str(e), capture_traces)
+
         rolled: list[TurnReplayed] = self._loop.run(self._batch(applied, batch))
         self.calls += len(rolled)
 
@@ -246,7 +262,31 @@ class TurnAdapter(GEPAAdapter):
             for r, case in zip(rolled, batch)
         ]
         self._remember(batch, rolled)
+        return self._result(batch, rolled, scores, capture_traces)
 
+    def _rejected(
+        self, batch: list[Any], reason: str, capture_traces: bool
+    ) -> EvaluationBatch[TurnTrajectory, dict[str, Any]]:
+        """Every case zero, no rollout run, the reason on every record.
+
+        A candidate the graph cannot run is a fact about the candidate, not a
+        broken harness: the run continues, nothing is spent, and the reflection
+        reads why. `calls` is not advanced because nothing was called.
+        """
+        rolled = [
+            TurnReplayed(question=case.question, error=f"rejected: {reason}")
+            for case in batch
+        ]
+        scores = [metric_turn.rejected(reason) for _ in batch]
+        return self._result(batch, rolled, scores, capture_traces)
+
+    @staticmethod
+    def _result(
+        batch: list[Any],
+        rolled: list[TurnReplayed],
+        scores: list[Score],
+        capture_traces: bool,
+    ) -> EvaluationBatch[TurnTrajectory, dict[str, Any]]:
         return EvaluationBatch(
             outputs=[
                 {
@@ -257,6 +297,8 @@ class TurnAdapter(GEPAAdapter):
                     "tools": r.tool_names,
                     "fix_attempts": r.fix_attempts,
                     "tokens": r.tokens,
+                    "per_node": {n: list(v) for n, v in r.per_node.items()},
+                    "error": r.error,
                 }
                 for r, case in zip(rolled, batch)
             ],
@@ -322,7 +364,33 @@ class TurnAdapter(GEPAAdapter):
                 }
                 for t in ordered
             ]
+        keep(self.reflections, candidate, records)
         return records
+
+
+def keep(
+    path: Path | None,
+    candidate: dict[str, str],
+    records: dict[str, Sequence[dict[str, Any]]],
+) -> None:
+    """One JSON line per reflection: the candidate it was about and exactly the
+    records the teacher model was handed.
+
+    GEPA's own run log keeps what the reflection *proposed* and never what it
+    *read*. The claim that a proposal came from the feedback can only be shown
+    with the two side by side, and until this existed the input half was the
+    return value of a function and nothing else. Under the run directory, so
+    it is wiped with the run: for `extract` the records hold harvested prompts,
+    which is why that directory is ignored in the first place.
+    """
+    if path is None or not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(
+        {"candidate": candidate, "records": records}, ensure_ascii=False, default=str
+    )
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 
 def _turn_summary(r: TurnReplayed) -> str:
@@ -333,6 +401,8 @@ def _turn_summary(r: TurnReplayed) -> str:
     lines.append(f"SQL: {r.sql or '(none written)'}")
     lines.append(f"answer: {r.answer or '(none)'}")
     lines.append(f"tokens: {r.tokens}")
+    if r.error:
+        lines.append(f"error: {r.error}")
     return "\n".join(lines)
 
 

@@ -23,8 +23,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import click
+import yaml
 
 from app import prompts
+from app.config import Config, config
 from tools.gepa import gates, probes
 from tools.gepa.gates import Survivor, say
 
@@ -405,6 +407,15 @@ def _tools_weights() -> dict[str, float]:
 
 
 def _tools_check(loop, yes: bool = False) -> int:
+    return _turn_check(
+        loop, yes, name="tools", seed=_tools_seed(),
+        to_overrides=_tools_overrides, focus=_tools_focus,
+    )
+
+
+def _turn_check(
+    loop, yes: bool, *, name: str, seed: dict[str, str], to_overrides, focus
+) -> int:
     """The seed over the whole golden corpus, once, before any search.
 
     Two things nothing else will tell you. Whether the corpus is answerable at
@@ -412,22 +423,25 @@ def _tools_check(loop, yes: bool = False) -> int:
     cost and tool-call terms are gated off on every case, and a search has
     nothing to optimise but a term it cannot move, which looks exactly like GEPA
     finding nothing. And the before half of a before-and-after table, which is
-    the only form the talk can show a tool-description change in.
+    the only form the talk can show a tool-description or an effort change in.
+
+    Shared by every whole-turn target, because the seed rollouts are the same
+    rollouts whichever component is about to be searched: the same nineteen
+    questions, under the text and the efforts on disk.
 
     Nineteen cold turns, so it asks first like a search does.
     """
-    from tools.gepa import cli, golden, metric_turn, reference
+    from tools.gepa import cli, golden
     from tools.gepa.adapter import TurnAdapter
 
     cases = golden.load()
-    seed = _tools_seed()
-    say(f"\ntools     the seed over all {len(cases)} golden cases")
+    say(f"\n{name:<9} the seed over all {len(cases)} golden cases")
     say(f"  budget      {len(cases)} rollouts at roughly "
         f"{COLD_TURN_TOKENS:,} tokens each — about "
         f"{len(cases) * COLD_TURN_TOKENS:,} tokens")
     cli.ask_before_spending(yes)
 
-    adapter = TurnAdapter(loop, to_overrides=_tools_overrides, focus=_tools_focus)
+    adapter = TurnAdapter(loop, to_overrides=to_overrides, focus=focus)
     batch = adapter.evaluate(cases, seed, capture_traces=True)
 
     say(f"\n  {'case':<32} {'right':>6} {'tokens':>7} {'tools':>5}")
@@ -456,6 +470,7 @@ def _tools_check(loop, yes: bool = False) -> int:
         return 1
 
     say(f"\n  the seed answers {right} of {len(cases)} correctly")
+    _spend_by_node(batch.trajectories or [])
 
     # Both ends are the problem, and the middle is the point. A corpus the seed
     # already answers cannot be won — `demo/questions.txt` says exactly that
@@ -484,6 +499,29 @@ def _tools_check(loop, yes: bool = False) -> int:
     return 0
 
 
+def _spend_by_node(trajectories) -> None:
+    """Where the seed's tokens went, summed over the corpus, dearest first.
+
+    The before half for an effort search: it says which node's effort is worth
+    lowering, and it says so before a search is paid for. The effort shown is
+    the one in force on the first rollout, which is the seed's on a check.
+    """
+    totals: dict[str, int] = {}
+    efforts: dict[str, str] = {}
+    for t in trajectories:
+        for node, (tin, tout) in t.replayed.per_node.items():
+            totals[node] = totals.get(node, 0) + tin + tout
+        efforts.update(t.replayed.efforts)
+    grand = sum(totals.values())
+    if not grand:
+        return
+    say("\n  where the seed's tokens went, over the whole corpus:")
+    width = max(len(f"{n} ({efforts.get(n, '?')})") for n in totals)
+    for node, spent in sorted(totals.items(), key=lambda kv: -kv[1]):
+        label = f"{node} ({efforts[node]})" if node in efforts else node
+        say(f"    {label:<{width}}  {spent / grand:>4.0%}  {spent:>9,}")
+
+
 TOOLS = Target(
     name="tools",
     seed=_tools_seed,
@@ -507,15 +545,276 @@ TOOLS = Target(
 )
 
 
+# -------------------------------------------------------------------- config
+#
+# The per-node `effort` block in `config/config.yaml`, as one text component.
+# Six enum values the model never reads. Not prose by any reading, and GEPA
+# treats it as text anyway, which is the thesis in one line.
+#
+# One component holding six values rather than six components holding one:
+# the reflection can then move `explore` down and `generate_sql` up in one
+# proposal, having read which node spent the tokens and which node wrote the
+# wrong SQL. A coordinate-wise loop cannot make that move, and it is the whole
+# argument for a reflection over a loop when the space is this small per node.
+#
+# What the metric cannot see, and the template says so. `plan` makes no call
+# on a cold turn (an empty memory skips it), so its effort is carried and not
+# measured. `extract`'s output is not scored here (nothing it writes is read
+# back) and neither is `answer`'s sentence (the result set is scored, not the
+# prose above it): their tokens are charged, their quality is not. What is
+# measured is `explore`, `generate_sql` and, on the turns that need it, `fix`
+# — and `explore` is where most of a cold turn's tokens go, so that is where
+# a search has room.
+
+CONFIG_COMPONENT = "efforts"
+
+# The graph nodes that call the model, in the order a cold turn runs them.
+# `Config.NODES` also lists `gepa`, which is the reflection model and not part
+# of a turn; `prompts.NODES` has the same six in a different order.
+TURN_NODES = tuple(n for n in Config.NODES if n in prompts.NODES)
+
+# Spelled here for the template. A test asserts it matches the `Literal` on
+# `Node.effort`, so it cannot drift from what the config would accept.
+EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def _is_claude(node: str) -> bool:
+    return config().model_for(node).is_claude()
+
+
+def _yaml(efforts: dict[str, str]) -> str:
+    """The block as `config/config.yaml` writes it, one node per entry, in
+    turn order, ending in one newline. Both the seed and the rendered winner go
+    through this, so a promotion is a paste."""
+    return yaml.safe_dump(
+        {n: {"effort": efforts[n]} for n in TURN_NODES if n in efforts},
+        sort_keys=False,
+    )
+
+
+def _config_seed() -> dict[str, str]:
+    """What is in force today, resolved: the file's block where it has one and
+    the node default where it does not, so the seed says `medium` rather than
+    leaving a node out."""
+    return {CONFIG_COMPONENT: _yaml({n: config().effort_for(n) for n in TURN_NODES})}
+
+
+def _config_parse(text: str) -> dict[str, str]:
+    """A candidate block into `Overrides.efforts`, or `Rejected` with the reason.
+
+    The gate is the config schema. Each block goes through the same `Node`
+    model the file goes through, so an illegal value fails with pydantic's own
+    message, and `none` on a Claude model is refused with the file validator's
+    reason. Nothing new was written to express "never" here.
+
+    A node the candidate leaves out keeps what is on disk. A key that is not
+    `effort` is refused outright: a search over effort that quietly also chose
+    a model would be measuring something nobody asked about.
+    """
+    from pydantic import ValidationError
+
+    from app.config import Node
+    from tools.gepa.metric_turn import Rejected
+
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise Rejected(f"not YAML — {str(e).splitlines()[0]}") from None
+    if not isinstance(loaded, dict) or not loaded:
+        raise Rejected(
+            f"expected a mapping of node name to `effort`, got "
+            f"{type(loaded).__name__}"
+        )
+    unknown = sorted(set(loaded) - set(TURN_NODES))
+    if unknown:
+        raise Rejected(
+            f"no node named {', '.join(unknown)} — the nodes are "
+            f"{', '.join(TURN_NODES)}"
+        )
+
+    efforts: dict[str, str] = {}
+    for node, block in loaded.items():
+        if not isinstance(block, dict) or set(block) != {"effort"}:
+            raise Rejected(
+                f"{node}: one key, `effort`, and nothing else — this search is "
+                f"over effort only, and the model is not on the table"
+            )
+        value = block["effort"]
+        if value is None:
+            raise Rejected(f"{node}: `effort` has no value")
+        try:
+            Node(effort=value)
+        except ValidationError as e:
+            raise Rejected(f"{node}: {e.errors()[0]['msg']}") from None
+        if value == "none" and _is_claude(node):
+            raise Rejected(
+                f"{node}: effort none — Claude has no such level, and disabling "
+                f"thinking breaks tool calls; the levels are "
+                f"{', '.join(EFFORT_LEVELS[1:])}"
+            )
+        efforts[node] = str(value)
+    return efforts
+
+
+def _config_overrides(candidate: dict[str, str]):
+    """A candidate reaches the graph as per-node efforts and nothing else."""
+    from app import overrides
+
+    return overrides.Overrides(efforts=_config_parse(candidate[CONFIG_COMPONENT]))
+
+
+def _config_focus(component: str, replayed) -> dict[str, str]:
+    """The component's own slice of the turn: which node ran at what and spent
+    what. On every record, gated or not, because a turn that never wrote SQL
+    still spent its tokens somewhere."""
+    from tools.gepa import metric_turn
+
+    return {
+        "Effort in force per node, and what each spent": metric_turn.by_node(replayed)
+    }
+
+
+def _config_adapter(loop) -> Any:
+    from tools.gepa.adapter import TurnAdapter
+
+    return TurnAdapter(loop, to_overrides=_config_overrides, focus=_config_focus)
+
+
+def _config_render(candidate: dict[str, str]) -> str:
+    """The block, normalised through the parser, so stdout pastes into
+    `config/config.yaml` whatever whitespace the reflection model used."""
+    return _yaml(_config_parse(candidate[CONFIG_COMPONENT]))
+
+
+def _config_label(component: str) -> str:
+    return "config/config.yaml, the per-node effort blocks"
+
+
+def _config_notes() -> str:
+    return (
+        "to promote: config/config.yaml — replace each node's `effort` with the\n"
+        "value above. The `model:` block does not change, and a candidate could\n"
+        "not have changed it.\n\n"
+        "What was measured is whole cold turns against demo/golden/ on the\n"
+        "model config.yaml names. Effort is a fraction of a model's own\n"
+        "thinking, so a profile found on one model is not a profile for\n"
+        "another. `plan` made no call on these cold turns, so its value above\n"
+        "is the seed's, untested. Two nodes were charged and not judged:\n"
+        "`extract`'s output is read by no turn here, and `answer`'s sentence\n"
+        "sits above the result set that was scored. Lowering either is a bet\n"
+        "this run did not test.\n"
+    )
+
+
+CONFIG_TEMPLATE = """\
+You are choosing how hard the model thinks at each node of a text-to-SQL
+agent. The candidate is a YAML block: one entry per node, each with exactly one
+key, `effort`.
+
+The nodes, in the order a cold turn runs them:
+  - plan          reads what the agent already knows and decides whether it is
+                  enough to write SQL. These turns run with the memory off, so
+                  it has nothing to read and makes no call: its effort is
+                  carried here and cannot be measured here. Leave it.
+  - explore       the loop that calls the introspection tools. Most of a cold
+                  turn's tokens are spent here, and it is where a trap — a
+                  soft-delete column, three spellings of one region — is found
+                  or missed.
+  - generate_sql  writes the one SELECT from what explore found.
+  - fix           runs only when that SQL failed, and corrects it from the
+                  database's error.
+  - extract       writes down what was learned for later turns. Its tokens are
+                  charged here; its output is not scored, because these turns
+                  run with the memory off.
+  - answer        turns the result rows into a sentence. Charged, not scored:
+                  the rows are what is compared.
+
+The legal values, cheapest first: {levels}. {none_rule}
+
+What you may not do, because each of these is rejected before a turn runs:
+  - Do not add or remove a node, and do not add a key other than `effort`.
+    Do not name a model: this search is over effort only.
+  - Do not write prose. Reply with YAML in the shape shown.
+
+What the feedback tells you, for every turn: which node ran at what effort and
+spent what, whether the answer was right, and where it went wrong when it was
+not. An effort is worth lowering where a node spent a lot and the turns stayed
+right; it is worth raising where the wrong answers were written. Move more than
+one node at a time when the evidence says so — that is the reason this is one
+block rather than six.
+
+The current block:
+```
+<curr_param>
+```
+
+Turns run under it, worst first, with feedback:
+```
+<side_info>
+```
+
+Reply with the replacement YAML block inside a ``` block, and nothing else.
+"""
+
+
+def _config_templates() -> dict[str, str]:
+    """One reflection prompt, for one component. The legal values are read off
+    the model in force: `none` is a level only where the model is not Claude,
+    and telling the reflection otherwise buys a rejected candidate per round."""
+    claude = any(_is_claude(n) for n in TURN_NODES)
+    levels = EFFORT_LEVELS[1:] if claude else EFFORT_LEVELS
+    none_rule = (
+        "`none` is not one of them on this model: it disables thinking, which "
+        "breaks tool calls, and a candidate proposing it is rejected."
+        if claude
+        else "`none` is legal on this model and is the cheapest setting."
+    )
+    return {
+        CONFIG_COMPONENT: CONFIG_TEMPLATE.format(
+            levels=", ".join(levels), none_rule=none_rule
+        )
+    }
+
+
+def _config_check(loop, yes: bool = False) -> int:
+    return _turn_check(
+        loop, yes, name="config", seed=_config_seed(),
+        to_overrides=_config_overrides, focus=_config_focus,
+    )
+
+
+CONFIG = Target(
+    name="config",
+    seed=_config_seed,
+    corpus=_tools_corpus,
+    adapter=_config_adapter,
+    gate=lambda loop, result, seed, cases: gates.turn_gate(
+        loop, result, seed, cases=cases
+    ),
+    render=_config_render,
+    label=_config_label,
+    notes=_config_notes,
+    weights=_tools_weights,
+    check=_config_check,
+    templates=_config_templates,
+    budget=60,
+    rollout_tokens=COLD_TURN_TOKENS,
+    blurb="the per-node `effort` blocks in config/config.yaml",
+)
+
+
 # -------------------------------------------------------------------- registry
 
-TARGETS: dict[str, Target] = {EXTRACT.name: EXTRACT, TOOLS.name: TOOLS}
+TARGETS: dict[str, Target] = {
+    EXTRACT.name: EXTRACT, TOOLS.name: TOOLS, CONFIG.name: CONFIG,
+}
 
 # Why the rest are not searchable. Not a to-do list: two of these are arguments
 # against ever building the thing, and three are budget rather than machinery.
 #
 # Four of these five said something different before `TurnAdapter` and
-# `demo/golden/` existed. "Scoring one call means running the SQL against a
+# `demo/golden/` existed, and a sixth — `config` — sat here until the metric's
+# feedback could name a node, which is what its reason asked for. "Scoring one call means running the SQL against a
 # warehouse whose answers are known" was a reason not to; it is now a
 # description of the corpus. A reason that has quietly become false is worse
 # than no reason, because it still reads like one.
@@ -548,14 +847,5 @@ UNWIRED = {
         "metric `fix` runs only on rollouts where the candidate had already\n"
         "written broken SQL, so most rollouts give its component no signal at\n"
         "all, and the ones that do are the ones where something else went wrong."
-    ),
-    "config": (
-        "The per-node `effort` block, as a text component. `overrides.Overrides`\n"
-        "already carries efforts, so the injection exists. What is missing is a\n"
-        "reflection template that will not rewrite YAML as prose, and an\n"
-        "argument: the search space is six values per node, so GEPA earns its\n"
-        "place here through the feedback rather than the search. If the\n"
-        "reflection is not visibly reading the tool-call trace, this is not\n"
-        "worth wiring."
     ),
 }

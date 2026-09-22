@@ -299,3 +299,90 @@ def test_a_rollout_that_broke_is_not_reported_as_a_wrong_answer(
     assert "broke" in out
     assert "That is the harness, not the corpus" in out
     assert "the model refused" in out
+
+
+# --------------------------------------------------------- a rejected candidate
+#
+# The config target's parser refuses a block the graph could not run. That has
+# to reach GEPA as a score, not an exception: an exception ends a run that has
+# already spent an hour, and a score the reflection can read is what stops the
+# next proposal being the same mistake.
+
+
+def test_a_rejected_candidate_scores_zero_everywhere_and_spends_nothing(
+    loop, monkeypatch, pool
+):
+    monkeypatch.setattr(
+        llm, "complete", lambda **kw: pytest.fail("a rollout was run")
+    )
+    adapter = TurnAdapter(
+        loop, to_overrides=targets._config_overrides, focus=targets._config_focus,
+        concurrency=1,
+    )
+
+    batch = adapter.evaluate(
+        CASES, {"efforts": "nope:\n  effort: low\n"}, capture_traces=True
+    )
+
+    assert batch.scores == [0.0]
+    assert batch.objective_scores == [{"correct": 0.0, "cost": 0.0, "tool_calls": 0.0}]
+    assert adapter.calls == 0
+    record = adapter.make_reflective_dataset(
+        {"efforts": "nope:\n  effort: low\n"}, batch, ["efforts"]
+    )["efforts"][0]
+    assert "rejected before any turn ran" in record["Feedback"]
+    assert "no node named nope" in record["Feedback"]
+
+
+def test_the_config_reflection_sees_which_node_spent_what(loop, monkeypatch, pool):
+    """The whole reason the target exists. A reflection choosing between six
+    efforts must be able to read that explore at high spent most of the turn,
+    and the focus is where it reads it."""
+    monkeypatch.setattr(llm, "complete", cold())
+    adapter = TurnAdapter(
+        loop, to_overrides=targets._config_overrides, focus=targets._config_focus,
+        concurrency=1,
+    )
+    seed = targets.CONFIG.seed()
+
+    batch = adapter.evaluate(CASES, seed, capture_traces=True)
+    record = adapter.make_reflective_dataset(seed, batch, ["efforts"])["efforts"][0]
+
+    ledger = record["Effort in force per node, and what each spent"]
+    assert "explore (" in ledger and "240 tokens" in ledger, ledger
+    assert "generate_sql (" in ledger
+
+
+# ------------------------------------------------------------ what it read
+#
+# GEPA's run log keeps what a reflection proposed and never what it read. The
+# adapter writes the input half beside the run when told where.
+
+
+def test_what_the_reflection_read_is_kept_when_asked(adapter, monkeypatch, pool, tmp_path):
+    import json
+
+    monkeypatch.setattr(llm, "complete", cold())
+    adapter.reflections = tmp_path / "run" / "reflections.jsonl"
+    seed = targets.TOOLS.seed()
+
+    batch = adapter.evaluate(CASES, seed, capture_traces=True)
+    adapter.make_reflective_dataset(seed, batch, ["list_tables"])
+
+    lines = adapter.reflections.read_text().splitlines()
+    assert len(lines) == 1
+    kept = json.loads(lines[0])
+    assert kept["candidate"] == seed
+    assert set(kept["records"]) == {"list_tables"}
+    assert kept["records"]["list_tables"][0]["Feedback"]
+
+
+def test_nothing_is_kept_when_nowhere_was_given(adapter, monkeypatch, pool, tmp_path):
+    monkeypatch.setattr(llm, "complete", cold())
+    seed = targets.TOOLS.seed()
+
+    batch = adapter.evaluate(CASES, seed, capture_traces=True)
+    adapter.make_reflective_dataset(seed, batch, ["list_tables"])
+
+    assert adapter.reflections is None
+    assert not list(tmp_path.iterdir())

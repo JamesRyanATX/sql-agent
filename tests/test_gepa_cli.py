@@ -502,13 +502,59 @@ def test_an_unwired_target_gives_the_reason_that_is_still_true(monkeypatch):
     assert "outcome labelling" not in result.stderr
 
 
-def test_the_config_block_has_a_reason_rather_than_looking_like_a_typo():
-    """`make gepa-config` is a thing somebody will try, and "no target named"
-    reads as a misspelling rather than as work nobody has done."""
-    result = CliRunner().invoke(gepa.cli, ["config"])
+@pytest.fixture
+def a_config_run(monkeypatch, tmp_path, well_behaved):
+    """A finished effort search, faked from the gate backwards. The seed is the
+    block in force; the winner moved one node."""
+    seed = targets.CONFIG.seed()
+    better = {"efforts": seed["efforts"].replace("explore:\n  effort: ", "explore:\n  effort: low  # was ", 1)}
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [seed, better],
+            [0.60, 0.80],
+            val_subscores=[
+                {"customers_active": 1.0, "customers_west": 0.0},
+                {"customers_active": 1.0, "customers_west": 0.6},
+            ],
+        ),
+    )
+    return seed, better
 
-    assert result.exit_code == gepa.UNWIRED_NODE
-    assert "search space is six values per node" in result.stderr
+
+def test_the_config_winner_is_a_yaml_block_that_pastes_into_the_file(a_config_run):
+    """`make gepa-config > new.yaml`: six nodes, one key each, normalised —
+    the comment the fake winner carried is gone, because it went through the
+    same parser a candidate is scored through."""
+    result = CliRunner().invoke(gepa.cli, ["config", "--yes"])
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.startswith("plan:\n  effort: ")
+    assert "explore:\n  effort: low\n" in result.stdout
+    assert "# was" not in result.stdout
+    assert result.stdout.count("effort:") == 6
+    # The diff names where a person would go, and the spend was said first.
+    assert "config/config.yaml" in result.stderr
+    assert "components  1" in result.stderr
+
+
+def test_the_config_target_is_searchable_and_the_rest_still_say_why_not(monkeypatch):
+    """`config` used to sit in UNWIRED with a reason that asked for exactly what
+    the metric now has. A reason that has become false is worse than none.
+
+    The check is stubbed: the real one is nineteen cold turns."""
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "config",
+        dataclasses.replace(targets.CONFIG, check=lambda loop, yes: 0),
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["config", "--probe-only", "--yes"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "not searchable" not in result.stderr
 
 
 def test_a_budget_smaller_than_the_valset_is_flagged_before_it_is_spent(

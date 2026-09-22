@@ -177,6 +177,7 @@ def test_each_target_names_its_own_objectives():
 
     assert targets.EXTRACT.weights() == metric_extract.WEIGHTS
     assert targets.TOOLS.weights() == metric_turn.WEIGHTS
+    assert targets.CONFIG.weights() == metric_turn.WEIGHTS
     assert set(targets.EXTRACT.weights()) != set(targets.TOOLS.weights())
 
 
@@ -186,3 +187,152 @@ def test_every_target_offers_a_cheap_check():
     turns that into an error message."""
     for target in targets.TARGETS.values():
         assert target.check is not None, target.name
+
+
+# ------------------------------------------------------------------- config
+#
+# Six enum values the model never reads, as one YAML component. The gate is the
+# config schema: a candidate goes through the same `Node` model the file does.
+
+
+NODES = {"plan", "explore", "generate_sql", "fix", "extract", "answer"}
+
+
+def test_the_config_seed_is_what_is_in_force_today():
+    """Resolved, not read: a node the file leaves out is `medium` by default,
+    and a seed that left it out would be searching around it."""
+    from app.config import config
+
+    seed = targets.CONFIG.seed()
+
+    assert set(seed) == {"efforts"}
+    parsed = targets._config_parse(seed["efforts"])
+    assert set(parsed) == NODES
+    assert parsed == {n: config().effort_for(n) for n in NODES}
+
+
+def test_the_turn_nodes_are_the_prompt_nodes_in_turn_order():
+    """Two lists of the same six names. `Config.NODES` adds `gepa`, which is the
+    reflection model and not part of a turn."""
+    from app import prompts
+
+    assert set(targets.TURN_NODES) == set(prompts.NODES)
+    assert targets.TURN_NODES[0] == "plan" and targets.TURN_NODES[-1] == "answer"
+
+
+def test_the_effort_levels_are_the_ones_the_config_accepts():
+    """Spelled in targets.py for the template; the truth is the Literal on
+    `Node.effort`. This is the assertion that keeps them one list."""
+    from typing import get_args
+
+    from app.config import Node
+
+    literal = next(
+        a for a in get_args(Node.model_fields["effort"].annotation) if get_args(a)
+    )
+    assert tuple(get_args(literal)) == targets.EFFORT_LEVELS
+
+
+def test_a_config_candidate_reaches_the_graph_as_efforts_only():
+    applied = targets._config_overrides({"efforts": "explore:\n  effort: low\n"})
+
+    assert applied.efforts == {"explore": "low"}
+    assert applied.prompts == {}
+    assert applied.tools == {}
+
+
+@pytest.mark.parametrize(
+    "text, reason",
+    [
+        ("- explore", "expected a mapping"),
+        ("", "expected a mapping"),
+        ("nope:\n  effort: low\n", "no node named nope"),
+        ("plan:\n  effort: bananas\n", "Input should be"),
+        ("plan:\n  effort: low\n  model:\n    model: gpt\n", "effort only"),
+        ("plan: low\n", "one key, `effort`"),
+        ("plan:\n  effort:\n", "has no value"),
+        ("plan: [\n", "not YAML"),
+    ],
+)
+def test_a_candidate_the_config_would_refuse_is_rejected_with_the_reason(text, reason):
+    """The reason is what the reflection reads next round, so it has to say
+    what the shape that runs is. Pydantic's own message for a bad level, the
+    node list for a bad node, and "effort only" for a candidate that tried to
+    choose a model."""
+    from tools.gepa.metric_turn import Rejected
+
+    with pytest.raises(Rejected, match=reason):
+        targets._config_parse(text)
+
+
+def test_none_is_refused_where_the_model_is_claude(monkeypatch):
+    """The file validator's rule, applied to a candidate: on Opus, `none`
+    disables thinking and a tool call becomes visible text that never runs. A
+    candidate proposing it is rejected before a rollout, not scored as a broken
+    graph after one."""
+    from tools.gepa.metric_turn import Rejected
+
+    monkeypatch.setattr(targets, "_is_claude", lambda node: True)
+    with pytest.raises(Rejected, match="Claude has no such level"):
+        targets._config_parse("explore:\n  effort: none\n")
+
+    monkeypatch.setattr(targets, "_is_claude", lambda node: False)
+    assert targets._config_parse("explore:\n  effort: none\n") == {"explore": "none"}
+
+
+def test_the_config_winner_is_normalised_yaml_that_pastes_into_the_file():
+    """Whatever whitespace the reflection model used, stdout is the block as
+    config.yaml writes it: one node per entry, turn order, one trailing
+    newline."""
+    rendered = targets.CONFIG.render(
+        {"efforts": "answer: {effort: low}\nplan:   {effort: high}\n"}
+    )
+
+    assert rendered == "plan:\n  effort: high\nanswer:\n  effort: low\n"
+
+
+def test_the_config_template_is_one_gepa_will_accept_and_names_every_node():
+    template = targets.CONFIG.templates()["efforts"]
+
+    InstructionProposalSignature.validate_prompt_template(template)
+    for node in NODES:
+        assert f"- {node}" in template, f"the template does not describe {node}"
+    assert "`effort`" in template
+    assert "Do not name a model" in template
+
+
+def test_the_template_tells_the_truth_about_none(monkeypatch):
+    """Telling a reflection `none` is legal on Opus buys one rejected candidate
+    per round. Telling it `none` is illegal on a model where it is the cheapest
+    setting hides the setting that scored 10/19 in development."""
+    monkeypatch.setattr(targets, "_is_claude", lambda node: True)
+    on_claude = targets.CONFIG.templates()["efforts"]
+    assert "cheapest first: low, medium, high, xhigh, max." in on_claude
+    assert "rejected" in on_claude
+
+    monkeypatch.setattr(targets, "_is_claude", lambda node: False)
+    elsewhere = targets.CONFIG.templates()["efforts"]
+    assert "cheapest first: none, low," in elsewhere
+    assert "`none` is legal on this model" in elsewhere
+
+
+def test_the_config_focus_is_the_per_node_ledger():
+    from tools.gepa.replay_turn import TurnReplayed
+
+    r = TurnReplayed(
+        question="q", per_node={"explore": (500, 50)}, efforts={"explore": "high"}
+    )
+
+    (key, text), = targets._config_focus("efforts", r).items()
+    assert "per node" in key
+    assert "explore (high)" in text and "550 tokens" in text
+
+
+def test_the_config_target_is_a_whole_turn_target():
+    """Same budget, same rollout cost, same gate and check as `tools`: a
+    rollout is a cold turn whichever component it is measuring."""
+    assert targets.CONFIG.budget == targets.TOOLS.budget == 60
+    assert targets.CONFIG.rollout_tokens == targets.TOOLS.rollout_tokens
+    assert targets.CONFIG.check is not None
+    assert targets.CONFIG.templates is not None
+    assert "config" not in targets.UNWIRED

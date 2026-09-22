@@ -66,6 +66,17 @@ WITHHELD = (
 )
 
 
+class Rejected(ValueError):
+    """A candidate the graph cannot run: malformed, or naming something a node
+    would refuse. A target's `to_overrides` raises it, the adapter turns it into
+    a zero on every case without spending a rollout, and the reflection reads
+    the reason. Distinct from a rollout that fell over, which is the harness."""
+
+
+def rejected(reason: str) -> Score:
+    return Score(0.0, _zero(), [_rejected(reason)])
+
+
 @dataclass(frozen=True)
 class Baseline:
     """What the seed spent on this question, measured this run.
@@ -147,6 +158,15 @@ def _broke(r: TurnReplayed) -> str:
     )
 
 
+def _rejected(reason: str) -> str:
+    return (
+        f"The candidate was rejected before any turn ran: {reason}\n\n"
+        "Nothing was spent on it and nothing is measurable. This is not a "
+        "candidate that answered badly; it is text the graph cannot run. The "
+        "shape that runs is the shape the current block has."
+    )
+
+
 def _no_sql(r: TurnReplayed) -> str:
     return (
         "The turn answered without querying the database.\n\n"
@@ -212,6 +232,9 @@ def _correct(r: TurnReplayed, case: GoldenCase, m: Match) -> tuple[float, str]:
 
     fixed = f", after {_plural(r.fix_attempts, 'fix attempt')}" if r.fix_attempts else ""
     parts.append(f"  the SQL that ran{fixed}:\n{_indent(r.sql, '      ')}")
+    wrote = _who_wrote_it(r)
+    if wrote:
+        parts.append(f"  {wrote}")
     parts.append(_sequence(r, indent="  "))
 
     if case.reading:
@@ -261,12 +284,15 @@ def _cost(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
     over = (r.tokens - baseline.tokens) / baseline.tokens
     if over <= 0:
         return 1.0, ""
-    return max(0.0, 1 - over), (
+    note = (
         f"{r.tokens} tokens ({r.tokens_in} in, {r.tokens_out} out) against the "
         f"seed's {baseline.tokens} on this question — {over:.0%} more for the "
         f"same answer, across {_plural(len(r.tools), 'tool call')} and "
         f"{_plural(r.fix_attempts, 'fix attempt')}:\n\n{_sequence(r)}"
     )
+    if r.per_node:
+        note += f"\n\nWhere they went:\n{by_node(r)}"
+    return max(0.0, 1 - over), note
 
 
 def _tool_calls(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
@@ -314,6 +340,42 @@ def _tool_calls(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]
 # a description carrying the corpus's queries scores well on the corpus and
 # nowhere else. The rows a candidate got wrong are a diagnosis; the query that
 # gets them right is the answer key. There is a test for this.
+
+
+def by_node(r: TurnReplayed) -> str:
+    """Where the tokens went, one line per node, dearest first, with the effort
+    it ran at.
+
+    The sentence a config search runs on. "explore at high spent 6,210 tokens on
+    a turn that was right" is something a reflection can act on; a turn total
+    is not, and the difference is the whole argument for searching six values
+    with a reflection rather than a loop.
+    """
+    if not r.per_node:
+        return "(no per-node figures on this record)"
+    dearest = sorted(r.per_node.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))
+    labels = {
+        node: f"{node} ({r.efforts[node]})" if node in r.efforts else node
+        for node, _ in dearest
+    }
+    width = max(len(label) for label in labels.values())
+    return "\n".join(
+        f"  {labels[node]:<{width}}  {tin + tout:>7,} tokens  "
+        f"({tin:,} in, {tout:,} out)"
+        for node, (tin, tout) in dearest
+    )
+
+
+def _who_wrote_it(r: TurnReplayed) -> str:
+    """Which node's effort was in force when the SQL was written, and when it
+    was corrected. Empty where the record does not say, which is any record
+    made before efforts were kept on it."""
+    if "generate_sql" not in r.efforts:
+        return ""
+    sentence = f"the SQL was written by `generate_sql` at effort {r.efforts['generate_sql']}"
+    if r.fix_attempts and "fix" in r.efforts:
+        sentence += f" and corrected by `fix` at effort {r.efforts['fix']}"
+    return sentence + "."
 
 
 def _call(t: ToolCall) -> str:

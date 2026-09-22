@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from app import db, graph, overrides
+from app import db, graph, overrides, prompts
+from app.config import config
 
 
 @dataclass
@@ -62,6 +63,15 @@ class TurnReplayed:
     sql_error: str = ""
     tokens_in: int = 0
     tokens_out: int = 0
+    # Where the tokens went: node -> (in, out). The totals above are read off
+    # the answer event; these are read off each node's own returned delta, so
+    # the two are independent records that have to agree, and a test says so.
+    per_node: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # The effort each model-calling node ran at, resolved with the candidate in
+    # force. Recorded rather than recomputed later: what a rollout ran at is a
+    # fact about that rollout, and the candidate is gone by the time the
+    # feedback is read.
+    efforts: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
     @property
@@ -90,18 +100,33 @@ async def replay_turn(
     replayed = TurnReplayed(question=question)
     try:
         with overrides.using(candidate):
+            replayed.efforts = _efforts_in_force()
             await _drive(question, replayed)
     except Exception as e:
         replayed.error = f"{type(e).__name__}: {e}"
     return replayed
 
 
+def _efforts_in_force() -> dict[str, str]:
+    """What each model-calling node would run at, under whatever is in force.
+
+    Through `Config.effort_for`, so a candidate's override, the file's block and
+    the default all resolve the way the node itself will resolve them a moment
+    later. It refuses `none` on a Claude model exactly as the node would, one
+    call earlier, which is what turns that candidate into a scored zero rather
+    than a rollout that got halfway.
+    """
+    return {node: config().effort_for(node) for node in prompts.NODES}
+
+
 async def _drive(question: str, out: TurnReplayed) -> None:
     """Run the graph and fold its events into the record.
 
     No checkpointer: one turn, never resumed, and the checkpoint rows would be
-    state to clean up afterwards. `custom` events only — the same stream the CLI
-    renders, so what is measured is what a user would have seen.
+    state to clean up afterwards. Two streams: `custom` is what the CLI renders,
+    so what is measured is what a user would have seen; `updates` is each node's
+    returned delta, which is the only place a node's own token count exists
+    before the reducer sums it into the turn.
 
     `memory: False` is the whole point: the turn neither reads the cache nor
     saves to it, so it behaves like a first-ever question every time.
@@ -117,11 +142,34 @@ async def _drive(question: str, out: TurnReplayed) -> None:
     session = str(uuid4())
     async for mode, chunk in compiled.astream(
         {"session_id": session, "question": question, "memory": False},
-        stream_mode=["custom"],
+        stream_mode=["custom", "updates"],
         config={"configurable": {"thread_id": session}},
     ):
-        if isinstance(chunk, dict):
+        if not isinstance(chunk, dict):
+            continue
+        if mode == "updates":
+            _fold_update(chunk, out)
+        else:
             _fold(chunk, out)
+
+
+def _fold_update(update: dict[str, Any], out: TurnReplayed) -> None:
+    """One node's returned delta into the per-node ledger.
+
+    LangGraph hands these as `{node: delta}`. Only the two token keys are read,
+    and only where the node returned them: `load_cache` and `execute` make no
+    model call and say nothing, and their absence from the ledger is the right
+    record of that. `fix` can run more than once and accumulates.
+    """
+    for node, delta in update.items():
+        if not isinstance(delta, dict):
+            continue
+        tin = int(delta.get("tokens_in") or 0)
+        tout = int(delta.get("tokens_out") or 0)
+        if not (tin or tout):
+            continue
+        was_in, was_out = out.per_node.get(node, (0, 0))
+        out.per_node[node] = (was_in + tin, was_out + tout)
 
 
 def _fold(event: dict[str, Any], out: TurnReplayed) -> None:

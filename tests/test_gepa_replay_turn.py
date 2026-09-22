@@ -223,3 +223,62 @@ async def test_it_opens_the_pools_it_needs_rather_than_assuming_them(monkeypatch
     assert out.error is None, "a cold process must be able to drive a turn"
     assert out.answer == "1,840 customers."
     await db.close_pools()
+
+
+# ------------------------------------------------------------ where it went
+#
+# A config search needs to know which node spent what, and the answer event
+# carries only the turn's totals. The per-node ledger is a second record of the
+# same tokens, read off a different stream, so the two have to agree.
+
+
+async def test_the_tokens_are_kept_per_node_and_sum_to_the_turn(monkeypatch, pool):
+    """Five scripted calls: two in explore, one each in generate_sql, extract
+    and answer. `plan` runs on a cold turn too, but a cold turn has an empty
+    cache and the scripted model's first result is explore's — so the ledger
+    names the nodes that returned tokens and nothing else."""
+    monkeypatch.setattr(llm, "complete", cold_turn())
+
+    out = await replay()
+
+    assert sum(tin + tout for tin, tout in out.per_node.values()) == out.tokens
+    assert out.per_node["explore"] == (200, 40), "two calls, 100 in / 20 out each"
+    assert out.per_node["generate_sql"] == (100, 20)
+    assert "execute" not in out.per_node, "no model call, no line"
+    assert "load_cache" not in out.per_node
+
+
+async def test_fix_accumulates_across_attempts(monkeypatch, pool):
+    monkeypatch.setattr(
+        llm,
+        "complete",
+        ScriptedModel(
+            tool_result("list_tables", {}),
+            text_result("customer has a deleted_at column"),
+            json_result({"sql": "SELECT count(*) FROM custmer", "assumptions": []}),
+            json_result({"sql": "SELECT count(*) FROM custome", "what_was_wrong": "typo"}),
+            json_result({"sql": SQL, "what_was_wrong": "typo again"}),
+            no_entries(),
+            text_result("1,840 customers."),
+        ),
+    )
+
+    out = await replay()
+
+    assert out.fix_attempts == 2
+    assert out.per_node["fix"] == (200, 40)
+
+
+async def test_the_effort_each_node_ran_at_is_on_the_record(monkeypatch, pool):
+    """Recorded with the candidate in force, because by the time the feedback
+    is read the candidate is gone. The override lands on the node it names and
+    the disk value stays on the rest."""
+    from app.config import config
+
+    monkeypatch.setattr(llm, "complete", cold_turn())
+
+    out = await replay(candidate=overrides.Overrides(efforts={"explore": "low"}))
+
+    assert out.efforts["explore"] == "low"
+    assert out.efforts["generate_sql"] == config().effort_for("generate_sql")
+    assert set(out.efforts) == {"plan", "explore", "generate_sql", "fix", "extract", "answer"}

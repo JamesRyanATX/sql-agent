@@ -104,18 +104,23 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # --- GEPA: searching the text a human wrote once -----------------------------
 #
 # One make target per searchable thing. `make gepa-extract` is a node's prompt;
-# `make gepa-tools` is the four tool descriptions in app/tools.py, scored by
-# running whole turns against demo/golden/. Anything else says why it is not
-# searchable rather than failing. `gepa` is a dependency group, so none of this
-# is in the image.
+# `make gepa-tools` is the four tool descriptions in app/tools.py and
+# `make gepa-config` is the per-node effort block in config/config.yaml, both
+# scored by running whole cold turns against demo/golden/. Anything else says
+# why it is not searchable rather than failing. `gepa` is a dependency group,
+# so none of this is in the image.
 #
 #   make gepa-tools                                    read it
 #   make gepa-tools > new.md                           keep it
+#   make gepa-config GEPA_ARGS=--probe-only            the seed over all 19,
+#                                                      and where its tokens went
 #   make gepa-extract GEPA_ARGS=--probe-only           check the invariants
 #   make gepa-extract GEPA_ARGS='--pareto demo/gepa/extract.pareto.json'
 #
-# `make gepa-tools` costs real money and asks before it spends any. Redirecting
-# it means nobody is there to agree, so it refuses unless GEPA_ARGS=--yes.
+# `make gepa-tools` and `make gepa-config` cost real money and ask before they
+# spend any. Redirecting means nobody is there to agree, so they refuse unless
+# GEPA_ARGS=--yes. What every reflection read is kept beside the run, in
+# tools/gepa/out/run/<target>/reflections.jsonl.
 #
 # `@` because make echoes recipes to stdout, and stdout is the artifact.
 # Not `.PHONY`: make skips pattern rules for phony targets, and nothing named
