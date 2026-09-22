@@ -267,15 +267,33 @@ each other silently, and the upsert reports success either way.
 
 ### Say, on the metric
 
-- Five weighted terms: grounding 0.35, census 0.25, names 0.20, shape 0.10,
-  cost 0.10. They are in one dict so you can argue with them, and the argument
-  is the point.
-- `grounding` is clamped rather than copied from the production gate, because
-  optimising the metric derived from a gate is how you destroy the gate. A
-  fragment like `count(*)` verifies against any query that counts.
-- The empty-extraction gate is load-bearing: three of the five terms are
-  vacuously perfect when nothing is recorded, so without it the metric rewards
-  a prompt for doing nothing.
+The five terms are the ones named in every artifact this talk shows, so put
+them up once and leave them up:
+
+| term | weight | scores | what goes wrong without it |
+|---|---:|---|---|
+| `grounding` | 0.35 | the share of recipes whose SQL fragment really is a fragment of the query that ran, **and** says enough to be wrong | a recipe claims something the query never did, and every later question composes on it |
+| `census` | 0.25 | the share of claims that are not a count or a percentage | "we have 1,840 customers" is right today and wrong forever, and nothing revisits it |
+| `names` | 0.20 | the share of entries that do not overwrite, paraphrase or collide with a filed name | the upsert reports success either way, so the only symptom is a later answer built from the wrong recipe |
+| `shape` | 0.10 | how close the batch is to 2–6 entries, and claims under 200 characters | the cache is re-sent in full on every turn, so each entry is a bill that recurs |
+| `cost` | 0.10 | output tokens against what this same case cost when it was recorded | a prompt that pads what it writes is paid for on every turn, and no other term here notices |
+
+Four things to say over it, in this order:
+
+- **They are in one dict so you can argue with them.** The argument is the
+  point. A weight nobody varied is a guess with a decimal point on it.
+- **`grounding` is clamped, not copied from the production gate.** The gate
+  accepts any token subsequence, so a fragment like `count(*)` verifies against
+  any query that counts. Optimising a metric derived from a gate is how you
+  destroy the gate, so this one demands the fragment carry the filters and joins
+  that make the concept what it is.
+- **Two terms are one-sided on purpose.** `cost` can be earned but never
+  exceeded, and `shape` is a band rather than a direction. "Fewer entries is
+  better" and "cheaper is better" both have the same degenerate optimum:
+  record nothing. Which is why —
+- **The empty-extraction gate is load-bearing.** `census`, `names` and `cost`
+  are all vacuously perfect when nothing was recorded. Without a gate in front
+  of them, three of five terms pay a prompt for declining to do its job.
 
 ### Then the pre-baked run
 
