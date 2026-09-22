@@ -11,37 +11,37 @@
     "tool_calls": 0.15
   },
   "pool": {
-    "candidates": 4,
+    "candidates": 2,
     "on_front": 1,
-    "metric_calls": 65,
+    "metric_calls": 60,
     "seed_index": 0
   },
   "best_per_objective": {
-    "correct": 0.2,
-    "cost": 0.2,
-    "tool_calls": 0.2
+    "correct": 0.4444,
+    "cost": 0.4402,
+    "tool_calls": 0.4444
   },
   "front": [
     {
-      "index": 0,
-      "seed": true,
-      "val": 0.2,
+      "index": 1,
+      "seed": false,
+      "val": 0.4434,
       "scores": {
-        "correct": 0.2,
-        "cost": 0.2,
-        "tool_calls": 0.2
+        "correct": 0.4444,
+        "cost": 0.4402,
+        "tool_calls": 0.4444
       },
       "tops": [
         "correct",
         "cost",
         "tool_calls"
       ],
-      "chars": 645,
+      "chars": 851,
       "components": {
         "list_tables": "List every table in the database with its column count. Start here when you don't yet know what exists.",
         "describe_table": "Show a table's columns, types, nullability, row count, primary key and foreign keys. Call this before writing SQL against a table — column names are frequently not what you'd guess.",
         "sample_column": "Show distinct values from a column, plus how many rows are null. Call this when a column's meaning affects the answer — how many rows are populated is often the difference between a column that exists and a convention the data actually follows.",
-        "count_distinct": "Count rows per distinct value in a column, most frequent first. Use it to see the real shape of a categorical column."
+        "count_distinct": "Use when the user asks for a frequency breakdown of a column—how many rows have each distinct value, especially to understand a categorical column. Do not use it for a total row count or for counting rows matching a known condition, including a boolean or other yes/no value; use filtering and ordinary aggregation instead."
       }
     }
   ]
