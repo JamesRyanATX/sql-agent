@@ -368,11 +368,8 @@ artifact rather than the exit code.
 
 ## 5. Things that do not look like prompts — 6 min
 
-**Status: 5a is built and run; the candidate it proposed is committed at
-`demo/gepa/tools.candidate.md`, not promoted. 5b is built and not yet run on
-the talk's model: `make gepa-config` exists, its feedback names the node that
-spent the tokens, and what every reflection read is kept beside the run. The
-two runs it needs are in the gap list.**
+**Status: 5a is run; its candidate is at `demo/gepa/tools.candidate.md`, not
+promoted. 5b is built and not yet run on Opus; see the gap list.**
 
 ### Say
 
