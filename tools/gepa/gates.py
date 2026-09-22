@@ -111,19 +111,21 @@ def probe_gate(loop, result, seed: dict[str, str], *, node: str) -> list[Survivo
             continue
 
         # Neither direction is rejection — a shorter prompt can be right, and
-        # so can a longer one. Both have to be *seen*, and the growth half is
-        # the one the metric is blind to: `metric_extract._cost` charges the
-        # model's output tokens against a recorded baseline, and a prompt is
-        # input. So a candidate can quadruple the instruction, pay nothing in
-        # the score, and cost real money on every turn it runs afterwards.
-        # Observed on the first real run: 2,076 chars to 7,890, +280%, and
-        # every term said it was better.
+        # so can a longer one. Both have to be *seen*.
+        #
+        # `metric_extract._length` now charges growth, which is why this fires
+        # at +64% rather than the +280% of the run before that term existed.
+        # But it carries 0.10 of the weight, so a candidate that wins a heavier
+        # term outright can still buy that win with size: the run on 2026-09-22
+        # took grounding from 0.909 to 1.000 and paid length 1.000 -> 0.711 for
+        # it, a net gain of 0.0004 on a prompt 64% larger. The aggregate cannot
+        # tell that trade from a real improvement. A person reading the diff can.
         if len(text) < 0.6 * len(seed_text) or len(text) > 1.5 * len(seed_text):
             grew = (len(text) - len(seed_text)) / len(seed_text)
             say(
                 f"  candidate {i} (val {score:.3f}) is {len(text)} chars against "
                 f"the seed's {len(seed_text)} ({grew:+.0%}) — read the diff "
-                f"closely; prompt length is not in the metric",
+                f"closely; length is only 0.10 of the score",
                 fg="yellow",
             )
         else:

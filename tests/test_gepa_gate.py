@@ -367,13 +367,13 @@ def test_a_seed_that_never_reached_the_valset_says_so(capsys):
 
 
 def test_a_much_longer_candidate_is_flagged_too(loop, scripted, capsys):
-    """The direction the metric cannot see.
+    """The direction the metric under-weights.
 
-    `metric_extract._cost` charges the model's output tokens against a recorded
-    baseline. A prompt is input, so a candidate that quadruples the instruction
-    pays nothing in the score and costs real money on every turn afterwards.
-    Observed on the first real run: 2,076 chars to 7,890, and all five terms
-    said it was better.
+    `metric_extract._length` charges growth, so this is no longer invisible —
+    but it carries 0.10 of the score, and a candidate that takes a heavier term
+    outright can still buy that win with size. The 2026-09-22 run did exactly
+    that: grounding 0.909 -> 1.000, length 1.000 -> 0.711, a net 0.0004 on a
+    prompt 64% larger.
 
     Not rejection — a longer prompt can be right. But it has to be seen.
     """
@@ -386,4 +386,4 @@ def test_a_much_longer_candidate_is_flagged_too(loop, scripted, capsys):
     assert survivors, "length alone is not disqualifying in either direction"
     err = capsys.readouterr().err
     assert "+200%" in err
-    assert "prompt length is not in the metric" in err
+    assert "length is only 0.10 of the score" in err
