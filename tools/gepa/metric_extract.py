@@ -48,6 +48,29 @@ ENTRY_BAND = (2, 6)
 CLAIM_LIMIT = 200
 
 
+TERMS = tuple(WEIGHTS)
+
+
+def _zero() -> dict[str, float]:
+    """Every term, explicitly zero.
+
+    The gates below used to return `{}`, and that put a hole in the Pareto
+    front that nothing reported. `terms` becomes
+    `EvaluationBatch.objective_scores`, which GEPA averages per objective
+    across the validation set — and a missing key lowers that objective's
+    *count* rather than its total. So a candidate that failed three cases
+    outright had its remaining terms averaged over eight instances while
+    another's were averaged over eleven, and the two were then compared.
+
+    Observed, which is how it was found: a run produced a candidate reading
+    1.00 on all five objectives and sitting on the front, whose aggregate score
+    was 0.909 — second worst in the pool. A fresh dict each call, because a
+    module-level constant here would be one mutable object shared by every
+    Score in a run.
+    """
+    return dict.fromkeys(TERMS, 0.0)
+
+
 def score(r: Replayed) -> Score:
     """One case, one candidate.
 
@@ -59,12 +82,14 @@ def score(r: Replayed) -> Score:
     # A candidate whose output does not fit EXTRACT_SCHEMA scores zero rather
     # than ending the run. That is GEPA's adapter contract.
     if r.error:
-        return Score(0.0, {}, [f"The call did not produce usable output: {r.error}"])
+        return Score(
+            0.0, _zero(), [f"The call did not produce usable output: {r.error}"]
+        )
 
     if not r.entries:
         return Score(
             0.0,
-            {},
+            _zero(),
             [
                 "Nothing was recorded. `extract` runs only after a query has "
                 "already succeeded, so an empty result is the node declining to "
@@ -73,7 +98,7 @@ def score(r: Replayed) -> Score:
             ],
         )
 
-    terms: dict[str, float] = {}
+    terms = _zero()
     feedback: list[str] = []
     for name, fn in (
         ("grounding", _grounding),

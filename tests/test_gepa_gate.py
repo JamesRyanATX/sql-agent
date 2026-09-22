@@ -353,3 +353,26 @@ def test_a_seed_that_never_reached_the_valset_says_so(capsys):
 
     assert [s.candidate for s in survivors] == [RIVAL]
     assert "the gate is not checking" in capsys.readouterr().err
+
+
+def test_a_much_longer_candidate_is_flagged_too(loop, scripted, capsys):
+    """The direction the metric cannot see.
+
+    `metric_extract._cost` charges the model's output tokens against a recorded
+    baseline. A prompt is input, so a candidate that quadruples the instruction
+    pays nothing in the score and costs real money on every turn afterwards.
+    Observed on the first real run: 2,076 chars to 7,890, and all five terms
+    said it was better.
+
+    Not rejection — a longer prompt can be right. But it has to be seen.
+    """
+    verbose = SEED + " " * (len(SEED) * 2)
+
+    survivors = gate(
+        loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: verbose}], [0.5, 0.99]), SEED
+    )
+
+    assert survivors, "length alone is not disqualifying in either direction"
+    err = capsys.readouterr().err
+    assert "+200%" in err
+    assert "prompt length is not in the metric" in err

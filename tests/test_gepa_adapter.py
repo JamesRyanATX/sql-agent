@@ -261,3 +261,29 @@ def test_gepa_turns_over_against_the_adapter(loop, scripted):
     assert all(COMPONENT in c for c in result.candidates)
     assert result.total_metric_calls > 0
     assert scripted["reflections"] > 0, "the reflection model was never asked"
+
+
+def test_every_term_is_present_even_on_the_gates():
+    """`terms` becomes `EvaluationBatch.objective_scores`, and GEPA averages
+    each objective across the valset — a missing key lowers that objective's
+    *count*, not its total. So a candidate that failed three cases outright had
+    its remaining terms averaged over eight instances while another's were
+    averaged over eleven, and the front then compared the two.
+
+    Found by reading a real front: a candidate showing 1.00 on all five
+    objectives, sitting on the front, whose aggregate was 0.909 — second worst
+    in the pool.
+    """
+    from tools.gepa import metric_extract
+    from tools.gepa.replay import Replayed
+
+    case = ExtractCase.authored(
+        name="gated", question="q", sql=SQL, findings="f"
+    )
+    broke = metric_extract.score(Replayed(case=case, error="RuntimeError: no"))
+    empty = metric_extract.score(Replayed(case=case, entries=[]))
+
+    for scored in (broke, empty):
+        assert scored.value == 0.0
+        assert set(scored.terms) == set(metric_extract.WEIGHTS)
+        assert all(v == 0.0 for v in scored.terms.values())
