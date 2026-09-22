@@ -237,8 +237,16 @@ SEED_TOOLS = {"list_tables": "the seed description"}
 RIVAL = {"list_tables": "a rival description"}
 
 
-def scores(*values: float) -> dict[str, float]:
-    return dict(zip([c.name for c in CASES], values))
+def scores(*values: float) -> dict[int, float]:
+    """Keyed by position in the valset, which is how GEPA keys them.
+
+    This used to key by case name, which is what `turn_gate` was reading, and
+    both were wrong together — so a real run reported a discarded candidate as
+    having lost case `2`, an index printed where a question belongs. A fixture
+    that agrees with the code it tests proves nothing about the library both
+    are talking to.
+    """
+    return dict(enumerate(values))
 
 
 def test_a_candidate_that_lost_a_case_the_seed_answered_is_discarded(capsys):
@@ -262,8 +270,11 @@ def test_a_candidate_that_lost_a_case_the_seed_answered_is_discarded(capsys):
     assert survivors == [], "a lost case is disqualifying at any score"
     err = capsys.readouterr().err
     assert "DISCARDED" in err
-    # The question, not the case id: a person decides what to do next.
+    # The question, not the position GEPA keys by. A person reads this and
+    # decides what to do, and `1` tells them nothing. A real run printed the
+    # index, because the gate was handed the whole corpus and looked up by name.
     assert "how many customers are in the west region?" in err
+    assert "      1" not in err, "the raw val id must not reach the operator"
 
 
 def test_a_candidate_that_lost_nothing_survives_with_its_score():

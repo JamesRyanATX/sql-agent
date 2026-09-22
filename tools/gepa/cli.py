@@ -174,7 +174,9 @@ def cli(
             )
             raise SystemExit(NO_IMPROVEMENT)
 
-        survivors = chosen.gate(loop, result, seed_candidate, cases)
+        # The valset, not the whole corpus: GEPA keys its per-case scores by
+        # position in what it was given to validate on.
+        survivors = chosen.gate(loop, result, seed_candidate, valset)
 
     if not survivors:
         say(

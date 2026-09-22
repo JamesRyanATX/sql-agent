@@ -155,9 +155,27 @@ def report(outcomes: list[Outcome], label: str) -> list[Outcome]:
 # --------------------------------------------------------------- known answers
 
 
+def _asked(valset, key) -> str:
+    """The question behind one of GEPA's validation scores.
+
+    `val_subscores` is keyed by *position in the valset*, not by anything this
+    repo names. The first version was handed the whole corpus and looked the key
+    up by case name, so every lookup missed and a discarded candidate was
+    reported as having lost case `2` — an index, printed where a question
+    belongs. The tests passed because their fixture used the keys I assumed
+    rather than the ones GEPA uses.
+    """
+    if isinstance(key, int) and 0 <= key < len(valset):
+        return getattr(valset[key], "question", str(key))
+    return str(key)
+
+
 def turn_gate(loop, result, seed: dict[str, str], *, cases) -> list[Survivor]:
     """A candidate that got a golden case wrong which the seed got right is
     discarded, whatever it scored.
+
+    `cases` is the **validation** set, in the order GEPA was given it, because
+    that order is what its per-case scores are keyed by.
 
     Read out of GEPA's own per-case validation scores rather than re-run.
     `metric_turn` scores a wrong answer zero regardless of cost, so
@@ -174,7 +192,6 @@ def turn_gate(loop, result, seed: dict[str, str], *, cases) -> list[Survivor]:
     """
     subscores = result.val_subscores or []
     scores = result.val_aggregate_scores or []
-    questions = {case.name: case.question for case in cases}
 
     seed_index = next(
         (i for i, candidate in enumerate(result.candidates) if candidate == seed),
@@ -220,7 +237,7 @@ def turn_gate(loop, result, seed: dict[str, str], *, cases) -> list[Survivor]:
                 fg="red",
             )
             for case in lost:
-                say(f"      {questions.get(case, case)}")
+                say(f"      {_asked(cases, case)}")
             continue
 
         say(f"  candidate {i} (val {score:.3f}) survives", fg="green")
