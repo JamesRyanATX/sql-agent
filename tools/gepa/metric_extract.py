@@ -35,10 +35,20 @@ WEIGHTS = {
     # nothing else will ever tell you.
     "names": 0.20,
     # A band, not a direction. "Fewer entries is better" rewards deleting the
-    # job, which is the cheapest way to satisfy every other term here.
-    "shape": 0.10,
-    # One-sided against the recorded baseline, for the same reason.
-    "cost": 0.10,
+    # job, which is the cheapest way to satisfy every other term here. Halved to
+    # make room for `length`: it is the weakest term here and it says so itself.
+    "shape": 0.05,
+    # What the model wrote, one-sided against the recorded baseline. Halved
+    # because it is one half of a bill and `length` is the other.
+    "cost": 0.05,
+    # What the model was *sent*, which is mostly the prompt. Without this the
+    # prompt is free and nothing opposes adding text: measured, every candidate
+    # in an unweighted run grew, by 132% to 259%, and the winner was 3.6 times
+    # the seed with every other term saying it was better. `metric_turn` charges
+    # both sides already and its winner grew 32% — same machinery, same
+    # reflection model, and the only difference is which half of the bill the
+    # metric can see.
+    "length": 0.10,
 }
 
 # 2-6 entries is what a good turn produces. Outside the band is a mild penalty
@@ -106,6 +116,7 @@ def score(r: Replayed) -> Score:
         ("names", _names),
         ("shape", _shape),
         ("cost", _cost),
+        ("length", _length),
     ):
         terms[name], note = fn(r)
         if note:
@@ -274,4 +285,28 @@ def _cost(r: Replayed) -> tuple[float, str]:
     return max(0.0, 1 - over), (
         f"{r.tokens_out} output tokens against a recorded {baseline} — "
         f"{over:.0%} more for this case."
+    )
+
+
+def _length(r: Replayed) -> tuple[float, str]:
+    """What the call was sent, one-sided against what production sent.
+
+    The message is the same for every candidate on a given case, so what varies
+    here is the instruction. A prompt is paid for on every turn it will ever
+    run, and it is the one cost the model's own output does not reveal.
+
+    One-sided for the same reason `_cost` is: an unbounded reward for brevity
+    deletes the paragraph whose payoff nothing here can measure. The gate warns
+    in both directions; this only charges for growth.
+    """
+    baseline = r.case.baseline_tokens_in
+    if not baseline:
+        return 1.0, ""
+    over = (r.tokens_in - baseline) / baseline
+    if over <= 0:
+        return 1.0, ""
+    return max(0.0, 1 - over), (
+        f"{r.tokens_in} input tokens against a recorded {baseline} — "
+        f"{over:.0%} more, and almost all of that is the instruction rather "
+        f"than the case. Every turn that runs this prompt pays it again."
     )

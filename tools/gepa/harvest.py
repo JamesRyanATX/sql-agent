@@ -101,6 +101,7 @@ def extract_cases(*, days: int = 30, since: datetime | None = None) -> Harvest:
                 trace_id=trace_id,
                 prompt_fp=prompt_fp,
                 baseline_tokens_out=_tokens_out(observation),
+                baseline_tokens_in=_tokens_in(observation),
             )
         )
 
@@ -130,6 +131,16 @@ def _tokens_out(observation: dict) -> int:
     """
     usage = observation.get("usage") or {}
     return int(usage.get("output") or 0)
+
+
+def _tokens_in(observation: dict) -> int:
+    """What the recorded call was sent, which is mostly the prompt.
+
+    Same bargain as `_tokens_out`: zero means "no baseline", and the `length`
+    term reads that as nothing to charge against rather than as a free prompt.
+    """
+    usage = observation.get("usage") or {}
+    return int(usage.get("input") or 0)
 
 
 def _user_message(recorded: object) -> str | None:

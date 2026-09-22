@@ -23,12 +23,14 @@ from app import graph
 
 # Bumped by hand when `graph.extract_message` or this dataclass changes shape,
 # with a line saying what moved. 3 dropped `connection_id`: there is one memory
-# now, so a case cannot be about one database rather than another.
+# now, so a case cannot be about one database rather than another. 4 added
+# `baseline_tokens_in`, so the metric can charge a candidate for the size of the
+# prompt and not only for what the model wrote.
 #
 # `optimize` refuses a stale corpus. Tuning a prompt against a message the
 # product no longer sends is a result that reproduces perfectly and means
 # nothing.
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,10 @@ class ExtractCase:
     # The recorded run's output tokens, so the cost term measures a candidate
     # against what production paid rather than an absolute nobody chose.
     baseline_tokens_out: int = 0
+    # What the recorded call was *sent*, which is mostly the prompt. The
+    # `length` term is one-sided against this, so a candidate that grows the
+    # instruction pays for it on every turn it will ever run.
+    baseline_tokens_in: int = 0
     format_version: int = FORMAT_VERSION
 
     @classmethod

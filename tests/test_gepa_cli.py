@@ -20,7 +20,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 from app import llm, prompts, tracing  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 from tools.gepa import cli as gepa  # noqa: E402
-from tools.gepa import targets  # noqa: E402
+from tools.gepa import metric_extract, targets  # noqa: E402
 from tools.gepa.adapter import COMPONENT  # noqa: E402
 from tools.gepa.cases import ExtractCase  # noqa: E402
 from tests.test_gepa_adapter import GOOD_OUTPUT, SQL  # noqa: E402
@@ -205,7 +205,21 @@ def test_an_empty_pool_is_reported_as_a_result_rather_than_a_crash(a_run, monkey
 # grounding-against-cost trade on the reader's behalf. These say the front
 # survives that collapse, lands in a file, and never reaches stdout.
 
-TERMS = ("grounding", "census", "names", "shape", "cost")
+# Read from the metric, not spelled again. A hardcoded list here went stale the
+# moment a sixth term was added, and the failure was four front tests rather
+# than anything pointing at the cause.
+TERMS = tuple(metric_extract.WEIGHTS)
+
+
+def _row(*values: float) -> tuple[float, ...]:
+    """One candidate's terms, padded with 1.0 to however many the metric has.
+
+    The last value is repeated into any extra terms so a candidate that gives
+    up the final term keeps giving it up. Written this way because a literal
+    five-tuple went stale the moment a sixth term was added.
+    """
+    padding = (values[-1],) * (len(TERMS) - len(values))
+    return values + padding
 
 
 def _subscores(*rows: tuple[float, ...]) -> list[dict[str, float]]:
@@ -228,20 +242,26 @@ def a_front(a_run, monkeypatch):
         lambda *a, **k: FakeResult(
             pool,
             [0.80, 0.95, 0.40, 0.72],
+            # Candidate 1 dominates the seed, 2 is worst everywhere, and 3
+            # buys the last term outright by giving up the first. Padded to
+            # however many terms the metric has, so the shape of the front —
+            # not the term count — is what these assert.
             val_aggregate_subscores=_subscores(
-                (0.80, 1.00, 1.00, 0.75, 0.90),
-                (0.95, 1.00, 1.00, 0.90, 0.90),
-                (0.50, 0.90, 0.90, 0.50, 0.50),
-                (0.30, 1.00, 1.00, 1.00, 1.00),
+                _row(0.80, 1.00, 1.00, 0.75, 0.90),
+                _row(0.95, 1.00, 1.00, 0.90, 0.90),
+                _row(0.50, 0.90, 0.90, 0.50, 0.50),
+                _row(0.30, 1.00, 1.00, 1.00, 1.00),
             ),
             per_objective_best_candidates={
-                "grounding": {1},
-                "census": {0, 1, 3},
-                "names": {0, 1, 3},
-                "shape": {3},
-                "cost": {3},
+                TERMS[0]: {1},
+                TERMS[1]: {0, 1, 3},
+                TERMS[2]: {0, 1, 3},
+                TERMS[-2]: {3},
+                TERMS[-1]: {3},
             },
-            objective_pareto_front=dict(zip(TERMS, (0.95, 1.0, 1.0, 1.0, 1.0))),
+            objective_pareto_front=dict(
+                zip(TERMS, _row(0.95, 1.0, 1.0, 1.0, 1.0))
+            ),
         ),
     )
     return a_run
@@ -341,9 +361,9 @@ def test_a_candidate_that_scored_nothing_anywhere_is_left_off(a_run, monkeypatch
         lambda *a, **k: FakeResult(
             [{COMPONENT: a_run}, {COMPONENT: BETTER}],
             [0.8, 0.0],
-            val_aggregate_subscores=[dict(zip(TERMS, (0.9,) * 5)), {}],
+            val_aggregate_subscores=[dict.fromkeys(TERMS, 0.9), {}],
             per_objective_best_candidates={term: {0} for term in TERMS},
-            objective_pareto_front=dict(zip(TERMS, (0.9,) * 5)),
+            objective_pareto_front=dict.fromkeys(TERMS, 0.9),
         ),
     )
 

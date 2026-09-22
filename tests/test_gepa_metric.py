@@ -31,7 +31,9 @@ CASE = ExtractCase.authored(
     findings="orders.status takes pending, paid, cancelled and refunded",
     filed={"revenue": "revenue is quantity times price on orders that were not cancelled"},
 )
-CASE = ExtractCase(**{**CASE.__dict__, "baseline_tokens_out": 300})
+CASE = ExtractCase(
+    **{**CASE.__dict__, "baseline_tokens_out": 300, "baseline_tokens_in": 700}
+)
 
 
 def recipe(name: str, claim: str, fragment: str) -> store.CacheEntry:
@@ -48,9 +50,20 @@ def fact(name: str, claim: str) -> store.CacheEntry:
     return store.CacheEntry(kind="schema_fact", name=name, claim=claim)
 
 
-def scored(*entries: store.CacheEntry, tokens_out: int = 300, error: str | None = None):
+def scored(
+    *entries: store.CacheEntry,
+    tokens_out: int = 300,
+    tokens_in: int = 700,
+    error: str | None = None,
+):
     return metric.score(
-        Replayed(case=CASE, entries=list(entries), tokens_out=tokens_out, error=error)
+        Replayed(
+            case=CASE,
+            entries=list(entries),
+            tokens_out=tokens_out,
+            tokens_in=tokens_in,
+            error=error,
+        )
     )
 
 
@@ -210,3 +223,61 @@ def test_the_feedback_names_the_entry_and_quotes_the_text():
     assert "soft deletes" in text
     assert "160 of 2,000" in text
     assert "write the rule, not the number" in text
+
+
+# --------------------------------------------------------------- prompt size
+#
+# The degenerate prompt this term exists for was not reasoned to in advance —
+# it was promoted by a real run. Every candidate in that run grew, by 132% to
+# 259%, and the winner was 3.6 times the seed with all five other terms saying
+# it was better. `cost` charges what the model writes; a prompt is what it is
+# sent, and nothing was charging for that.
+
+
+def test_a_prompt_at_or_under_what_production_sent_is_not_charged():
+    """One-sided, for the same reason `cost` is: an unbounded reward for
+    brevity deletes the paragraph whose payoff nothing here can measure."""
+    assert scored(*GOOD, tokens_in=700).terms["length"] == 1.0
+    assert scored(*GOOD, tokens_in=300).terms["length"] == 1.0
+
+
+def test_a_prompt_that_grows_is_charged_in_proportion():
+    """Half again as long costs half the term; three times as long costs all
+    of it. The winner that prompted this term would have scored zero here."""
+    assert scored(*GOOD, tokens_in=1_050).terms["length"] == pytest.approx(0.5)
+    assert scored(*GOOD, tokens_in=2_100).terms["length"] == 0.0
+
+
+def test_the_feedback_names_both_sizes_and_says_who_pays():
+    """A reflection model reading "0.4" cannot act. Reading that it spent 1,400
+    tokens against a recorded 700, on every turn that will ever run, can."""
+    text = scored(*GOOD, tokens_in=1_400).text()
+
+    assert "1400 input tokens against a recorded 700" in text
+    assert "100% more" in text
+    assert "pays it again" in text
+
+
+def test_a_case_with_no_baseline_is_not_scored_on_length():
+    """An authored probe never ran in production. Zero means nobody recorded a
+    size, which is not the same as the prompt having been free."""
+    no_baseline = Replayed(
+        case=CASE.__class__.authored(name="p", question="q", sql=SQL, findings="f"),
+        entries=list(GOOD),
+        tokens_in=99_999,
+    )
+
+    assert metric.score(no_baseline).terms["length"] == 1.0
+    assert "input tokens" not in metric.score(no_baseline).text()
+
+
+def test_a_longer_prompt_cannot_buy_its_way_past_the_other_terms():
+    """The trade the term exists to make visible. A candidate that is perfect
+    on everything else and three times as long scores below one that is merely
+    good and the size it was — which is the comparison the last run got wrong.
+    """
+    bloated = scored(*GOOD, tokens_in=2_100).value
+    honest = scored(*GOOD, tokens_in=700).value
+
+    assert bloated < honest
+    assert honest - bloated == pytest.approx(metric.WEIGHTS["length"])
