@@ -8,11 +8,6 @@ before/after diff on each. Today only `extract` is wired
 written reason for each of the other five nodes. Those reasons are the
 requirements for this work, not objections to it.
 
-**Deadline.** A committed promotion, with the run's artifacts committed beside
-it, by **Oct 10**. The abstract is accepted, so it cannot soften: what gives is
-the talk's content, and the fallback is "the five I didn't wire, and why" —
-weaker, and an hour of rewriting slides the week before.
-
 ## What is missing is a whole turn scored against a known answer
 
 Every unwired node and every non-prompt artifact fails for the same reason: the

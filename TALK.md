@@ -485,5 +485,3 @@ of `CHALLENGE.md` that specifies it.
 | §3, §5 | A promotion, committed. Both searches ran and neither produced one I would promote: `extract`'s winner is 3.6x longer and the metric cannot see length, `tools`' gain is 2 cases in 9 | a `length` term in `metric_extract.WEIGHTS`, then re-run; and a second `tools` run on another split to see whether the gain reproduces |
 | §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted | `make gepa-tools GEPA_ARGS=--probe-only` is the before half |
 | §6 | A second search with the gate disabled, kept whatever it produces | CHALLENGE, "What the talk has to show" |
-
-Deadline for the promotion that sections 3 and 5 rest on: **Oct 10**.
