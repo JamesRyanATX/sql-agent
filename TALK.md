@@ -11,8 +11,7 @@ This is the run sheet: what to say, what to type, what appears on screen, and
 what to do when it does not. Read the "Status" column before rehearsing —
 what is built and what is not changes as work lands, and the blocking work is
 named where it bites. Sections 2, 3 and 6 are blocked on one thing: a `make
-corpus` run, which is forty minutes at a keyboard and cannot be done on the
-day.
+corpus` run, which is about five minutes and unattended.
 
 ## Live, or pre-baked
 
@@ -22,13 +21,13 @@ Settle this first, because it decides whether the talk fits.
 |---|---|---|
 | A cold turn (T1) | ~34s | One question, one answer |
 | Two cached turns (T2, T3) | ~8s, ~6s | The payoff, and it is fast |
-| One corpus question + verdict | ~40s | The human-in-the-loop beat |
+| One question + a typed verdict | ~40s | The human-in-the-loop beat |
 | `gepa-extract --probe-only` | ~30s | Four probes, four model calls |
 | Reading artifacts and diffs | instant | Files |
 
 | Pre-baked | Takes | Why it cannot be live |
 |---|---|---|
-| Recording and judging all 23 questions | ~40 min | Twenty-three cold turns |
+| Recording all nineteen golden cases | ~5 min | Nineteen cold turns, unattended |
 | `gepa-tools --probe-only` | ~20 min | Nineteen cold turns, one per golden case |
 | Every GEPA search | 20 min – 2 hrs | 60–150 metric calls |
 | The overfit run | ~15 min | A second search |
@@ -52,10 +51,13 @@ make config                          # claude-opus-5, per-node efforts, tracing 
 make test                            # green
 ```
 
-- The corpus recorded and judged: `make corpus`, all 23 questions answered.
-  Every question is asked with the memory off, so this leaves the demo's
-  memory alone and can be done days ahead without a reset afterwards.
-  This takes 40 minutes and cannot be done on the day.
+- The corpus recorded: `make corpus`, all nineteen golden cases. Unattended and
+  about five minutes, so it can be done on the day, but do it the night before
+  anyway so the traces are there to point at. Every question is asked with the
+  memory off, so it leaves the demo's memory alone.
+- At least one verdict typed by hand through `sql-agent ask`, so the Langfuse
+  view has a human comment beside the computed ones. That is the screenshot
+  section 2 rests on.
 - Every GEPA run finished, with its artifacts committed. Nothing in
   `tools/gepa/out/` survives a `git clone`, so what the talk shows must be
   committed somewhere tracked.
@@ -154,8 +156,9 @@ The GIF. It is the same script, recorded, with real numbers.
 
 ## 2. A corpus from traces, and the human in it — 6 min
 
-**Status: the command is built and committed (`c1b8f0f`), but it has not been
-run against the full question list yet.**
+**Status: both halves are built. `sql-agent ask` has the menu, `make corpus`
+files the computed verdicts, and both have been run against the live model. No
+reader consumes the verdicts yet — say so, it is the honest part of the story.**
 
 ### Say
 
@@ -169,10 +172,10 @@ run against the full question list yet.**
 ### Type
 
 ```bash
-make corpus
+sql-agent "how many customers are in the west region?"
 ```
 
-One question runs cold. When the answer lands:
+One question, cold. When the answer lands:
 
 ```
 Was that right?
@@ -184,18 +187,41 @@ Choose `2` on a question you know it got wrong, and type a real reason.
 
 ### Say, while it files
 
-- An **OK** is not just a thumbs-up: it certifies the SQL that ran, which
-  becomes the reference a later metric scores candidates against. Approval
-  fills the corpus as a by-product of using the thing.
-- A **Not OK** gives prose. That prose lands in the same field the metric's own
-  feedback lands in, and GEPA cannot tell which of us wrote it.
+- The verdict goes onto that turn's trace, beside the tool calls and the SQL,
+  as a score named `correct` with your prose as its comment.
+- That prose lands in the same field the metric's own feedback lands in, which
+  is the point: by the time GEPA reads it, nothing distinguishes what a person
+  wrote from what a metric wrote.
 
-Then, in Langfuse: the trace, with the score attached, beside the tool calls and
-the SQL. Then the finished corpus: 23 questions, each judged.
+### Then, the other way to get one
 
+```bash
+make corpus
+```
+
+- The label is only unautomatable where nobody knows the answer. For the demo I
+  do: `demo/golden/` holds a reference query per question, and nine of them
+  carry the number `demo/demo.sql` fixes. So this asks all nineteen and
+  compares, unattended.
+- Be precise about what that means. **I still wrote the labels** — I wrote
+  nineteen reference queries instead of pressing `1` nineteen times. The human
+  effort moved; it did not vanish. You can automate the verdict exactly when
+  you already have ground truth, and getting ground truth is the expensive
+  part. A customer's warehouse does not come with it.
+- The other ten have no written answer because theirs moves with the date.
+  They are asked anyway: their traces are what the harvest reads.
+
+Then, in Langfuse: the scores on the traces, one typed by hand and nine
+computed, indistinguishable in the same field.
+
+- **What nothing does yet: read them back.** The corpus the optimiser trains on
+  was authored by hand, not harvested from these verdicts. Closing that loop —
+  an approved turn becoming a golden case, with the SQL that turn ran as its
+  reference — is the next thing on the list and it is the flywheel this talk is
+  named after. Better to say that than to imply a loop that is not joined.
 - The questions are aimed at the traps on purpose. A corpus the agent already
   answers perfectly measures nothing, because a candidate cannot win where the
-  seed already wins.
+  seed already wins. Measured: the seed gets 10 of 19.
 
 ---
 
@@ -387,7 +413,7 @@ that claims a failure mode without showing it has not tested it.
 | A turn hangs past ~60s | Keep talking through the architecture; the cost line lands when it lands. Do not Ctrl-C into a dead terminal. |
 | A live turn answers **wrong** | Take it. That is section 2's whole argument, arriving early: press `2`, say why, and point out that the verdict just became training data. |
 | Langfuse shows nothing | Traces take seconds to ingest, and the read path is not the write path. Move on and show the pre-baked traces. |
-| `make corpus` refuses to start | It preflights two things: somebody at a terminal, and tracing on. Run `make config` and read the tracing line. |
+| `make corpus` refuses to start | It preflights one thing: tracing on, because a verdict needs somewhere to land. Run `make config` and read the tracing line. |
 | The cache is not empty at T1 | `make reset`. It empties the memory and reseeds the demo database. |
 
 ## The gap list
@@ -397,7 +423,7 @@ of `CHALLENGE.md` that specifies it.
 
 | Blocks | What is missing | Where |
 |---|---|---|
-| §2 | All 23 questions recorded and judged | `make corpus` — built, never run |
+| §2 | Nothing reads a verdict back. An approved turn should become a golden case, with the SQL it ran as the reference | a scores reader in `app/tracing.py`, and a second harvest beside `extract_cases` — CHALLENGE §1 |
 | §3 | `make gepa-extract` against a real corpus, promoted and committed | CHALLENGE §7 |
 | §4 | A committed front, and the code that writes it | `tools/gepa/cli.py`, after `_search`. `GEPAResult` carries `val_aggregate_subscores`, `per_objective_best_candidates` and `objective_pareto_front`, populated whenever the adapter returns per-term scores, which ours does. gepa 0.1.4 never writes them anywhere, so about fifty lines must. `--pareto <path>` for the tracked copy. |
 | §5 | A real `make gepa-tools` run, promoted into `app/tools.py` and committed | built and tested; never run against a model |

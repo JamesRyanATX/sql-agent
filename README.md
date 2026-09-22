@@ -151,15 +151,21 @@ sql-agent config
 
 With tracing on, an answered question ends in a two-line menu asking whether that
 was right, and a wrong one asks what could be improved. Both go onto the turn's
-trace as a score, which is what a later optimisation reads as a label: an
-approved answer says the SQL behind it was worth keeping. `--no-feedback` skips
-it, and nothing is asked when tracing is off or when either stream is redirected.
+trace as a score named `correct`. `--no-feedback` skips it, and nothing is asked
+when tracing is off or when either stream is redirected.
 
-`make corpus` is that menu, twenty-odd times in a row. It asks every question in
-`demo/questions.txt` with `--no-memory`, so each turn explores from nothing, and
-you judge each answer as it lands. That is what fills the corpus the optimiser
-trains on — the questions are aimed at the traps in `demo/demo.sql`, because a
-corpus the agent already answers perfectly measures nothing.
+`make corpus` files the same verdicts without asking you. It reads
+`demo/golden/`, where each case holds a question and — where `demo/demo.sql`
+fixes the number — the answer written beside it, asks each question with the
+memory off, and compares. Nine of the nineteen get a verdict that way; the rest
+have no written answer because theirs moves with the date, and they are asked
+anyway because their traces are what a later harvest reads.
+
+A verdict from `corpus` is **certified** rather than human: somebody wrote the
+reference once and a machine applied it. What lands on the trace is identical
+either way, deliberately, so nothing downstream has to care which produced it.
+The questions are aimed at the traps in `demo/demo.sql`, because a corpus the
+agent already answers perfectly measures nothing.
 
 **`--no-memory` asks as though for the first time.** The turn ignores everything
 the agent has learned and saves nothing it learns, so it explores and costs what

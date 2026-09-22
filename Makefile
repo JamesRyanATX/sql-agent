@@ -145,19 +145,27 @@ turns:  ## tokens per turn — the demo chart, as a table
 config:  ## what the server is running — config.yaml under config.local.yaml
 	@uv run sql-agent config
 
-# --- the corpus: questions, asked cold, judged by hand ----------------------
+# --- the corpus: questions, asked cold, certified against a known answer ----
 #
-# The optimisation downstream needs turns with a label on them, and the label
-# is a person's. That happens here: ~20 questions, a cold turn each, a verdict
-# each. Verdicts land on the traces, so Langfuse has to be
-# up (`make langfuse-up`) and the server restarted with both keys.
+# The optimisation downstream needs turns with a label on them. For the demo's
+# questions the label is computable: `demo/golden/` holds what the answer should
+# be, so this asks each question and compares. Nobody is at the keyboard, so it
+# can be left running. Verdicts land on the traces, so Langfuse has to be up
+# (`make langfuse-up`) and the server restarted with both keys.
+#
+# Nine of the nineteen get a verdict. The rest have no written answer because
+# theirs moves — revenue and date windows — and they are asked anyway, because
+# their traces are what a later harvest reads.
+#
+# To judge one by hand instead, `sql-agent ask` has the menu. That is the beat
+# the talk shows; this is the one that fills the corpus.
 #
 # Every question is asked with the memory off, so a run reads nothing the demo
 # taught the agent and writes nothing back. The turns still land in the turn log
 # — which is why `demo-verify` reads the five most recent rather than all of
 # them.
-corpus:  ## ask demo/questions.txt cold and judge each answer (~20 model turns)
-	uv run sql-agent corpus demo/questions.txt
+corpus:  ## ask demo/golden cold and certify each answer (~19 model turns)
+	uv run sql-agent corpus demo/golden
 
 demo: health reset  ## record the terminal demo — live, 20-30 min of real model time
 	$(VHS) demo/demo.tape

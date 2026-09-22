@@ -114,18 +114,18 @@ async def _ask(
     no_feedback: bool = False,
     no_memory: bool = False,
 ) -> None:
-    answered, fatal = await turn.take(
+    taken = await turn.take(
         question, verbose=verbose, as_json=as_json, memory=not no_memory
     )
 
     # A recoverable SQL error carries no `fatal` key — that is the fix loop
     # working, not a failed turn. Exiting 0 on a genuinely failed one would let
     # `make demo` record a crash as a good take.
-    if fatal:
+    if taken.fatal:
         raise SystemExit(1)
 
-    if not no_feedback and not as_json and turn.askable(answered):
-        await turn.judge(answered)
+    if not no_feedback and not as_json and turn.askable(taken.answered):
+        await turn.judge(taken.answered)
 
 
 # Registered here rather than imported at the top: the command modules import

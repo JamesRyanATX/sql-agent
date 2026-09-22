@@ -1,14 +1,21 @@
-"""One turn, and the question that follows it.
+"""One turn, and the verdict that follows it.
 
 Its own module because two commands take turns — `ask` and `corpus` — and a
 corpus recorded through a second code path would be a corpus of something else.
 `main` cannot hold it: `main` imports the command modules at the bottom, so a
 command importing `main` back is a cycle.
+
+The same reasoning applies to the verdict. `ask` asks a person; `corpus`
+compares against an answer somebody wrote down. Both go through `file_verdict`,
+so what lands on a trace is one shape whichever produced it — a later reader
+cannot tell them apart, and should not have to.
 """
 
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
+from typing import Any
 
 import click
 
@@ -17,24 +24,38 @@ from sql_agent import events, http, render
 VERDICTS = ("OK", "Not OK")
 
 
+@dataclass(frozen=True)
+class Taken:
+    """What one turn produced, for whoever has to decide what happens next.
+
+    `rows` is here because `corpus` compares them against a written-down
+    answer. They were always on the wire — `events.show` renders them — and
+    were simply dropped on the floor.
+    """
+
+    answered: dict | None = None
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    fatal: bool = False
+
+
 async def take(
     question: str,
     *,
     verbose: bool = False,
     as_json: bool = False,
     memory: bool = True,
-) -> tuple[dict | None, bool]:
+) -> Taken:
     """Ask, rendering as it happens.
 
-    Returns the answer event and whether the turn died, which is everything a
-    caller needs to decide what happens next: `ask` exits 1, `corpus` notes it
-    and moves to the next question.
+    `ask` exits 1 on a fatal turn; `corpus` notes it and moves to the next
+    question. Both need the answer event, and only one needs the rows.
     """
     if not as_json:
         click.secho(question, fg="yellow", bold=True)
 
     fatal = False
     answered: dict | None = None
+    rows: list[dict[str, Any]] = []
     # No session_id: the server mints one per turn, which is what a one-shot
     # question wants. Every turn reads the same memory regardless.
     async for ev in http.stream_events(
@@ -44,10 +65,14 @@ async def take(
             events.raw(ev)
         else:
             events.show(ev, verbose=verbose)
-        fatal = fatal or (ev.get("type") == "error" and ev.get("fatal"))
+        fatal = fatal or bool(ev.get("type") == "error" and ev.get("fatal"))
+        if ev.get("type") == "rows":
+            # The last one wins: the fix loop can run a query more than once,
+            # and what was compared has to be what was finally answered from.
+            rows = ev.get("rows") or []
         if ev.get("type") == "answer":
             answered = ev
-    return answered, bool(fatal)
+    return Taken(answered=answered, rows=rows, fatal=fatal)
 
 
 def askable(answered: dict | None) -> bool:
@@ -88,9 +113,20 @@ async def judge(answered: dict) -> bool:
         # side information, and "wrong table" chosen from a list says less than
         # the sentence the person would have typed anyway.
         comment = click.prompt("What could be improved", default="", show_default=False)
+    await file_verdict(answered, correct, comment)
+    click.echo(render.dim("  thanks — filed on this turn's trace"))
+    return correct
+
+
+async def file_verdict(answered: dict, correct: bool, comment: str | None) -> None:
+    """Put a verdict on a turn's trace.
+
+    Split out because two things file one: a person choosing from the menu
+    above, and `corpus` comparing against an answer somebody wrote down. They
+    are indistinguishable once filed, which is the point — one shape, so a
+    later reader cannot tell them apart and does not have to.
+    """
     await http.post(
         f"/turns/{answered['turn_id']}/feedback",
         json={"correct": correct, "comment": comment or None},
     )
-    click.echo(render.dim("  thanks — filed on this turn's trace"))
-    return correct

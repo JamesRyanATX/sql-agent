@@ -11,7 +11,7 @@ make test-live                         # include live model tests
 make cache                             # `sql-agent cache`
 make psql-agent / psql-demo            # shell to the DBs
 make reset                             # clear learned state, reseed
-make corpus                            # ask demo/questions.txt cold, judge each answer
+make corpus                            # ask demo/golden cold, certify each answer
 ```
 
 ## Configuration

@@ -1,6 +1,10 @@
-# The corpus. One question per line; `#` and blank lines are skipped.
+# The register of what the demo asks. One question per line; `#` and blank
+# lines are skipped.
 #
-#   make corpus     ask each of these cold, and judge the answer
+# No command reads this file any more. `make corpus` reads `demo/golden/`,
+# where the answers are, and `tests/test_golden_corpus.py` asserts that every
+# golden case's question appears here verbatim — so this stays as the one place
+# to see the whole set, and as the source to author a new case from.
 #
 # Every line here is aimed at something. `demo/demo.sql` is booby-trapped on
 # purpose, and a corpus of questions the agent answers easily would measure
