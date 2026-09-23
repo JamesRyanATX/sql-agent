@@ -118,7 +118,7 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #   make gepa-extract GEPA_ARGS='--pareto demo/gepa/extract.pareto.json'
 #   make gepa-extract GEPA_ARGS='--iterations 1 --resume'  one step, then read
 #                                                      the transcript
-#   make gepa-extract GEPA_ARGS='--overfit 3 --resume'  guards off, on purpose:
+#   make gepa-extract-overfit GEPA_ARGS=--resume       guards off, on purpose:
 #                                                      three cases, the gate
 #                                                      reporting only, then
 #                                                      the held-out score
@@ -147,14 +147,15 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
 
-# Both above `gepa-%`, and they have to be: this make (3.81) takes the first
-# pattern rule that matches, and `gepa-%` matches `gepa-extract-pareto` too.
+# All three above `gepa-%`, and they have to be: this make (3.81) takes the
+# first pattern rule that matches, and `gepa-%` matches `gepa-extract-pareto`
+# too.
 #
-# The command that produces a run's front, for the line that says to run it.
-# The overfit run is `make gepa-extract GEPA_ARGS=...`, not a target of its own.
-GEPA_RUN = $(if $(filter %-overfit,$1),\
-             make gepa-$(1:-overfit=) GEPA_ARGS=\"--overfit 3 --resume\",\
-             make gepa-$1)
+# `--overfit` is a flag on the extract search, not a target the CLI knows, so
+# this is the one name here that `gepa-%` cannot pass through. It exists so
+# the run has a command to be named by, in the talk and in the line below.
+gepa-extract-overfit:  ## the extract search with the guards off: three cases, gate reporting only
+	@$(GEPA) extract --overfit 3 $(GEPA_ARGS)
 
 # The last run's front, from tools/gepa/out/ — every search writes one there
 # whether or not --pareto asked for a tracked copy. The overfit run is its
@@ -166,7 +167,7 @@ GEPA_RUN = $(if $(filter %-overfit,$1),\
 # know what to type next, not where the file would have been.
 gepa-%-pareto:  ## the Pareto front from the last run of gepa-<target>, as a table
 	@test -f tools/gepa/out/$*.pareto.json || { \
-	  echo "No front for $* yet. Run '$(strip $(call GEPA_RUN,$*))' first."; exit 1; }
+	  echo "No front for $* yet. Run 'make gepa-$*' first."; exit 1; }
 	@uv run --group gepa python -m tools.gepa.front tools/gepa/out/$*.pareto.json
 
 # Everything cli.py writes for one run name: the corpus, the front, the

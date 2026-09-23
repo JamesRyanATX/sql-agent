@@ -539,7 +539,7 @@ the gap list.**
 ### Pre-baked
 
 ```bash
-make gepa-extract GEPA_ARGS='--overfit 3 --resume' > demo/gepa/extract-overfit.md
+make gepa-extract-overfit GEPA_ARGS=--resume > demo/gepa/extract-overfit.md
 ```
 
 `--resume` reuses the corpus section 3 searched; the run itself is fresh and
