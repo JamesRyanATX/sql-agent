@@ -325,8 +325,20 @@ score", and the Opus re-run replaces the file.
 
 **Status: built and run twice. Two fronts are committed: the run before the
 metric had a length term, at `demo/gepa/extract.pareto.before-length.json`,
-and the run after, at `demo/gepa/extract.pareto.json`. Show both, in that
-order.**
+and the run after, at `demo/gepa/extract.pareto.json`. Both tables below are
+read off those two files.**
+
+**On a slide, not the terminal.** Nothing here runs live, the files are nested
+JSON, and the point is two rows compared across two tables, which needs both
+on screen at once. One terminal beat if the room should see the numbers exist
+outside a slide: the after table is plain text in the committed run output.
+
+```bash
+grep -A 5 '^pareto' demo/gepa/extract.run.txt
+```
+
+The before run's output was not kept, only its front, so there is no
+equivalent for the first table.
 
 ### Say
 
