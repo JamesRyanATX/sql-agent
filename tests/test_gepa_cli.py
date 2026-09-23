@@ -601,7 +601,7 @@ def test_overfit_trains_and_validates_on_the_same_n_cases(a_run, monkeypatch):
 
     assert len(seen["trainset"]) == 3
     assert seen["valset"] is seen["trainset"]
-    assert seen["node"] == "extract.overfit", "its own run dir, not section 3's"
+    assert seen["node"] == "extract-overfit", "its own run dir, not section 3's"
     assert "the seed over all 8 cases, to find the 3 it does worst on" in result.stderr
     assert "3 train (the seed's worst:" in result.stderr
     assert "5 held out" in result.stderr
@@ -661,7 +661,7 @@ def test_the_held_out_cases_are_scored_for_every_candidate_and_written(
     assert "worse than the seed on" in result.stderr
     assert "decided nothing" in result.stderr
 
-    written = json.loads((tmp_path / "extract.overfit.pareto.json").read_text())
+    written = json.loads((tmp_path / "extract-overfit.pareto.json").read_text())
     assert written["holdout"]["cases"] == 5
     assert set(written["holdout"]["candidates"]) == {"0", "1", "2", "3"}
     assert written["holdout"]["candidates"]["0"]["train"] == 0.8
@@ -726,3 +726,41 @@ def test_the_thin_warning_is_about_the_training_set(a_run, monkeypatch):
 
     _, thin = search_kwargs(monkeypatch, ["extract", "--val-fraction", "0.9"])
     assert "2 cases is thin" in thin.stderr
+
+
+# --------------------------------------------------------------- transcript
+#
+# The front was always written to a file. The gate's verdicts and the diff
+# lived only on the terminal, so "here is what last night's run left" was the
+# front and nothing else.
+
+
+def test_a_run_leaves_its_whole_stderr_beside_the_front(a_run, tmp_path):
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert result.exit_code == 0, result.stderr
+    kept = (tmp_path / "extract.run.txt").read_text()
+    assert "split     " in kept, "the run's own narration"
+    assert "candidate 1" in kept, "the gate's verdict"
+    assert "chars ->" in kept, "the diff's summary line"
+    assert kept.strip() == result.stderr.strip(), "the terminal's text, nothing more"
+    assert "\x1b[" not in kept, "and without the colour codes"
+
+
+def test_a_probe_does_not_touch_the_transcript(well_behaved, monkeypatch, tmp_path):
+    """The probe runs on stage, seconds before the transcript of last night's
+    search is shown. It must not overwrite it."""
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    (tmp_path / "extract.run.txt").write_text("last night")
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--probe-only"])
+
+    assert result.exit_code == 0, result.stderr
+    assert (tmp_path / "extract.run.txt").read_text() == "last night"
+
+
+def test_the_overfit_run_keeps_its_own_transcript(a_run, tmp_path):
+    CliRunner().invoke(gepa.cli, ["extract", "--overfit", "3"])
+
+    assert (tmp_path / "extract-overfit.run.txt").exists()
+    assert not (tmp_path / "extract.run.txt").exists(), "section 3's is untouched"

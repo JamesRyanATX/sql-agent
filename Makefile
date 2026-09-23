@@ -120,6 +120,15 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #                                                      three cases, the gate
 #                                                      reporting only, then
 #                                                      the held-out score
+#   make gepa-extract-pareto                           the front from the last
+#   make gepa-tools-pareto                             run of that target, as
+#   make gepa-config-pareto                            a table
+#   make gepa-extract-overfit-pareto                   the overfit run's, with
+#                                                      its held-out table
+#
+# Every run also leaves its whole terminal output in tools/gepa/out/<target>.run.txt:
+# the harvest, the split, the gate's verdicts, the diff. Copy that and the
+# front to demo/gepa/ to keep them; nothing under out/ survives a clone.
 #
 # `make gepa-tools` and `make gepa-config` cost real money and ask before they
 # spend any. Redirecting means nobody is there to agree, so they refuse unless
@@ -130,6 +139,17 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # Not `.PHONY`: make skips pattern rules for phony targets, and nothing named
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
+
+# Above `gepa-%`, and it has to be: this make (3.81) takes the first pattern
+# rule that matches, and `gepa-%` matches `gepa-extract-pareto` too.
+#
+# The last run's front, from tools/gepa/out/ — every search writes one there
+# whether or not --pareto asked for a tracked copy. The overfit run is its
+# own name, so `make gepa-extract-overfit-pareto` is section 6's and this is
+# section 3's. A committed copy is a path to the module:
+#   uv run --group gepa python -m tools.gepa.front demo/gepa/extract.pareto.json
+gepa-%-pareto:  ## the Pareto front from the last run of gepa-<target>, as a table
+	@uv run --group gepa python -m tools.gepa.front $(wildcard tools/gepa/out/$*.pareto.json)
 
 gepa-%:  ## GEPA over one searchable thing: new text on stdout, progress on stderr
 	@$(GEPA) $* $(GEPA_ARGS)

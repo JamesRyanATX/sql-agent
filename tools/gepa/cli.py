@@ -68,6 +68,56 @@ def reflections(name: str) -> Path:
     return run_dir(name) / "reflections.jsonl"
 
 
+def transcript(name: str) -> Path:
+    """Everything the run said, as the terminal saw it minus the colour.
+
+    The front is written to a file; until this, the gate's verdicts and the
+    diff lived only on the terminal, and "here is what last night's run
+    left" was the front and nothing else. Beside the front rather than in the
+    run dir, so `--probe-only` and a resume cannot touch it.
+    """
+    return OUT / f"{name}.run.txt"
+
+
+class _Tee:
+    """stderr and a file. Everything a run says goes through stderr — `say`
+    is `click.secho(err=True)`, and `_search` redirects GEPA's own log there
+    — so one tee is the whole transcript. The file gets the text without the
+    colour codes; the terminal decides about colour for itself."""
+
+    def __init__(self, terminal, file) -> None:
+        self._terminal, self._file = terminal, file
+
+    def write(self, text: str) -> int:
+        self._terminal.write(text)
+        self._file.write(click.unstyle(text))
+        return len(text)
+
+    def flush(self) -> None:
+        self._terminal.flush()
+        self._file.flush()
+
+    def isatty(self) -> bool:
+        return self._terminal.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self._terminal, name)
+
+
+@contextlib.contextmanager
+def _recording(name: str):
+    """Keep the run's stderr in `transcript(name)` for as long as it runs."""
+    path = transcript(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        real = sys.stderr
+        sys.stderr = _Tee(real, file)
+        try:
+            yield
+        finally:
+            sys.stderr = real
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("target")
 @click.option("-v", "--verbose", is_flag=True, help="Per-probe and per-candidate detail.")
@@ -128,11 +178,38 @@ def cli(
         with Loop() as loop:
             raise SystemExit(chosen.check(loop, yes))
 
-    # An overfit run keeps its own run dir and front, so the real run's are
-    # not wiped by the demonstration of what the real run refuses to do. It
-    # is always fresh: `--resume` there means the last corpus and no more,
-    # which is what it wants — the same cases the real run searched.
-    run = f"{chosen.name}.overfit" if overfit is not None else chosen.name
+    # An overfit run keeps its own run dir, front and transcript, so the real
+    # run's are not wiped by the demonstration of what the real run refuses
+    # to do. It is always fresh: `--resume` there means the last corpus and
+    # no more, which is what it wants — the same cases the real run searched.
+    run = f"{chosen.name}-overfit" if overfit is not None else chosen.name
+    with _recording(run):
+        _run(
+            chosen, seed_candidate, run=run, verbose=verbose, budget=budget,
+            val_fraction=val_fraction, seed=seed, resume=resume, days=days,
+            yes=yes, pareto_to=pareto_to, overfit=overfit,
+        )
+
+
+def _run(
+    chosen: Target,
+    seed_candidate: dict[str, str],
+    *,
+    run: str,
+    verbose: bool,
+    budget: int | None,
+    val_fraction: float,
+    seed: int,
+    resume: bool,
+    days: int,
+    yes: bool,
+    pareto_to: Path | None,
+    overfit: int | None,
+) -> None:
+    """The search, from corpus to stdout. Split from the command so the
+    transcript can be held open around every way out of it."""
+    from tools.gepa.adapter import Loop, reflection_lm
+
     _fresh_run_dir(run, resume and overfit is None)
     cases = chosen.corpus(days=days, resume=resume, verbose=verbose)
     budget = chosen.budget if budget is None else budget
@@ -697,33 +774,14 @@ def _holdout(
 def _front_table(document: dict, objectives: tuple[str, ...]) -> None:
     """The front on stderr, so it is read without opening anything.
 
-    No colour: the gate spends green and red on pass and fail, and a table where
-    every row is one colour is not saying anything.
+    The rendering lives in `front.py`, which is also what reads a committed
+    front back off disk: one table, whether it is printed at the end of a run
+    or a month later from the file.
     """
-    pool = document["pool"]
-    say(
-        f"\npareto    {len(objectives)} objectives over {pool['candidates']} "
-        f"candidates, {pool['on_front']} on the front\n"
-    )
+    from tools.gepa import front
 
-    width = {o: max(len(o), 6) for o in objectives}
-    header = "  ".join(f"{o:>{width[o]}}" for o in objectives)
-    say(f"          {'cand':>4}  {'val':>6}  {header}")
-
-    for entry in document["front"]:
-        cells = "  ".join(f"{entry['scores'][o]:>{width[o]}.2f}" for o in objectives)
-        note = "seed" if entry["seed"] else ""
-        if entry["tops"]:
-            note = (note + "  " if note else "") + "tops " + ", ".join(entry["tops"])
-        val = f"{entry['val']:.3f}" if entry["val"] is not None else "-"
-        say(f"          {entry['index']:>4}  {val:>6}  {cells}  {note}".rstrip())
-
-    best = document["best_per_objective"]
-    if best:
-        cells = "  ".join(
-            f"{best.get(o, float('nan')):>{width[o]}.2f}" for o in objectives
-        )
-        say(f"          {'best':>4}  {'-':>6}  {cells}")
+    for line in front.render(document):
+        say(line)
 
 
 # ------------------------------------------------------------------------- diff

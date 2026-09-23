@@ -56,12 +56,13 @@ make test                            # green
   about five minutes, so it can be done on the day, but do it the night before
   anyway so the traces are there to point at. Every question is asked with the
   memory off, so it leaves the demo's memory alone.
-- At least one verdict typed by hand through `sql-agent ask`, so the Langfuse
-  view has a human comment beside the computed ones. That is the screenshot
-  section 2 rests on.
-- Every GEPA run finished, with its artifacts committed. Nothing in
-  `tools/gepa/out/` survives a `git clone`, so what the talk shows must be
-  committed somewhere tracked.
+- Langfuse open on one of those traces, with the `correct` score visible beside
+  the tool calls and the SQL. That is the screenshot section 2 rests on.
+- Every GEPA run finished on this laptop, so `make gepa-<target>-pareto` and
+  `tools/gepa/out/<target>.run.txt` show last night's run. Then copy each
+  run's front and transcript to `demo/gepa/` and commit: nothing in
+  `tools/gepa/out/` survives a `git clone`, and the committed copies are the
+  fallback for every pre-baked beat.
 
 ### Ten minutes before
 
@@ -280,13 +281,36 @@ Four things to say over it, in this order:
   are all vacuously perfect when nothing was recorded. Without a gate in front
   of them, three of six terms pay a prompt for declining to do its job.
 
-### Then the pre-baked run
+### Then the search, which ran last night
 
-Walk the recorded stderr, `demo/gepa/extract.run.txt`: the harvest line, the
-split, the search line, the probe gate, the diff. One line in it is stale: the
-gate's length warning reads "prompt length is not in the metric", the wording
-from before the term landed. The code now says "length is only 0.10 of the
-score", and the Opus re-run replaces the file.
+Say what `make gepa-extract` does: harvest the corpus from traces, split it,
+run the search, gate the pool, print the diff, and put the new prompt on
+stdout. Twenty minutes to two hours, so it ran the night before. Here is what
+it left.
+
+```bash
+make gepa-extract-pareto
+```
+
+The front, with the time it was written, then every candidate on it in full,
+seed first. Read the seed row and the survivor row: two vals of 0.966, and a
+`chars` column that says one is 64% longer. Scroll to the survivor's text and
+the 64% is visible. Hold the trade-off; section 4 is about it.
+
+```bash
+tail -n 40 tools/gepa/out/extract.run.txt
+```
+
+The run's own transcript: the gate's verdict on every candidate, the length
+warning, and the diff. `less` it if there is time; the harvest and split lines
+are at the top.
+
+Fallback, if the search has not run on the presenting laptop: the committed
+copies. `python -m tools.gepa.front demo/gepa/extract.pareto.json` for the
+front, and `demo/gepa/extract.run.txt` for the transcript. One line in that
+copy is stale: the gate's length warning reads "prompt length is not in the
+metric", the wording from before the term landed. The code now says "length is
+only 0.10 of the score", and the next run's transcript replaces it.
 
 - **The gate is outside the objective, deliberately.** Weights cannot express
   "never". A mean-maximising search will trade a rare catastrophic failure for a
@@ -307,17 +331,25 @@ metric had a length term, at `demo/gepa/extract.pareto.before-length.json`,
 and the run after, at `demo/gepa/extract.pareto.json`. Both tables below are
 read off those two files.**
 
-**On a slide, not the terminal.** Nothing here runs live, the files are nested
-JSON, and the point is two rows compared across two tables, which needs both
-on screen at once. One terminal beat if the room should see the numbers exist
-outside a slide: the after table is plain text in the committed run output.
+**On a slide, not the terminal.** Nothing here runs live, and the point is two
+rows compared across two tables, which needs both on screen at once. One
+terminal beat, so the room sees the numbers come out of a file rather than a
+slide:
 
 ```bash
-grep -A 5 '^pareto' demo/gepa/extract.run.txt
+make gepa-extract-pareto
 ```
 
-The before run's output was not kept, only its front, so there is no
-equivalent for the first table.
+It prints the front from the last `make gepa-extract` on this machine, as the
+table the search printed, with the `chars` column the slide has. That means
+the search has to have run on the presenting laptop; if it has not, the
+committed copy prints the same way:
+
+```bash
+uv run --group gepa python -m tools.gepa.front demo/gepa/extract.pareto.json
+```
+
+The same target exists for `tools` and `config`.
 
 ### Say
 
@@ -498,17 +530,23 @@ the gap list.**
 ### Pre-baked
 
 ```bash
-make gepa-extract GEPA_ARGS='--overfit 3 --resume --pareto demo/gepa/extract.overfit.pareto.json' \
-  > demo/gepa/extract.overfit.md 2> demo/gepa/extract.overfit.run.txt
+make gepa-extract GEPA_ARGS='--overfit 3 --resume' > demo/gepa/extract-overfit.md
 ```
 
 `--resume` reuses the corpus section 3 searched; the run itself is fresh and
-keeps its own directory, so section 3's run is untouched. GEPA needs nothing
-switched off: it admits a candidate on a train-minibatch improvement and uses
-the validation set only to rank parents, so three cases overfit by default.
-What is switched off is ours.
+keeps its own files under the name `extract-overfit`, so section 3's run is
+untouched. GEPA needs nothing switched off: it admits a candidate on a
+train-minibatch improvement and uses the validation set only to rank parents,
+so three cases overfit by default. What is switched off is ours.
 
-### Show, in this order, from the run's stderr
+On stage:
+
+```bash
+make gepa-extract-overfit-pareto          # the front over three, and the held-out table
+less tools/gepa/out/extract-overfit.run.txt   # the warning, the gate, the diff
+```
+
+### Show, in this order
 
 1. The sweep that picks the three, then the warning: `3 cases is thin — GEPA
    will fit whichever questions happen to be in here`.
@@ -571,6 +609,6 @@ of `CHALLENGE.md` that specifies it.
 | Blocks | What is missing | Where |
 |---|---|---|
 | §3, §5 | A promotion, committed. The length term landed and its re-run is committed; the survivor beats the seed by 0.0004 for 64% more prompt, so promoting it is a decision, not a build. `tools`' gain is 2 cases in 9 | decide on `extract`; and a second `tools` run on another split (`--seed 1`) to see whether the gain reproduces |
-| §5b | The effort search, run on the talk's model, with `config.local.yaml` moved aside. Nothing has been run yet; the dev overlay sets every node to `none` on a different model, and a profile found there says nothing about Opus | `make gepa-config GEPA_ARGS=--probe-only` (~220k tokens), then `make gepa-config GEPA_ARGS='--pareto demo/gepa/config.pareto.json'` (~690k), then copy `tools/gepa/out/run/config/reflections.jsonl` and the stderr somewhere tracked before the next run wipes them |
+| §5b | The effort search, run on the talk's model, with `config.local.yaml` moved aside. Nothing has been run yet; the dev overlay sets every node to `none` on a different model, and a profile found there says nothing about Opus | `make gepa-config GEPA_ARGS=--probe-only` (~220k tokens), then `make gepa-config > demo/gepa/config.candidate.yaml` (~690k), then copy `tools/gepa/out/config.pareto.json`, `tools/gepa/out/config.run.txt` and `tools/gepa/out/run/config/reflections.jsonl` to `demo/gepa/` before the next run wipes them |
 | §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted, and for 5b where the seed's tokens went by node | `--probe-only` on either whole-turn target is the before half; it now prints the per-node split |
-| §6 | The overfit run on Opus, its three files committed | the command in section 6, after `make gepa-extract` has left a corpus in `tools/gepa/out/extract.jsonl` for `--resume` to reuse |
+| §6 | The overfit run on Opus, its three files committed | the command in section 6, after `make gepa-extract` has left a corpus in `tools/gepa/out/extract.jsonl` for `--resume` to reuse; then copy `extract-overfit.pareto.json` and `extract-overfit.run.txt` from `tools/gepa/out/` to `demo/gepa/` |
