@@ -1,4 +1,4 @@
-.PHONY: up down build migrate seed reset test test-live \
+.PHONY: up down build migrate seed reset reset-gepa test test-live \
         psql-agent psql-demo logs logs-agent logs-demo logs-api health \
         customer-count west-coast-customer-count cache turns config corpus \
         demo demo-verify langfuse-up langfuse-down langfuse-logs
@@ -125,6 +125,11 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #   make gepa-config-pareto                            a table
 #   make gepa-extract-overfit-pareto                   the overfit run's, with
 #                                                      its held-out table
+#   make gepa-extract-reset                            delete what the last run
+#   make gepa-extract-overfit-reset                    of that target left, so
+#   make gepa-tools-reset                              the next starts from
+#   make gepa-config-reset                             nothing
+#   make reset-gepa                                    all four of those
 #
 # Every run also leaves its whole terminal output in tools/gepa/out/<target>.run.txt:
 # the harvest, the split, the gate's verdicts, the diff. Copy that and the
@@ -140,16 +145,38 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
 
-# Above `gepa-%`, and it has to be: this make (3.81) takes the first pattern
-# rule that matches, and `gepa-%` matches `gepa-extract-pareto` too.
+# Both above `gepa-%`, and they have to be: this make (3.81) takes the first
+# pattern rule that matches, and `gepa-%` matches `gepa-extract-pareto` too.
 #
+# The command that produces a run's front, for the line that says to run it.
+# The overfit run is `make gepa-extract GEPA_ARGS=...`, not a target of its own.
+GEPA_RUN = $(if $(filter %-overfit,$1),\
+             make gepa-$(1:-overfit=) GEPA_ARGS=\"--overfit 3 --resume\",\
+             make gepa-$1)
+
 # The last run's front, from tools/gepa/out/ — every search writes one there
 # whether or not --pareto asked for a tracked copy. The overfit run is its
 # own name, so `make gepa-extract-overfit-pareto` is section 6's and this is
 # section 3's. A committed copy is a path to the module:
 #   uv run --group gepa python -m tools.gepa.front demo/gepa/extract.pareto.json
+#
+# Before any run, the file is not there. The person who typed this wants to
+# know what to type next, not where the file would have been.
 gepa-%-pareto:  ## the Pareto front from the last run of gepa-<target>, as a table
-	@uv run --group gepa python -m tools.gepa.front $(wildcard tools/gepa/out/$*.pareto.json)
+	@test -f tools/gepa/out/$*.pareto.json || { \
+	  echo "No front for $* yet. Run '$(strip $(call GEPA_RUN,$*))' first."; exit 1; }
+	@uv run --group gepa python -m tools.gepa.front tools/gepa/out/$*.pareto.json
+
+# Everything cli.py writes for one run name: the corpus, the front, the
+# transcript, and GEPA's run dir. The overfit run has no corpus of its own —
+# it reads extract's — so its reset leaves that alone by construction.
+gepa-%-reset:  ## delete what the last run of gepa-<target> left in tools/gepa/out/
+	rm -rf tools/gepa/out/$*.jsonl tools/gepa/out/$*.pareto.json \
+	       tools/gepa/out/$*.run.txt tools/gepa/out/run/$*
+
+# Phony, unlike the gepa-* rules: it is not a pattern, so the caveat above
+# does not apply, and `reset-gepa` does not match `gepa-%`.
+reset-gepa: gepa-extract-reset gepa-extract-overfit-reset gepa-tools-reset gepa-config-reset  ## all four
 
 gepa-%:  ## GEPA over one searchable thing: new text on stdout, progress on stderr
 	@$(GEPA) $* $(GEPA_ARGS)
