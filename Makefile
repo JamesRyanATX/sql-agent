@@ -116,6 +116,10 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #                                                      and where its tokens went
 #   make gepa-extract GEPA_ARGS=--probe-only           check the invariants
 #   make gepa-extract GEPA_ARGS='--pareto demo/gepa/extract.pareto.json'
+#   make gepa-extract GEPA_ARGS='--overfit 3 --resume'  guards off, on purpose:
+#                                                      three cases, the gate
+#                                                      reporting only, then
+#                                                      the held-out score
 #
 # `make gepa-tools` and `make gepa-config` cost real money and ask before they
 # spend any. Redirecting means nobody is there to agree, so they refuse unless

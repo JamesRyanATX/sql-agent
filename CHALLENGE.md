@@ -274,6 +274,14 @@ None of them fall out of a run by themselves.
   kept whatever it produces, then what the held-out cases say about the winner.
   "How it breaks when you let it overfit" is a demonstration. A talk that claims
   a failure mode without showing it is a talk that has not tested it.
+  **Built** as `--overfit N` on the search command: the N cases the seed does
+  worst on as both train and validation (GEPA ranks parents by the validation
+  set, so a validation set is not held out; and a random N proved to be cases
+  the seed already scored 0.996 on, leaving nothing to overfit), the gate
+  reporting and deciding nothing, and every pool candidate scored afterwards
+  on the cases the search never saw. The front's
+  file gains a `holdout` block with the training score, held-out score and
+  the count of unseen cases lost to the seed, per candidate.
 - **The metric rationale**, per term, plus the sensitivity result from item 5.
 
 ## Cost and confounds — decide before running

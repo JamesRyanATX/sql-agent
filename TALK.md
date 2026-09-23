@@ -11,7 +11,7 @@ This is the run sheet: what to say, what to type, what appears on screen, and
 what to do when it does not. Read the "Status" column before rehearsing —
 what is built and what is not changes as work lands, and the blocking work is
 named where it bites. Sections 1 to 5 have all been run against a live model;
-section 6 has not been built. What is missing before Nov 17 is a promotion —
+section 6 is built and has run only on the dev model. What is missing before Nov 17 is a promotion —
 both searches ran and neither produced one worth committing, for reasons the
 gap list names.
 
@@ -453,20 +453,51 @@ price table before it is honest. Not built.
 
 ## 6. How it breaks when you let it overfit — 3 min
 
-**Status: this is not built yet. It is a second search, run with the guards
-switched off.**
+**Status: built. `--overfit N` on the search command is the run with the
+guards off. Not yet run on Opus; the command and the files it leaves are in
+the gap list.**
 
 ### Say
 
-- Three training cases, the regression gate disabled, and a generous budget.
+- The three cases the seed does worst on as the whole training set, the
+  regression gate reporting but deciding nothing, and a generous budget. Same
+  prompt, same metric, same corpus as section 3. The worst three, because
+  that is what anyone tuning a prompt by hand reaches for, and because a
+  random three turned out to be ones the seed already scored 0.996 on, and a
+  search with no room finds nothing to overfit.
 - The winner scores beautifully and is worse. Here is what the held-out cases
   say about it.
-- The code names this failure before it happens: under twelve cases it warns
-  that GEPA will fit whichever questions happen to be in there. A metric is a
-  proxy, and a search is a machine for finding the gap between your proxy and
-  your intent.
+- The code names this failure before it happens: under twelve training cases
+  it warns that GEPA will fit whichever questions happen to be in there. A
+  metric is a proxy, and a search is a machine for finding the gap between
+  your proxy and your intent.
 - Which is why the gate exists, why it is outside the objective, and why the
   corpus is the expensive part of all of this.
+
+### Pre-baked
+
+```bash
+make gepa-extract GEPA_ARGS='--overfit 3 --resume --pareto demo/gepa/extract.overfit.pareto.json' \
+  > demo/gepa/extract.overfit.md 2> demo/gepa/extract.overfit.run.txt
+```
+
+`--resume` reuses the corpus section 3 searched; the run itself is fresh and
+keeps its own directory, so section 3's run is untouched. GEPA needs nothing
+switched off: it admits a candidate on a train-minibatch improvement and uses
+the validation set only to rank parents, so three cases overfit by default.
+What is switched off is ours.
+
+### Show, in this order, from the run's stderr
+
+1. The sweep that picks the three, then the warning: `3 cases is thin — GEPA
+   will fit whichever questions happen to be in here`.
+2. The front over three cases, where the winner looks excellent.
+3. The gate's `DISCARDED` lines, then `the gate reported and decided nothing`.
+4. The held-out table: training score beside held-out score, and on how many
+   unseen cases each candidate lost to the seed. The mean is the number a run
+   reports about itself; the count is what the gate would have read.
+5. The diff, which is where the prompt is seen naming the three questions it
+   trained on.
 
 ---
 
@@ -521,4 +552,4 @@ of `CHALLENGE.md` that specifies it.
 | §3, §5 | A promotion, committed. Both searches ran and neither produced one I would promote: `extract`'s winner is 3.6x longer and the metric cannot see length, `tools`' gain is 2 cases in 9 | a `length` term in `metric_extract.WEIGHTS`, then re-run; and a second `tools` run on another split to see whether the gain reproduces |
 | §5b | The effort search, run on the talk's model, with `config.local.yaml` moved aside. Nothing has been run yet; the dev overlay sets every node to `none` on a different model, and a profile found there says nothing about Opus | `make gepa-config GEPA_ARGS=--probe-only` (~220k tokens), then `make gepa-config GEPA_ARGS='--pareto demo/gepa/config.pareto.json'` (~690k), then copy `tools/gepa/out/run/config/reflections.jsonl` and the stderr somewhere tracked before the next run wipes them |
 | §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted, and for 5b where the seed's tokens went by node | `--probe-only` on either whole-turn target is the before half; it now prints the per-node split |
-| §6 | A second search with the gate disabled, kept whatever it produces | CHALLENGE, "What the talk has to show" |
+| §6 | The overfit run on Opus, its three files committed | the command in section 6, after `make gepa-extract` has left a corpus in `tools/gepa/out/extract.jsonl` for `--resume` to reuse |

@@ -13,6 +13,11 @@ What a target *is* — its seed, its corpus, its gate, how its winner is rendere
 
 Nothing is written to config/prompts/ or app/, and nothing is committed.
 
+`--overfit N` is the same run with the guards off: N cases as both train and
+validation, the gate reporting and deciding nothing, and afterwards every
+candidate in the pool scored on the cases the search never saw. It exists to
+be shown failing.
+
 Exit: 0 text is on stdout, 1 preflight, 2 the target has no metric, 3 nothing
 scored better than what is already there. Through `make` these all arrive as
 make's own 2 — an empty stdout is the portable signal.
@@ -32,7 +37,7 @@ from typing import Any
 import click
 
 from tools.gepa import targets
-from tools.gepa.gates import say
+from tools.gepa.gates import Survivor, say
 from tools.gepa.targets import Target
 
 # The tests' one monkeypatch point, hence the three paths below deriving from it.
@@ -83,6 +88,14 @@ def reflections(name: str) -> Path:
     type=click.Path(dir_okay=False, path_type=Path),
     help="also write the front here, somewhere tracked",
 )
+@click.option(
+    "--overfit",
+    type=int,
+    default=None,
+    metavar="N",
+    help="guards off: train and validate on N cases, gate reports only, "
+    "then score the pool on the rest",
+)
 def cli(
     target: str,
     verbose: bool,
@@ -94,6 +107,7 @@ def cli(
     days: int,
     yes: bool,
     pareto_to: Path | None,
+    overfit: int | None,
 ) -> None:
     """GEPA over one searchable thing. The new text goes to stdout.
 
@@ -114,25 +128,28 @@ def cli(
         with Loop() as loop:
             raise SystemExit(chosen.check(loop, yes))
 
-    _fresh_run_dir(chosen.name, resume)
-    cases = _not_too_thin(chosen.corpus(days=days, resume=resume, verbose=verbose))
-    trainset, valset = _split(cases, val_fraction, seed)
+    # An overfit run keeps its own run dir and front, so the real run's are
+    # not wiped by the demonstration of what the real run refuses to do. It
+    # is always fresh: `--resume` there means the last corpus and no more,
+    # which is what it wants — the same cases the real run searched.
+    run = f"{chosen.name}.overfit" if overfit is not None else chosen.name
+    _fresh_run_dir(run, resume and overfit is None)
+    cases = chosen.corpus(days=days, resume=resume, verbose=verbose)
     budget = chosen.budget if budget is None else budget
-    say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
+    holdout: list[Any] = []
+    seed_scores: list[float] | None = None
+    if overfit is not None:
+        _overfit_fits(cases, overfit)
+    else:
+        trainset, valset = _split(cases, val_fraction, seed)
+        say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
+        _not_too_thin(trainset)
+        _budget_covers(budget, valset)
 
-    # GEPA scores the seed over the whole valset before it proposes anything, so
-    # a budget that small buys a baseline and stops. The run then reports that
-    # GEPA proposed nothing, which reads as a saturated metric rather than as
-    # arithmetic. Said here, where it still costs nothing to change.
-    if budget <= len(valset):
-        say(
-            f"          {budget} calls against a {len(valset)}-case valset is "
-            f"the baseline evaluation and nothing else — raise --budget or "
-            f"lower --val-fraction",
-            fg="yellow",
-        )
-
-    _confirm(chosen, seed_candidate, cases, budget=budget, yes=yes)
+    _confirm(
+        chosen, seed_candidate, cases, budget=budget, yes=yes,
+        holdout=len(cases) - overfit if overfit is not None else 0,
+    )
 
     import gepa
 
@@ -140,7 +157,18 @@ def cli(
         adapter = chosen.adapter(loop)
         # Set here rather than by the target: where a run keeps its files is
         # the command's business, and every adapter has the attribute.
-        adapter.reflections = reflections(chosen.name)
+        adapter.reflections = reflections(run)
+
+        if overfit is not None:
+            # Needs the adapter, so it happens here: the seed is scored over
+            # the corpus and trained on the cases it does worst on.
+            trainset, holdout, seed_scores = _overfit_split(
+                adapter, seed_candidate, cases, overfit
+            )
+            valset = trainset
+            _not_too_thin(trainset)
+            _budget_covers(budget, valset)
+
         result = _search(
             gepa,
             adapter=adapter,
@@ -148,7 +176,7 @@ def cli(
             seed_candidate=seed_candidate,
             trainset=trainset,
             valset=valset,
-            node=chosen.name,
+            node=run,
             budget=budget,
             seed=seed,
             verbose=verbose,
@@ -159,6 +187,14 @@ def cli(
             f"search    {result.total_metric_calls} metric calls, "
             f"{len(result.candidates)} candidates in the pool"
         )
+        seed_index = _seed_index(result, seed_candidate)
+
+        # The cases the search never saw, scored for every candidate. On a
+        # pool of one there is only the seed, and the seed's own held-out
+        # score says nothing about overfitting.
+        unseen = None
+        if holdout and len(result.candidates) > 1:
+            unseen = _holdout(adapter, result, holdout, seed_index, seed_scores or [])
 
         # Before the empty-pool check below, not after. A run that ends with
         # NO_IMPROVEMENT is the one whose evidence is most worth keeping, and
@@ -168,8 +204,10 @@ def cli(
         _pareto(
             result,
             target=chosen,
-            seed_index=_seed_index(result, seed_candidate),
+            seed_index=seed_index,
             path=pareto_to,
+            name=run,
+            holdout=unseen,
         )
 
         # `skip_perfect_score` means a seed at the top of the metric is never
@@ -187,6 +225,22 @@ def cli(
         # The valset, not the whole corpus: GEPA keys its per-case scores by
         # position in what it was given to validate on.
         survivors = chosen.gate(loop, result, seed_candidate, valset)
+
+        if overfit is not None:
+            # The gate has said what it would have done. Now the run keeps
+            # whatever scored best on the cases it trained on, which is the
+            # demonstration: this is what a search does when nothing outside
+            # the objective is allowed to say no.
+            say("\noverfit   the gate reported and decided nothing", fg="yellow")
+            scores = result.val_aggregate_scores or []
+            survivors = sorted(
+                (
+                    Survivor(index=i, candidate=c, score=scores[i] if i < len(scores) else 0.0)
+                    for i, c in enumerate(result.candidates)
+                    if i != seed_index
+                ),
+                key=lambda s: -s.score,
+            )
 
     if not survivors:
         say(
@@ -254,6 +308,7 @@ def _confirm(
     *,
     budget: int,
     yes: bool,
+    holdout: int = 0,
 ) -> None:
     """Say what the run is about to spend, and ask.
 
@@ -275,6 +330,11 @@ def _confirm(
     say(f"  components  {components}, mutated round-robin: about "
         f"{budget // max(components, 1)} proposals each at this budget")
     say(f"  corpus      {len(cases)} cases")
+    if holdout:
+        say(
+            f"  held out    {holdout} cases, scored for every candidate in the "
+            f"pool once the search ends — about {holdout} rollouts per candidate"
+        )
     say(
         "\nEvery turn runs with the memory off: it reads nothing the agent has "
         "learned and saves nothing it learns. Nothing is written to app/ or "
@@ -312,14 +372,71 @@ def _fresh_run_dir(name: str, resume: bool) -> None:
     shutil.rmtree(directory)
 
 
-def _not_too_thin(cases: list[Any]) -> list[Any]:
-    if len(cases) < THIN_CORPUS:
+def _not_too_thin(trainset: list[Any]) -> list[Any]:
+    """The training set, not the corpus: it is what GEPA fits. A 37-case
+    corpus cut to three for an overfit run is thin, and the warning is the
+    line the talk quotes."""
+    if len(trainset) < THIN_CORPUS:
         say(
-            f"          {len(cases)} cases is thin — GEPA will fit whichever "
+            f"          {len(trainset)} cases is thin — GEPA will fit whichever "
             f"questions happen to be in here",
             fg="yellow",
         )
-    return cases
+    return trainset
+
+
+def _budget_covers(budget: int, valset: list[Any]) -> None:
+    """GEPA scores the seed over the whole valset before it proposes anything,
+    so a budget that small buys a baseline and stops. The run then reports that
+    GEPA proposed nothing, which reads as a saturated metric rather than as
+    arithmetic. Said here, where it still costs nothing to change."""
+    if budget <= len(valset):
+        say(
+            f"          {budget} calls against a {len(valset)}-case valset is "
+            f"the baseline evaluation and nothing else — raise --budget or "
+            f"lower --val-fraction",
+            fg="yellow",
+        )
+
+
+def _overfit_fits(cases: list[Any], n: int) -> None:
+    if n < 1:
+        raise click.ClickException("--overfit needs at least one case to train on")
+    if n >= len(cases):
+        raise click.ClickException(
+            f"--overfit {n} leaves nothing held out of {len(cases)} cases"
+        )
+
+
+def _overfit_split(
+    adapter, seed_candidate: dict[str, str], cases: list[Any], n: int
+) -> tuple[list[Any], list[Any], list[float]]:
+    """The N cases the seed does worst on, to train and validate on; the rest
+    never shown to the search; and the seed's score on every case.
+
+    Worst, not random. A random three were the first attempt, and the seed
+    scored 0.996 on them: nothing could beat its parent on the minibatch, so
+    nothing entered the pool and there was nothing to overfit. The cases it
+    does worst on are where a search has room, and they are what anyone
+    tuning a prompt by hand would reach for, which is the point.
+
+    GEPA admits a candidate on a train-minibatch improvement and ranks parents
+    by the validation set, so a validation set is not held out from selection.
+    The held-out cases are scored after the search, outside it, and the seed's
+    scores from this sweep are its held-out baseline: measured once, the same
+    way every other candidate will be.
+    """
+    say(f"\noverfit   the seed over all {len(cases)} cases, to find the {n} it does worst on")
+    scores = adapter.evaluate(cases, seed_candidate).scores
+    order = sorted(range(len(cases)), key=lambda i: scores[i])
+    train = [cases[i] for i in order[:n]]
+    rest = [cases[i] for i in order[n:]]
+    worst = ", ".join(f"{scores[i]:.3f}" for i in order[:n])
+    say(
+        f"split     {n} train (the seed's worst: {worst}), validated on the "
+        f"same {n}, {len(rest)} held out"
+    )
+    return train, rest, [scores[i] for i in order]
 
 
 def _split(
@@ -433,7 +550,15 @@ def _front(subscores: list[dict[str, float]], objectives: tuple[str, ...]) -> li
     ]
 
 
-def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None) -> None:
+def _pareto(
+    result,
+    *,
+    target: Target,
+    seed_index: int | None,
+    path: Path | None,
+    name: str | None = None,
+    holdout: dict | None = None,
+) -> None:
     """Write the front, and print it. Always to `out/`, and to `path` as well.
 
     `out/` is gitignored because a harvested case holds a recorded prompt. The
@@ -495,7 +620,10 @@ def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None
         ],
     }
 
-    written = [pareto(target.name)] + ([path] if path else [])
+    if holdout:
+        document["holdout"] = holdout
+
+    written = [pareto(name or target.name)] + ([path] if path else [])
     for destination in written:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
@@ -506,6 +634,64 @@ def _pareto(result, *, target: Target, seed_index: int | None, path: Path | None
     _front_table(document, objectives)
     for destination in written:
         say(f"          written {destination}")
+
+
+def _holdout(
+    adapter,
+    result,
+    cases: list[Any],
+    seed_index: int | None,
+    seed_all: list[float],
+) -> dict:
+    """Every candidate in the pool on the cases the search never saw.
+
+    Two numbers per candidate beside its training score: the mean over the
+    held-out cases, and on how many of them it scored below the seed. The mean
+    is the number a run would report about itself; the count is the one the
+    gate would have read, because a mean is exactly what lets a candidate buy
+    one bad case with several small wins.
+
+    `seed_all` is the seed's score on every case from the split's sweep, in
+    the split's order, so its tail is its score on exactly these cases. The
+    seed is not scored again: one measurement, made the way every other
+    candidate's is.
+    """
+    say(
+        f"\nholdout   {len(cases)} cases the search never saw, scoring "
+        f"{len(result.candidates)} candidates on them"
+    )
+    seed_scores = seed_all[len(seed_all) - len(cases):] if seed_all else []
+    per_case = [
+        seed_scores if i == seed_index else adapter.evaluate(cases, c).scores
+        for i, c in enumerate(result.candidates)
+    ]
+    train = result.val_aggregate_scores or []
+
+    rows: dict[int, dict[str, Any]] = {}
+    for i, scores in enumerate(per_case):
+        rows[i] = {
+            "train": round(train[i], 4) if i < len(train) else None,
+            "holdout": round(sum(scores) / len(scores), 4) if scores else None,
+            "worse_than_seed_on": (
+                sum(1 for s, t in zip(scores, seed_scores) if s < t)
+                if seed_scores and i != seed_index
+                else None
+            ),
+        }
+
+    say(f"\n          {'cand':>4}  {'train':>6}  {'holdout':>7}  worse than the seed on")
+    for i, row in rows.items():
+        train_cell = f"{row['train']:.3f}" if row["train"] is not None else "-"
+        held_cell = f"{row['holdout']:.3f}" if row["holdout"] is not None else "-"
+        if i == seed_index:
+            note = "seed"
+        elif row["worse_than_seed_on"] is None:
+            note = "no seed to compare with"
+        else:
+            note = f"{row['worse_than_seed_on']} of {len(cases)}"
+        say(f"          {i:>4}  {train_cell:>6}  {held_cell:>7}  {note}")
+
+    return {"cases": len(cases), "candidates": rows}
 
 
 def _front_table(document: dict, objectives: tuple[str, ...]) -> None:

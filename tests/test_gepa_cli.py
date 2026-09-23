@@ -570,3 +570,159 @@ def test_a_budget_smaller_than_the_valset_is_flagged_before_it_is_spent(
     )
 
     assert "the baseline evaluation and nothing else" in result.stderr
+
+
+# ------------------------------------------------------------------ overfit
+#
+# `--overfit N` is the run with the guards off, built to be shown failing:
+# train and validate on N cases, let the gate speak and ignore it, then score
+# the pool on the cases the search never saw. These say each guard really is
+# off, and that the number the talk needs — the held-out score — is produced
+# and written down.
+
+
+def search_kwargs(monkeypatch, argv: list[str]) -> tuple[dict, object]:
+    seen = {}
+
+    def record(gepa_module, **kwargs):
+        seen.update(kwargs)
+        return FakeResult([kwargs["seed_candidate"]], [1.0])
+
+    monkeypatch.setattr(gepa, "_search", record)
+    return seen, CliRunner().invoke(gepa.cli, argv)
+
+
+def test_overfit_trains_and_validates_on_the_same_n_cases(a_run, monkeypatch):
+    """GEPA ranks parents by the validation set, so a validation set is not
+    held out. The only honest shape is train == val == the N cases, with the
+    rest never shown to the search. And the thin warning fires on those N,
+    not on the corpus they were cut from."""
+    seen, result = search_kwargs(monkeypatch, ["extract", "--overfit", "3"])
+
+    assert len(seen["trainset"]) == 3
+    assert seen["valset"] is seen["trainset"]
+    assert seen["node"] == "extract.overfit", "its own run dir, not section 3's"
+    assert "the seed over all 8 cases, to find the 3 it does worst on" in result.stderr
+    assert "3 train (the seed's worst:" in result.stderr
+    assert "5 held out" in result.stderr
+    assert "3 cases is thin" in result.stderr
+
+
+def test_overfit_trains_on_the_cases_the_seed_does_worst_on(a_run, monkeypatch):
+    """A random three were the first attempt, and the seed scored 0.996 on
+    them: nothing could beat its parent, so nothing was searched. The worst
+    are where a search has room, and what a person would pick by hand."""
+    from tests.test_gepa_adapter import CENSUS_OUTPUT
+
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "extract",
+        dataclasses.replace(
+            targets.EXTRACT,
+            corpus=lambda **kwargs: [
+                ExtractCase.authored(
+                    name=f"case-{i}",
+                    question="what was revenue last quarter?",
+                    sql=SQL,
+                    findings=f"[(1234.50,)]  -- case-{i}",
+                )
+                for i in range(8)
+            ],
+        ),
+    )
+
+    async def worse_on_odd_cases(**kwargs):
+        # The findings reach the model in the user message, and carry the
+        # case's name; the seed is made to record a census on the odd ones.
+        sent = json.dumps(kwargs.get("messages", []))
+        odd = any(f"case-{i}" in sent for i in (1, 3, 5))
+        return llm.Result(
+            text=json.dumps(CENSUS_OUTPUT if odd else GOOD_OUTPUT),
+            stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", worse_on_odd_cases)
+    seen, _ = search_kwargs(monkeypatch, ["extract", "--overfit", "3"])
+
+    assert sorted(c.name for c in seen["trainset"]) == ["case-1", "case-3", "case-5"]
+
+
+def test_the_held_out_cases_are_scored_for_every_candidate_and_written(
+    a_front, tmp_path
+):
+    """The number the section exists for. Every candidate in the pool, the
+    seed included, on the cases the search never saw; on stderr as a table and
+    in the front's file as a block, at the overfit path — the real run's front
+    is not touched."""
+    result = CliRunner().invoke(gepa.cli, ["extract", "--overfit", "3"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "5 cases the search never saw" in result.stderr
+    assert "worse than the seed on" in result.stderr
+    assert "decided nothing" in result.stderr
+
+    written = json.loads((tmp_path / "extract.overfit.pareto.json").read_text())
+    assert written["holdout"]["cases"] == 5
+    assert set(written["holdout"]["candidates"]) == {"0", "1", "2", "3"}
+    assert written["holdout"]["candidates"]["0"]["train"] == 0.8
+    assert written["holdout"]["candidates"]["1"]["holdout"] is not None
+    assert not (tmp_path / "extract.pareto.json").exists()
+
+
+def test_a_candidate_the_gate_discards_still_reaches_stdout(a_run, monkeypatch):
+    """The gate says what it would have done, in red, and the run keeps the
+    candidate anyway: that is the demonstration. The model here honours the
+    invariants under the seed and records a census under the candidate, so
+    the gate really does fail it — and the held-out sweep, scored the same
+    way, says it lost every unseen case to the seed."""
+    from tests.test_gepa_adapter import CENSUS_OUTPUT
+
+    async def cheats_under_the_candidate(**kwargs):
+        cheating = kwargs.get("system", "").startswith(BETTER)
+        return llm.Result(
+            text=json.dumps(CENSUS_OUTPUT if cheating else GOOD_OUTPUT),
+            stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", cheats_under_the_candidate)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--overfit", "3"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "DISCARDED" in result.stderr, "the gate spoke"
+    assert "decided nothing" in result.stderr, "and was ignored"
+    assert result.stdout == BETTER + "\n", "kept whatever it produced"
+    assert "5 of 5" in result.stderr, "and the unseen cases say it is worse"
+
+
+@pytest.mark.parametrize(
+    "n, reason",
+    [("0", "at least one case"), ("8", "leaves nothing held out")],
+)
+def test_overfit_refuses_a_split_with_nothing_on_one_side(a_run, monkeypatch, n, reason):
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("a search was started")
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--overfit", n])
+
+    assert result.exit_code == 1
+    assert reason in result.output
+
+
+def test_the_thin_warning_is_about_the_training_set(a_run, monkeypatch):
+    """It used to look at the corpus, which would stay silent on a 37-case
+    corpus cut to three. What GEPA fits is the training set."""
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "extract",
+        dataclasses.replace(
+            targets.EXTRACT, corpus=lambda **kwargs: [_case(i) for i in range(20)]
+        ),
+    )
+
+    _, normal = search_kwargs(monkeypatch, ["extract"])
+    assert "is thin" not in normal.stderr, "14 train cases is not thin"
+
+    _, thin = search_kwargs(monkeypatch, ["extract", "--val-fraction", "0.9"])
+    assert "2 cases is thin" in thin.stderr
