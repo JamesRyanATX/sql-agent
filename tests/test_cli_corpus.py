@@ -1,7 +1,7 @@
 """Nineteen questions, cold each time, certified against a written answer.
 
-What matters here is not the asking — `turn.take` is the same code `ask` runs,
-tested in test_cli_feedback.py. It is everything around it that can waste a run:
+What matters here is not the asking — `turn.take` is the same code `ask` runs.
+It is everything around it that can waste a run:
 a preflight that lets the run start when the verdicts have nowhere to go, a
 comparison that calls a right answer wrong, a summary that lies about what was
 scored.
@@ -17,12 +17,41 @@ anything, which is the command's whole point.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
 from sql_agent import corpus, http
 from sql_agent import turn as turn_mod
-from tests.test_cli_feedback import ANSWER, Stream
+
+ANSWER = {
+    "type": "answer",
+    "text": "1,840 active customers.",
+    "tokens_in": 215,
+    "tokens_out": 190,
+    "total_tokens": 405,
+    "latency_ms": 6600,
+    "explored": True,
+    "turn_id": 7,
+    "trace_id": "0123456789abcdef" * 2,
+}
+
+
+class Stream:
+    """The real stream with a chosen answer to `isatty`.
+
+    Wrapping rather than replacing, because `click.echo` still writes to
+    whatever this stands in for, and pytest is still capturing it.
+    """
+
+    def __init__(self, real, tty: bool) -> None:
+        self._real, self._tty = real, tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 # Two cases: one with a written answer, one without. Enough to exercise both
 # branches without a directory that takes a screenful to read.
@@ -204,11 +233,8 @@ async def test_a_case_with_no_written_answer_is_asked_and_not_scored(scripted, c
 
 
 async def test_nobody_is_asked_anything(scripted, monkeypatch):
-    """The whole reason this exists beside `sql-agent ask`. A prompt here would
-    hang `make corpus` in CI and nothing would say why."""
-    monkeypatch.setattr(
-        turn_mod.render, "choose", lambda *a, **kw: pytest.fail("it asked")
-    )
+    """A prompt here would hang `make corpus` in CI and nothing would say why.
+    `ask`'s own menu is gone; this is the one prompt left to guard against."""
     monkeypatch.setattr(
         corpus.click, "confirm", lambda *a, **kw: pytest.fail("it asked")
     )
@@ -221,8 +247,8 @@ async def test_nobody_is_asked_anything(scripted, monkeypatch):
 async def test_it_runs_with_no_terminal_at_all(scripted, monkeypatch):
     """`make corpus > log` and every CI job. The old command refused here,
     because somebody had to answer it; this one has nobody to ask."""
-    monkeypatch.setattr(turn_mod.sys, "stdin", Stream(turn_mod.sys.stdin, False))
-    monkeypatch.setattr(turn_mod.sys, "stdout", Stream(turn_mod.sys.stdout, False))
+    monkeypatch.setattr(sys, "stdin", Stream(sys.stdin, False))
+    monkeypatch.setattr(sys, "stdout", Stream(sys.stdout, False))
 
     await run(scripted)
 

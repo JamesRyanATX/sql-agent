@@ -75,16 +75,11 @@ def cli() -> None:
 @click.option("-v", "--verbose", is_flag=True, help="Show planning, exploration and what was learned.")
 @click.option("--json", "as_json", is_flag=True, help="One raw event per line, unstyled.")
 @click.option(
-    "--no-feedback",
-    is_flag=True,
-    help="Don't ask what you thought of the answer.",
-)
-@click.option(
     "--no-memory",
     is_flag=True,
     help="Ignore what the agent has learned, and keep nothing it learns.",
 )
-def ask(question, verbose, as_json, no_feedback, no_memory) -> None:
+def ask(question, verbose, as_json, no_memory) -> None:
     """Ask a question. This is what you get by default, so `ask` is optional."""
     if verbose and as_json:
         raise click.UsageError("--json and --verbose are two renderers; pick one")
@@ -104,14 +99,13 @@ def ask(question, verbose, as_json, no_feedback, no_memory) -> None:
             f"(to ask it as a question: sql-agent ask {joined!r})"
         )
 
-    http.run(_ask(joined, verbose, as_json, no_feedback, no_memory))
+    http.run(_ask(joined, verbose, as_json, no_memory))
 
 
 async def _ask(
     question: str,
     verbose: bool,
     as_json: bool,
-    no_feedback: bool = False,
     no_memory: bool = False,
 ) -> None:
     taken = await turn.take(
@@ -123,9 +117,6 @@ async def _ask(
     # `make demo` record a crash as a good take.
     if taken.fatal:
         raise SystemExit(1)
-
-    if not no_feedback and not as_json and turn.askable(taken.answered):
-        await turn.judge(taken.answered)
 
 
 # Registered here rather than imported at the top: the command modules import

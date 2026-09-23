@@ -134,7 +134,6 @@ SQL_AGENT_API_KEY=...                    # only if the server has API_TOKEN set
 # Ask. The subcommand is optional — a bare argument is a question.
 sql-agent "how many customers do we have?"
 sql-agent -v "how many customers are in the west region?"   # show the work
-sql-agent --no-feedback "how many customers do we have?"    # don't ask me
 sql-agent --no-memory "how many customers do we have?"      # ignore the memory
 
 # What it learned and what each turn cost.
@@ -149,21 +148,19 @@ sql-agent reset
 sql-agent config
 ```
 
-With tracing on, an answered question ends in a two-line menu asking whether that
-was right, and a wrong one asks what could be improved. Both go onto the turn's
-trace as a score named `correct`. `--no-feedback` skips it, and nothing is asked
-when tracing is off or when either stream is redirected.
-
-`make corpus` files the same verdicts without asking you. It reads
-`demo/golden/`, where each case holds a question and — where `demo/demo.sql`
-fixes the number — the answer written beside it, asks each question with the
-memory off, and compares. Nine of the nineteen get a verdict that way; the rest
-have no written answer because theirs moves with the date, and they are asked
-anyway because their traces are what a later harvest reads.
+With tracing on, `make corpus` files a verdict on each turn's trace as a score
+named `correct`. It reads `demo/golden/`, where each case holds a question
+and — where `demo/demo.sql` fixes the number — the answer written beside it,
+asks each question with the memory off, and compares. Nine of the nineteen get
+a verdict that way; the rest have no written answer because theirs moves with
+the date, and they are asked anyway because their traces are what a later
+harvest reads.
 
 A verdict from `corpus` is **certified** rather than human: somebody wrote the
-reference once and a machine applied it. What lands on the trace is identical
-either way, deliberately, so nothing downstream has to care which produced it.
+reference once and a machine applied it. The same endpoint,
+`POST /v1/turns/{id}/feedback`, takes a verdict from anyone, and what lands on
+the trace is one shape whoever produced it. `sql-agent ask` used to offer a
+menu after every answer; it was removed because nothing read what it filed.
 The questions are aimed at the traps in `demo/demo.sql`, because a corpus the
 agent already answers perfectly measures nothing.
 

@@ -77,16 +77,16 @@ def test_a_flag_works_on_either_side_of_the_question(spy, argv):
     `args[0] not in commands` rule."""
     assert invoke(argv)[0] == 0
     assert spy["command"] == "ask"
-    assert spy["args"] == ("how many customers?", True, False, False, False)
+    assert spy["args"] == ("how many customers?", True, False, False)
 
 
 def test_ask_is_how_you_ask_a_question_that_is_a_command(spy):
     """Same string, two meanings, and the only way to pick the other one."""
     assert invoke(["ask", "cache"])[0] == 0
-    # question, verbose, as_json, no_feedback, no_memory
+    # question, verbose, as_json, no_memory
     assert spy == {
         "command": "ask",
-        "args": ("cache", False, False, False, False),
+        "args": ("cache", False, False, False),
         "kwargs": {},
     }
 
@@ -147,6 +147,6 @@ def test_no_memory_is_a_flag_on_ask_and_nothing_else(spy):
     """The optimiser's one question-shaped need. It has to reach `_ask` as a
     value, because a flag that parsed and did nothing would still exit 0."""
     assert invoke(["--no-memory", "how many customers?"])[0] == 0
-    assert spy["args"] == ("how many customers?", False, False, False, True)
+    assert spy["args"] == ("how many customers?", False, False, True)
 
     assert invoke(["cache", "--no-memory"])[0] == 2

@@ -23,7 +23,6 @@ Settle this first, because it decides whether the talk fits.
 |---|---|---|
 | A cold turn (T1) | ~34s | One question, one answer |
 | Two cached turns (T2, T3) | ~8s, ~6s | The payoff, and it is fast |
-| One question + a typed verdict | ~40s | The human-in-the-loop beat |
 | `gepa-extract --probe-only` | ~30s | Four probes, four model calls |
 | Reading artifacts and diffs | instant | Files |
 
@@ -156,11 +155,12 @@ The GIF. It is the same script, recorded, with real numbers.
 
 ---
 
-## 2. A corpus from traces, and the human in it — 6 min
+## 2. A corpus from traces, and the human in it — 5 min
 
-**Status: both halves are built. `sql-agent ask` has the menu, `make corpus`
-files the computed verdicts, and both have been run against the live model. No
-reader consumes the verdicts yet — say so, it is the honest part of the story.**
+**Status: built and run against the live model. `make corpus` asks the nineteen
+golden questions and files a verdict on each trace. There was a menu after
+every `sql-agent ask` answer; it was removed, because nothing read what it
+filed. The human in this loop wrote the reference queries.**
 
 ### Say
 
@@ -170,62 +170,41 @@ reader consumes the verdicts yet — say so, it is the honest part of the story.
   are OpenTelemetry spans; Langfuse is where they land, and where the harvest
   reads them back.
 - What a trace does not hold is whether the answer was **right**. That is the
-  one thing no machine here can supply, and it is the entire reason a human is
-  in this loop.
+  one thing no machine here can supply, and it is where the human is in this
+  loop: not pressing a key after each answer, but writing down what the answer
+  should be.
 
 ### Type
-
-```bash
-sql-agent "how many customers are in the west region?"
-```
-
-One question, cold. When the answer lands:
-
-```
-Was that right?
-❯ 1. OK
-  2. Not OK
-```
-
-Choose `2` on a question you know it got wrong, and type a real reason.
-
-### Say, while it files
-
-- The verdict goes onto that turn's trace, beside the tool calls and the SQL,
-  as a score named `correct` with your prose as its comment.
-- That prose lands in the same field the metric's own feedback lands in, which
-  is the point: by the time GEPA reads it, nothing distinguishes what a person
-  wrote from what a metric wrote.
-
-### Then, the other way to get one
 
 ```bash
 make corpus
 ```
 
-- The label is only unautomatable where nobody knows the answer. For the demo I
-  do: `demo/golden/` holds a reference query per question, and nine of them
-  carry the number `demo/demo.sql` fixes. So this asks all nineteen and
-  compares, unattended.
-- Be precise about what that means. **I still wrote the labels** — I wrote
-  nineteen reference queries instead of pressing `1` nineteen times. The human
-  effort moved; it did not vanish. You can automate the verdict exactly when
-  you already have ground truth, and getting ground truth is the expensive
-  part. A customer's warehouse does not come with it.
+Pre-baked the night before; on stage, show the table it printed and one trace.
+
+- `demo/golden/` holds a reference query per question, and nine of them carry
+  the number `demo/demo.sql` fixes. This asks all nineteen with the memory off,
+  compares the rows against the written answer, and files the verdict on the
+  turn's trace as a score named `correct`, beside the tool calls and the SQL.
+- Be precise about what that means. **I still wrote the labels.** I wrote
+  nineteen reference queries instead of judging nineteen answers one at a
+  time. The human effort moved; it did not vanish. You can automate the verdict
+  exactly when you already have ground truth, and getting ground truth is the
+  expensive part. A customer's warehouse does not come with it.
 - The other ten have no written answer because theirs moves with the date.
   They are asked anyway: their traces are what the harvest reads.
+- The questions are aimed at the traps on purpose. A corpus the agent already
+  answers perfectly measures nothing, because a candidate cannot win where the
+  seed already wins. Measured on the dev model, the seed gets 10 of 19; the
+  Opus figure comes from the probe in the gap list.
 
-Then, in Langfuse: the scores on the traces, one typed by hand and nine
-computed, indistinguishable in the same field.
+Then, in Langfuse: one trace, the score on it, in the same field a metric's
+own feedback goes into.
 
 - **What nothing does yet: read them back.** The corpus the optimiser trains on
   was authored by hand, not harvested from these verdicts. The verdict is
   recorded where a metric's own feedback is recorded, and that is where a human
   correction would enter. Say that, and no more.
-- The questions are aimed at the traps on purpose. A corpus the agent already
-  answers perfectly measures nothing, because a candidate cannot win where the
-  seed already wins. Measured on the dev model, the seed gets 10 of 19; the
-  Opus figure comes from the probe in the gap list.
 
 ---
 
@@ -560,16 +539,16 @@ What is switched off is ours.
 |---|---|---:|
 | — | Open, the claim | 2 |
 | 1 | The agent, and why it gets cheaper | 7 |
-| 2 | A corpus from traces, and the human in it | 6 |
+| 2 | A corpus from traces, and the human in it | 5 |
 | 3 | GEPA on one node's prompt | 7 |
 | 4 | The Pareto frontier | 3 |
 | 5 | Things that do not look like prompts | 6 |
 | 6 | How it breaks when you let it overfit | 3 |
 | 7 | Close | 2 |
-| — | **Slack** | **–1** |
+| — | **Slack** | **0** |
 
-Thirty-six against a thirty-five minute slot, so something gives. Section 4 is
-the one to cut to two minutes; section 6 is the one never to cut, because a talk
+Thirty-five exactly, with no slack, so if anything runs long section 4 is the
+one to cut to two minutes; section 6 is the one never to cut, because a talk
 that claims a failure mode without showing it has not tested it.
 
 ## When it goes wrong
@@ -579,7 +558,7 @@ that claims a failure mode without showing it has not tested it.
 | No network, or the API is unreachable | Switch to `demo/demo.gif`. Same script, real numbers, recorded. |
 | A turn hangs past ~60s | Keep talking through the architecture; the cost line lands when it lands. Do not Ctrl-C into a dead terminal. |
 | The log says `rate limited`, waiting | Not a hang. The client retries up to six times with waits of up to a minute each. Same advice: keep talking. |
-| A live turn answers **wrong** | Take it. That is section 2's whole argument, arriving early: press `2`, say why, and point out that the verdict just became training data. |
+| A live turn answers **wrong** | Take it. Say what the right answer is and why the SQL missed it; that is section 2's argument arriving early, that the answer key is the part only a person can write. |
 | Langfuse shows nothing | Traces take seconds to ingest, and the read path is not the write path. Move on and show the pre-baked traces. |
 | `make corpus` refuses to start | It preflights one thing: tracing on, because a verdict needs somewhere to land. Run `make config` and read the tracing line. |
 | The cache is not empty at T1 | `make reset`. It empties the memory and reseeds the demo database. |

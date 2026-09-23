@@ -60,7 +60,7 @@ The demo (`demo/demo.sql`) encodes five intentional pitfalls; tests in `tests/te
 
 ## Observability
 Langfuse tracing is enabled only when both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set. No partial enablement. Traces capture system prompts, model generations, SQL statements, and row counts.  
-A user verdict on a turn (`POST /v1/turns/{id}/feedback`, or the menu `sql-agent ask` shows) is a Langfuse score named `correct`, with any prose as its comment. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
+A verdict on a turn (`POST /v1/turns/{id}/feedback`, which `make corpus` calls) is a Langfuse score named `correct`, with any prose as its comment. `sql-agent ask` no longer asks for one: nothing read what the menu filed. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
 
 ## Prompt Management
 Prompts live in `config/prompts/*.md`. Each file is the full prompt for a graph node; loading is memoised per process. Missing or empty prompts raise errors. The loader (`app/prompts.py`) reads from `$CONFIG_DIR/prompts/<node>.md`.

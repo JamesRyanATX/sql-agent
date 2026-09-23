@@ -97,6 +97,13 @@ that in the file, or someone will apply the ignore rule by analogy and delete it
 
 ### 2. The label — asked at the prompt, not collected later
 
+**Built, then removed.** The menu shipped, TTY-gated with `--no-feedback` to
+suppress it, and drove nothing: no search read what it filed, and the abstract
+promises "where the human belongs in the loop", not that a keystroke becomes
+training data. A keystroke that changes nothing is a chore, so the menu is
+gone. The endpoint in item 3 stays, and `make corpus` is its one caller. The
+rest of this item is the original specification, kept for the reasoning.
+
 The step the abstract promises and the one nobody can automate. It belongs in the
 product, one keystroke after the answer it is about:
 
@@ -154,7 +161,7 @@ Small, but real code, and it crosses two boundaries the repo defends.
   pipe must not sit waiting on a keystroke. When tracing is off there is nowhere
   durable to put a score, so the prompt does not appear — the turn table is wiped
   by `make reset`, which is `harvest.py`'s own argument for Langfuse being the
-  home.
+  home. (Moot since the menu was removed; the endpoint and its 409 remain.)
 
 ### 4. Whole-turn replay — `tools/gepa/replay_turn.py`
 
