@@ -267,8 +267,11 @@ None of them fall out of a run by themselves.
   same field. The input half is now written beside every run as
   `tools/gepa/out/run/<target>/reflections.jsonl` — one line per reflection,
   the candidate and exactly the records the teacher was handed. GEPA's own log
-  kept only the proposals. The human-typed triplet still waits on item 2's
-  reader. This is the slide that answers "how is this not
+  kept only the proposals. The human-typed triplet is not owed: the abstract
+  promises "where the human belongs in the loop", which the verdict at the
+  prompt, the pick from the front and the promotion diff all show, and not
+  that a verdict becomes training data. It stays a screenshot of the same
+  field in Langfuse. This is the slide that answers "how is this not
   gradient descent, and why does it still have a direction".
 - **A deliberate overfit run.** Three training cases, regression gate disabled,
   kept whatever it produces, then what the held-out cases say about the winner.

@@ -1,0 +1,37 @@
+Iteration 0: Base program full valset score: 0.2222222222222222 over 9 / 9 examples
+Iteration 1: Selected program 0 score: 0.2222222222222222
+Iteration 1: Proposed new text for list_tables: Use `list_tables` at most once, at the start of a task, when the available tables are unknown or the request’s table is ambiguous; it returns only table names and column counts. Skip it when the relevant table is already named or known, and never repeat it after it has returned—use `describe_table` for columns and relationships and the data tools for values.
+Iteration 1: New subsample score 0.9906385281385282 is not better than old score 1.0, skipping
+Iteration 2: Selected program 0 score: 0.2222222222222222
+Iteration 2: Proposed new text for describe_table: Call this once for each table that is directly relevant to the requested query when you need its columns, types, nullability, row count, or primary/foreign-key relationships; use the `table` argument. Do not call it for unrelated or merely possible tables, to discover data values or business meanings, or repeat it for a table already described.
+Iteration 2: New subsample score 0.9930456490727532 is not better than old score 1.0, skipping
+Iteration 3: Selected program 0 score: 0.2222222222222222
+Iteration 3: Proposed new text for sample_column: Use this to inspect a column’s limited distinct values and NULL-row count only when those values are needed to resolve an ambiguity in the question or a predicate (for example, whether a non-NULL `deleted_at` denotes deletion). Do not call it for a straightforward row/entity count, to invent an unrequested population filter from a status column, or when `count_distinct` can directly return counts for each value.
+Iteration 3: New subsample score 1.9538925857104088 is not better than old score 2.0, skipping
+Iteration 4: Selected program 0 score: 0.2222222222222222
+Iteration 4: Proposed new text for count_distinct: Use when the user asks for a frequency breakdown of a column—how many rows have each distinct value, especially to understand a categorical column. Do not use it for a total row count or for counting rows matching a known condition, including a boolean or other yes/no value; use filtering and ordinary aggregation instead.
+Iteration 4: Accepted candidate (subsample score 2.0 -> 2.9992318600803594); running full eval.
+Iteration 4: Found a better program on the valset with score 0.44338494066859924.
+Iteration 4: Valset score for new program: 0.44338494066859924 (coverage 9 / 9)
+Iteration 4: Val aggregate for new program: 0.44338494066859924
+Iteration 4: Individual valset scores for new program: {0: 0.0, 1: 0.0, 2: 0.9993174726989079, 3: 0.0, 4: 0.9911469933184855, 5: 0.0, 6: 0.0, 7: 1.0, 8: 1.0}
+Iteration 4: Objective aggregate scores for new program: {'correct': 0.4444444444444444, 'cost': 0.44020642934106374, 'tool_calls': 0.4444444444444444}
+Iteration 4: New valset pareto front scores: {0: 0.0, 1: 0.0, 2: 0.9993174726989079, 3: 0.0, 4: 1.0, 5: 0.0, 6: 0.0, 7: 1.0, 8: 1.0}
+Iteration 4: Objective pareto front scores: {'correct': 0.4444444444444444, 'cost': 0.44020642934106374, 'tool_calls': 0.4444444444444444}
+Iteration 4: Valset pareto front aggregate score: 0.44436860807765644
+Iteration 4: Updated valset pareto front programs: {0: {0, 1}, 1: {0, 1}, 2: {1}, 3: {0, 1}, 4: {0}, 5: {0, 1}, 6: {0, 1}, 7: {1}, 8: {0, 1}}
+Iteration 4: Updated objective pareto front programs: {'correct': {1}, 'cost': {1}, 'tool_calls': {1}}
+Iteration 4: Best valset aggregate score so far: 0.44338494066859924
+Iteration 4: Best program as per aggregate score on valset: 1
+Iteration 4: Best score on valset: 0.44338494066859924
+Iteration 4: Linear pareto front program index: 1
+Iteration 4: New program candidate index: 1
+Iteration 5: Selected program 0 score: 0.2222222222222222
+Iteration 5: Proposed new text for list_tables: Call this once when the relevant table is unknown or ambiguous and you need an inventory of available tables and their column counts. Skip it when the question clearly identifies the relevant table(s), and do not repeat it; it does not provide column definitions or data, so use `describe_table` only for relevant tables rather than unrelated ones.
+Iteration 5: New subsample score 0.9922135045173561 is not better than old score 1.9990489776509748, skipping
+Iteration 6: Selected program 1 score: 0.44338494066859924
+Iteration 6: Proposed new text for list_tables: Use once at the start of a request when the available tables are unknown or the question may involve several tables; it lists all table names and column counts. Skip it when the relevant table is already clear, and never call it again after it returns—describe only the tables needed to answer the question.
+Iteration 6: New subsample score 1.9735366333422348 is not better than old score 2.0, skipping
+Iteration 7: Selected program 0 score: 0.2222222222222222
+Iteration 7: Proposed new text for describe_table: Show a table’s columns, types, nullability, row count, primary key, and foreign keys. Call this once for each table directly needed by the user’s question when its schema or join details are unknown; do not call it for speculative or irrelevant tables, or repeat it after the table’s schema is known. Use `count_distinct` or `sample_column` to inspect actual values or distributions instead.
+Iteration 7: New subsample score 1.9765015174408922 is not better than old score 1.9961293260473587, skipping

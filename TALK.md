@@ -10,10 +10,10 @@ Agent Loop Chicago, **Nov 17**. 35 minutes, live, with a computer.
 This is the run sheet: what to say, what to type, what appears on screen, and
 what to do when it does not. Read the "Status" column before rehearsing —
 what is built and what is not changes as work lands, and the blocking work is
-named where it bites. Sections 1 to 5 have all been run against a live model;
-section 6 is built and has run only on the dev model. What is missing before Nov 17 is a promotion —
-both searches ran and neither produced one worth committing, for reasons the
-gap list names.
+named where it bites. Sections 1 to 4 and 5a have run on the talk's model; 5b
+and 6 are built and have run only on the dev model. What is missing before
+Nov 17 is those two runs on Opus, and a promotion: three searches have run and
+none produced one worth committing, for reasons the gap list names.
 
 ## Live, or pre-baked
 
@@ -32,7 +32,7 @@ Settle this first, because it decides whether the talk fits.
 | Recording all nineteen golden cases | ~5 min | Nineteen cold turns, unattended |
 | `gepa-tools` or `gepa-config --probe-only` | ~20 min | Nineteen cold turns, one per golden case; the same turns either way |
 | Every GEPA search | 20 min – 2 hrs | 60–150 metric calls |
-| The overfit run | ~15 min | A second search |
+| The overfit run | ~15 min | The seed over the corpus, a second search, then every candidate on the held-out cases |
 
 **Say this out loud.** A search that takes an hour is not a broken demo, it is
 what optimisation costs. The artifacts are the evidence; the live turns are the
@@ -166,7 +166,9 @@ reader consumes the verdicts yet — say so, it is the honest part of the story.
 
 - To improve any of those prompts I need examples with a verdict on them. The
   traces already hold nearly everything: the question, every tool call and its
-  arguments, the SQL that ran, which prompt produced the turn, the tokens.
+  arguments, the SQL that ran, which prompt produced the turn, the tokens. They
+  are OpenTelemetry spans; Langfuse is where they land, and where the harvest
+  reads them back.
 - What a trace does not hold is whether the answer was **right**. That is the
   one thing no machine here can supply, and it is the entire reason a human is
   in this loop.
@@ -217,22 +219,25 @@ Then, in Langfuse: the scores on the traces, one typed by hand and nine
 computed, indistinguishable in the same field.
 
 - **What nothing does yet: read them back.** The corpus the optimiser trains on
-  was authored by hand, not harvested from these verdicts. Closing that loop —
-  an approved turn becoming a golden case, with the SQL that turn ran as its
-  reference — is the next thing on the list and it is the flywheel this talk is
-  named after. Better to say that than to imply a loop that is not joined.
+  was authored by hand, not harvested from these verdicts. The verdict is
+  recorded where a metric's own feedback is recorded, and that is where a human
+  correction would enter. Say that, and no more.
 - The questions are aimed at the traps on purpose. A corpus the agent already
   answers perfectly measures nothing, because a candidate cannot win where the
-  seed already wins. Measured: the seed gets 10 of 19.
+  seed already wins. Measured on the dev model, the seed gets 10 of 19; the
+  Opus figure comes from the probe in the gap list.
 
 ---
 
 ## 3. GEPA on one node's prompt — 7 min
 
-**Status: run, on a real corpus of 37 cases harvested from the corpus run. The
-winner scores 0.989 against the seed's 0.958 and clears all four probes. Not
-promoted: it is 3.6 times longer than the seed and the metric cannot see prompt
-length. That is section 4's punchline, so hold it until then.**
+**Status: run twice on a corpus of 37 cases harvested from traces. The first
+run's winner scored 0.989 against the seed's 0.958, cleared all four probes,
+and was 3.6 times longer than the seed, which no term could see. The second
+run, with a length term in the metric, is the one at
+`demo/gepa/extract.pareto.json`: its survivor scores 0.966 against the seed's
+0.966, 64% longer. Neither is promoted. That is section 4's punchline, so hold
+it until then.**
 
 ### Say
 
@@ -267,7 +272,7 @@ each other silently, and the upsert reports success either way.
 
 ### Say, on the metric
 
-The five terms are the ones named in every artifact this talk shows, so put
+The six terms are the ones named in every artifact this talk shows, so put
 them up once and leave them up:
 
 | term | weight | scores | what goes wrong without it |
@@ -275,8 +280,9 @@ them up once and leave them up:
 | `grounding` | 0.35 | the share of recipes whose SQL fragment really is a fragment of the query that ran, **and** says enough to be wrong | a recipe claims something the query never did, and every later question composes on it |
 | `census` | 0.25 | the share of claims that are not a count or a percentage | "we have 1,840 customers" is right today and wrong forever, and nothing revisits it |
 | `names` | 0.20 | the share of entries that do not overwrite, paraphrase or collide with a filed name | the upsert reports success either way, so the only symptom is a later answer built from the wrong recipe |
-| `shape` | 0.10 | how close the batch is to 2–6 entries, and claims under 200 characters | the cache is re-sent in full on every turn, so each entry is a bill that recurs |
-| `cost` | 0.10 | output tokens against what this same case cost when it was recorded | a prompt that pads what it writes is paid for on every turn, and no other term here notices |
+| `shape` | 0.05 | how close the batch is to 2–6 entries, and claims under 200 characters | the cache is re-sent in full on every turn, so each entry is a bill that recurs |
+| `cost` | 0.05 | output tokens against what this same case cost when it was recorded | a prompt that pads what it writes is paid for on every turn, and no other term here notices |
+| `length` | 0.10 | what the model was sent, which is mostly the prompt, against the seed | the prompt is free and nothing opposes adding text: in the run without this term every candidate grew by 132% to 259%, and the winner was 3.6 times the seed with every other term saying it was better |
 
 Four things to say over it, in this order:
 
@@ -293,12 +299,15 @@ Four things to say over it, in this order:
   record nothing. Which is why —
 - **The empty-extraction gate is load-bearing.** `census`, `names` and `cost`
   are all vacuously perfect when nothing was recorded. Without a gate in front
-  of them, three of five terms pay a prompt for declining to do its job.
+  of them, three of six terms pay a prompt for declining to do its job.
 
 ### Then the pre-baked run
 
-Walk the recorded stderr: the harvest line, the split, the search line, the
-probe gate, the diff.
+Walk the recorded stderr, `demo/gepa/extract.run.txt`: the harvest line, the
+split, the search line, the probe gate, the diff. One line in it is stale: the
+gate's length warning reads "prompt length is not in the metric", the wording
+from before the term landed. The code now says "length is only 0.10 of the
+score", and the Opus re-run replaces the file.
 
 - **The gate is outside the objective, deliberately.** Weights cannot express
   "never". A mean-maximising search will trade a rare catastrophic failure for a
@@ -314,8 +323,10 @@ probe gate, the diff.
 
 ## 4. What a Pareto frontier of prompts looks like — 3 min
 
-**Status: built and run. The front below is measured, from the run committed at
-`demo/gepa/extract.pareto.json`. Open the file, or read the table off a slide.**
+**Status: built and run twice. Two fronts are committed: the run before the
+metric had a length term, at `demo/gepa/extract.pareto.before-length.json`,
+and the run after, at `demo/gepa/extract.pareto.json`. Show both, in that
+order.**
 
 ### Say
 
@@ -326,9 +337,9 @@ probe gate, the diff.
   everything. Picking from it is a judgement call, and it should be visible that
   a judgement is being made.
 
-### Show
+### Show, before the length term
 
-Six candidates, four on the front:
+Six candidates, four on the front, five terms:
 
 | cand | val | grounding | census | names | shape | cost | chars |
 |---|---|---|---|---|---|---|---|
@@ -355,14 +366,31 @@ something the query never did. Buying that with cost is the right trade for this
 product, and saying so is the judgement the front exists to make visible.
 
 Then say the uncomfortable half: **candidate 4 is 3.6 times longer than the
-seed, and no term on that table can see it.** `cost` charges the model's output
-tokens, and a prompt is input. Every candidate in the run grew — by 132%, 187%,
-215% and 259%. Nothing opposed it. The gate now warns in both directions and the
-metric is getting a length term, and until it has one I have not promoted this.
+seed, and no term on that table could see it.** `cost` charged the model's
+output tokens, and a prompt is input. Every candidate in that run grew — by
+132%, 187%, 215% and 259%. Nothing opposed it.
+
+### Show, after
+
+The metric got a sixth term, `length`, at 0.10, with `shape` and `cost` halved
+to make room. Same corpus, same budget:
+
+| cand | val | grounding | census | names | shape | cost | length | chars |
+|---|---|---|---|---|---|---|---|---|
+| 0 (seed) | 0.966 | 0.91 | 1.00 | 1.00 | 0.95 | 0.99 | 1.00 | 2,076 |
+| 2 | 0.966 | **1.00** | 1.00 | 1.00 | 0.95 | 0.94 | 0.71 | 3,404 |
+
+- **Growth fell from 259% to 64%.** The term worked.
+- **And the aggregate still cannot tell the trade from an improvement.**
+  Candidate 2 buys grounding 0.91 to 1.00 and pays length 1.00 to 0.71, and
+  the two totals differ by 0.0004. The gate now says exactly this, in yellow:
+  length is only 0.10 of the score, read the diff closely. A person reading the
+  diff can tell. The number cannot. Not promoted.
 
 That is not an aside. A metric is a proxy, and a search is a machine for finding
-the gap between your proxy and your intent. Here is mine, found by reading the
-artifact rather than the exit code.
+the gap between your proxy and your intent. Here is mine, found twice by reading
+the artifact rather than the exit code: once when the term was missing, and once
+after it was there.
 
 ---
 
@@ -395,7 +423,8 @@ make gepa-tools                          # the search, ~690k tokens, asks first
 ```
 
 - **Say what it found.** One tool changed, a gain of two cases in nine, six of
-  seven proposals rejected. Then say why, because the feedback says why: the
+  seven proposals rejected; the run's log is `demo/gepa/tools.run.txt`. Then
+  say why, because the feedback says why: the
   seed's failures are the revenue questions — cancelled orders, the historical
   price — and no wording of `describe_table` fixes "use the order line's price,
   not the product's". The reflection kept reading SQL semantics, and the
@@ -440,8 +469,9 @@ make gepa-config                         # the search, ~690k tokens, asks first
 ```
 
 Show one reflection from `tools/gepa/out/run/config/reflections.jsonl`: the
-per-node ledger it read (`explore (high)  6,210 tokens ...`), the YAML it
-proposed, and what that scored. That is one of the two ASI triplets CHALLENGE
+per-node ledger it read (of the shape `explore (high)  6,210 tokens ...`; that
+number is illustrative until the Opus run supplies one), the YAML it proposed,
+and what that scored. That is one of the two ASI triplets CHALLENGE
 asks for, and it is the honesty check with an answer: if the proposal did not
 move the node the ledger named, say so and cut 5b.
 
@@ -491,7 +521,7 @@ What is switched off is ours.
 
 1. The sweep that picks the three, then the warning: `3 cases is thin — GEPA
    will fit whichever questions happen to be in here`.
-2. The front over three cases, where the winner looks excellent.
+2. The front over three cases, in one sentence: the winner looks excellent.
 3. The gate's `DISCARDED` lines, then `the gate reported and decided nothing`.
 4. The held-out table: training score beside held-out score, and on how many
    unseen cases each candidate lost to the seed. The mean is the number a run
@@ -536,6 +566,7 @@ that claims a failure mode without showing it has not tested it.
 |---|---|
 | No network, or the API is unreachable | Switch to `demo/demo.gif`. Same script, real numbers, recorded. |
 | A turn hangs past ~60s | Keep talking through the architecture; the cost line lands when it lands. Do not Ctrl-C into a dead terminal. |
+| The log says `rate limited`, waiting | Not a hang. The client retries up to six times with waits of up to a minute each. Same advice: keep talking. |
 | A live turn answers **wrong** | Take it. That is section 2's whole argument, arriving early: press `2`, say why, and point out that the verdict just became training data. |
 | Langfuse shows nothing | Traces take seconds to ingest, and the read path is not the write path. Move on and show the pre-baked traces. |
 | `make corpus` refuses to start | It preflights one thing: tracing on, because a verdict needs somewhere to land. Run `make config` and read the tracing line. |
@@ -548,8 +579,7 @@ of `CHALLENGE.md` that specifies it.
 
 | Blocks | What is missing | Where |
 |---|---|---|
-| §2 | Nothing reads a verdict back. An approved turn should become a golden case, with the SQL it ran as the reference | a scores reader in `app/tracing.py`, and a second harvest beside `extract_cases` — CHALLENGE §1 |
-| §3, §5 | A promotion, committed. Both searches ran and neither produced one I would promote: `extract`'s winner is 3.6x longer and the metric cannot see length, `tools`' gain is 2 cases in 9 | a `length` term in `metric_extract.WEIGHTS`, then re-run; and a second `tools` run on another split to see whether the gain reproduces |
+| §3, §5 | A promotion, committed. The length term landed and its re-run is committed; the survivor beats the seed by 0.0004 for 64% more prompt, so promoting it is a decision, not a build. `tools`' gain is 2 cases in 9 | decide on `extract`; and a second `tools` run on another split (`--seed 1`) to see whether the gain reproduces |
 | §5b | The effort search, run on the talk's model, with `config.local.yaml` moved aside. Nothing has been run yet; the dev overlay sets every node to `none` on a different model, and a profile found there says nothing about Opus | `make gepa-config GEPA_ARGS=--probe-only` (~220k tokens), then `make gepa-config GEPA_ARGS='--pareto demo/gepa/config.pareto.json'` (~690k), then copy `tools/gepa/out/run/config/reflections.jsonl` and the stderr somewhere tracked before the next run wipes them |
 | §5 | Before and after as numbers: T1 tokens and tool calls, seed against promoted, and for 5b where the seed's tokens went by node | `--probe-only` on either whole-turn target is the before half; it now prints the per-node split |
 | §6 | The overfit run on Opus, its three files committed | the command in section 6, after `make gepa-extract` has left a corpus in `tools/gepa/out/extract.jsonl` for `--resume` to reuse |
