@@ -764,3 +764,93 @@ def test_the_overfit_run_keeps_its_own_transcript(a_run, tmp_path):
 
     assert (tmp_path / "extract-overfit.run.txt").exists()
     assert not (tmp_path / "extract.run.txt").exists(), "section 3's is untouched"
+
+
+# --------------------------------------------------------------- iterations
+#
+# One iteration and a read of what it did is how a search is understood.
+# `--budget` approximates that through call arithmetic; GEPA has a stopper
+# that counts proposals, and this passes it through.
+
+
+def test_iterations_reaches_the_search(a_run, monkeypatch):
+    seen, result = search_kwargs(monkeypatch, ["extract", "--iterations", "2"])
+
+    assert seen["iterations"] == 2
+    assert "budget 150 calls, 2 iterations" in result.stderr
+
+
+def test_iterations_means_that_many_more_whatever_the_state_says():
+    """GEPA's own proposals stopper counts from the start of the state, and
+    `--resume` reloads the state: observed, a resumed run woke at iteration
+    20 and stopped before proposing. Counted from the first check instead,
+    one more is one more on a fresh run and on a resumed one alike."""
+
+    class State:
+        def __init__(self, i):
+            self.i = i
+
+    fresh = gepa._More(1, lambda s: s.i)
+    assert not fresh(State(-1)), "about to run the first proposal"
+    assert fresh(State(0)), "one done"
+
+    resumed = gepa._More(1, lambda s: s.i)
+    assert not resumed(State(19))
+    assert resumed(State(20))
+
+    two = gepa._More(2, lambda s: s.i)
+    assert not two(State(-1)) and not two(State(0)) and two(State(1))
+
+
+def test_iterations_becomes_a_stopper_and_the_budget_counts_from_there_too(monkeypatch, tmp_path):
+    """Two relative stoppers and no absolute call cap: a resumed run has
+    already spent the budget, and an absolute cap would stop it at once."""
+    seen = {}
+
+    class FakeGepa:
+        @staticmethod
+        def optimize(**kwargs):
+            seen.update(kwargs)
+            return FakeResult([{COMPONENT: "seed"}], [1.0])
+
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    common = dict(
+        adapter=None, reflection=None, seed_candidate={COMPONENT: "seed"},
+        trainset=[], valset=[], node="extract", budget=17, seed=0, verbose=False,
+    )
+
+    gepa._search(FakeGepa, iterations=2, **common)
+    steps, calls = seen["stop_callbacks"]
+    assert isinstance(steps, gepa._More) and steps.n == 2
+    assert isinstance(calls, gepa._More) and calls.n == 17
+    assert seen["max_metric_calls"] is None
+
+    seen.clear()
+    gepa._search(FakeGepa, **common)
+    assert "stop_callbacks" not in seen
+    assert seen["max_metric_calls"] == 17
+
+
+def test_a_pool_of_one_after_the_asked_iterations_is_reported_as_that(a_run, monkeypatch):
+    """Not "GEPA proposed nothing", which points at the metric. The run
+    stopped where it was told to."""
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: FakeResult([{COMPONENT: a_run}], [1.0])
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--iterations", "1"])
+
+    assert result.exit_code == gepa.NO_IMPROVEMENT
+    assert "Stopped after 1 iteration, as asked" in result.stderr
+    assert "GEPA proposed nothing" not in result.stderr
+
+
+def test_zero_iterations_is_a_usage_error(a_run, monkeypatch):
+    monkeypatch.setattr(
+        gepa, "_search", lambda *a, **k: pytest.fail("a search was started")
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--iterations", "0"])
+
+    assert result.exit_code == 2
+    assert "at least one" in result.output

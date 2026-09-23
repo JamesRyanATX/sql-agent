@@ -51,6 +51,18 @@ WEIGHTS = {
     "length": 0.10,
 }
 
+# One plain line per term, for the legend above every front: what a score of
+# 1.0 means. Beside the weights because they are one statement, and a test
+# says the keys agree, so a seventh term cannot land without its words.
+LEGEND = {
+    "grounding": "every note that quotes SQL quotes the query that actually ran",
+    "census": "no note records today's row count or percentage, which goes stale",
+    "names": "no note overwrites or duplicates one the agent already has",
+    "shape": "two to six notes, each under 200 characters",
+    "cost": "the notes cost no more output tokens than the current prompt's did",
+    "length": "the prompt is no longer than the current prompt",
+}
+
 # 2-6 entries is what a good turn produces. Outside the band is a mild penalty
 # rather than a cliff: a genuinely rich query can establish seven things.
 ENTRY_BAND = (2, 6)

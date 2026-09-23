@@ -116,6 +116,8 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #                                                      and where its tokens went
 #   make gepa-extract GEPA_ARGS=--probe-only           check the invariants
 #   make gepa-extract GEPA_ARGS='--pareto demo/gepa/extract.pareto.json'
+#   make gepa-extract GEPA_ARGS='--iterations 1 --resume'  one step, then read
+#                                                      the transcript
 #   make gepa-extract GEPA_ARGS='--overfit 3 --resume'  guards off, on purpose:
 #                                                      three cases, the gate
 #                                                      reporting only, then

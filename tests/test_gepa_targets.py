@@ -163,6 +163,15 @@ def test_a_whole_turn_target_says_what_a_rollout_costs():
     silently stop asking before spending."""
     assert targets.TOOLS.rollout_tokens > 0
     assert targets.TOOLS.blurb
+
+
+def test_every_target_says_what_it_is_for_a_newcomer():
+    """The ABOUT section at the top of the front display: what the thing is
+    responsible for, and what GEPA does to it. Two sentences, no jargon a
+    line further down would have to explain."""
+    for target in targets.TARGETS.values():
+        assert target.about.count(". ") >= 1, f"{target.name}: two sentences"
+        assert "GEPA optimizes" in target.about, target.name
     # 60 rollouts, per CHALLENGE's own arithmetic. The command's old default of
     # 150 would be 1.7 million tokens.
     assert targets.TOOLS.budget == 60
@@ -179,6 +188,20 @@ def test_each_target_names_its_own_objectives():
     assert targets.TOOLS.weights() == metric_turn.WEIGHTS
     assert targets.CONFIG.weights() == metric_turn.WEIGHTS
     assert set(targets.EXTRACT.weights()) != set(targets.TOOLS.weights())
+    assert targets.EXTRACT.legend() == metric_extract.LEGEND
+    assert targets.TOOLS.legend() == metric_turn.LEGEND
+    assert targets.CONFIG.legend() == metric_turn.LEGEND
+
+
+def test_every_term_has_its_words_and_no_words_are_orphaned():
+    """The legend above a front is one line per term. A seventh term without
+    a line would print its weight and nothing else, and a line for a term
+    that no longer exists would describe nothing."""
+    from tools.gepa import metric_extract, metric_turn
+
+    for metric in (metric_extract, metric_turn):
+        assert set(metric.LEGEND) == set(metric.WEIGHTS), metric.__name__
+        assert all(metric.LEGEND.values()), "an empty line is not a legend"
 
 
 def test_every_target_offers_a_cheap_check():

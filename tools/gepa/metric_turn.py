@@ -53,6 +53,13 @@ WEIGHTS = {
     "tool_calls": 0.15,
 }
 
+# What a score of 1.0 means, one line per term, for the legend above a front.
+LEGEND = {
+    "correct": "the rows it returned match the known answer",
+    "cost": "the turn used no more tokens than the current prompt's turn did",
+    "tool_calls": "the turn made no more tool calls than the current prompt's did",
+}
+
 TERMS = tuple(WEIGHTS)
 
 # How many differing rows to quote before summarising. Enough to see a pattern,

@@ -146,6 +146,13 @@ def _recording(name: str):
     help="guards off: train and validate on N cases, gate reports only, "
     "then score the pool on the rest",
 )
+@click.option(
+    "--iterations",
+    type=int,
+    default=None,
+    metavar="N",
+    help="stop after N proposals; the budget still caps the calls",
+)
 def cli(
     target: str,
     verbose: bool,
@@ -158,6 +165,7 @@ def cli(
     yes: bool,
     pareto_to: Path | None,
     overfit: int | None,
+    iterations: int | None,
 ) -> None:
     """GEPA over one searchable thing. The new text goes to stdout.
 
@@ -169,6 +177,8 @@ def cli(
     """
     chosen = _resolve(target)
     seed_candidate = chosen.seed()
+    if iterations is not None and iterations < 1:
+        raise click.UsageError("--iterations needs at least one")
 
     from tools.gepa.adapter import Loop, reflection_lm
 
@@ -187,7 +197,7 @@ def cli(
         _run(
             chosen, seed_candidate, run=run, verbose=verbose, budget=budget,
             val_fraction=val_fraction, seed=seed, resume=resume, days=days,
-            yes=yes, pareto_to=pareto_to, overfit=overfit,
+            yes=yes, pareto_to=pareto_to, overfit=overfit, iterations=iterations,
         )
 
 
@@ -205,6 +215,7 @@ def _run(
     yes: bool,
     pareto_to: Path | None,
     overfit: int | None,
+    iterations: int | None = None,
 ) -> None:
     """The search, from corpus to stdout. Split from the command so the
     transcript can be held open around every way out of it."""
@@ -219,7 +230,10 @@ def _run(
         _overfit_fits(cases, overfit)
     else:
         trainset, valset = _split(cases, val_fraction, seed)
-        say(f"split     {len(trainset)} train / {len(valset)} val, budget {budget} calls")
+        say(
+            f"split     {len(trainset)} train / {len(valset)} val, budget "
+            f"{budget} calls{_steps(iterations)}"
+        )
         _not_too_thin(trainset)
         _budget_covers(budget, valset)
 
@@ -243,6 +257,8 @@ def _run(
                 adapter, seed_candidate, cases, overfit
             )
             valset = trainset
+            if iterations is not None:
+                say(f"          budget {budget} calls{_steps(iterations)}")
             _not_too_thin(trainset)
             _budget_covers(budget, valset)
 
@@ -258,6 +274,7 @@ def _run(
             seed=seed,
             verbose=verbose,
             templates=chosen.templates() if chosen.templates else None,
+            iterations=iterations,
         )
 
         say(
@@ -290,13 +307,22 @@ def _run(
         # `skip_perfect_score` means a seed at the top of the metric is never
         # mutated. A result, but an empty pool reads as a broken run.
         if len(result.candidates) <= 1:
-            say(
-                "\nGEPA proposed nothing. Either the seed already scores at the "
-                "top of this metric on this corpus — in which case the corpus "
-                "or the metric is what needs work — or the budget ran out "
-                "before a mutation was accepted.",
-                fg="yellow",
-            )
+            if iterations is not None:
+                say(
+                    f"\nStopped after {_plural(iterations, 'iteration')}, as "
+                    f"asked, and the pool is the seed alone: nothing proposed "
+                    f"in that many beat its parent. The transcript has what "
+                    f"was tried.",
+                    fg="yellow",
+                )
+            else:
+                say(
+                    "\nGEPA proposed nothing. Either the seed already scores at the "
+                    "top of this metric on this corpus — in which case the corpus "
+                    "or the metric is what needs work — or the budget ran out "
+                    "before a mutation was accepted.",
+                    fg="yellow",
+                )
             raise SystemExit(NO_IMPROVEMENT)
 
         # The valset, not the whole corpus: GEPA keys its per-case scores by
@@ -535,6 +561,30 @@ def _split(
 # --------------------------------------------------------------------- the search
 
 
+class _More:
+    """Stop once a counter has advanced `n` past where it stood at the first
+    check. GEPA calls a stopper before each iteration, so the first check sees
+    the state as this run found it: -1 on a fresh run, or wherever `--resume`
+    reloaded it to. Either way, `n` more."""
+
+    def __init__(self, n: int, read) -> None:
+        self.n, self._read, self.start = n, read, None
+
+    def __call__(self, state) -> bool:
+        now = self._read(state)
+        if self.start is None:
+            self.start = now
+        return now >= self.start + self.n
+
+
+def _steps(iterations: int | None) -> str:
+    return f", {_plural(iterations, 'iteration')}" if iterations is not None else ""
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _search(
     gepa,
     *,
@@ -548,6 +598,7 @@ def _search(
     seed: int,
     verbose: bool,
     templates: dict[str, str] | None = None,
+    iterations: int | None = None,
 ):
     """`gepa.optimize`, with its own stdout pointed at stderr: its engine logs
     to stdout, and one line of that is one line in the middle of the prompt.
@@ -555,8 +606,23 @@ def _search(
     `reflection_prompt_template` is a dict keyed by component name, validated
     when the run is constructed — so a template missing its placeholders fails
     here rather than forty minutes in.
+
+    `iterations` means that many *more*. GEPA's own proposals stopper counts
+    from the start of the state, and `--resume` reloads the state, so on a
+    resumed run "one iteration" would stop before proposing anything —
+    observed: a resumed run woke at iteration 20 and stopped. `_More` counts
+    from wherever the state is when this run begins, and with `--iterations`
+    the budget is counted the same way, or a resumed run's spent budget would
+    stop it just as surely. GEPA also installs a file stopper, `gepa.stop` in
+    the run dir, which ends any run cleanly after the current iteration.
     """
-    extra = {"reflection_prompt_template": templates} if templates else {}
+    extra: dict[str, Any] = {"reflection_prompt_template": templates} if templates else {}
+    if iterations is not None:
+        extra["stop_callbacks"] = [
+            _More(iterations, lambda state: state.i),
+            _More(budget, lambda state: state.total_num_evals),
+        ]
+        budget = None
     with contextlib.redirect_stdout(sys.stderr):
         return gepa.optimize(
             seed_candidate=seed_candidate,
@@ -564,7 +630,7 @@ def _search(
             valset=valset,
             adapter=adapter,
             reflection_lm=reflection,
-            max_metric_calls=budget,
+            max_metric_calls=budget,  # None with --iterations: the stoppers above
             run_dir=str(run_dir(node)),
             seed=seed,
             display_progress_bar=verbose,
@@ -708,7 +774,7 @@ def _pareto(
             encoding="utf-8",
         )
 
-    _front_table(document, objectives)
+    _front_table(document, objectives, target.legend())
     for destination in written:
         say(f"          written {destination}")
 
@@ -771,7 +837,9 @@ def _holdout(
     return {"cases": len(cases), "candidates": rows}
 
 
-def _front_table(document: dict, objectives: tuple[str, ...]) -> None:
+def _front_table(
+    document: dict, objectives: tuple[str, ...], legend: dict[str, str] | None = None
+) -> None:
     """The front on stderr, so it is read without opening anything.
 
     The rendering lives in `front.py`, which is also what reads a committed
@@ -780,8 +848,10 @@ def _front_table(document: dict, objectives: tuple[str, ...]) -> None:
     """
     from tools.gepa import front
 
-    for line in front.render(document):
-        say(line)
+    say(f"\npareto    {front.summary(document)}")
+    for line in front.render(document, legend=legend):
+        # Under the run's labelled lines, so it sits in their gutter.
+        say(f"          {line}" if line else line)
 
 
 # ------------------------------------------------------------------------- diff

@@ -85,6 +85,10 @@ class Target:
     # target puts `nan` in four of five columns and nobody on the front.
     weights: Callable[[], dict[str, float]]
 
+    # term -> what a score of 1.0 means, in plain words, for the legend that
+    # prints above the front. Same keys as `weights`.
+    legend: Callable[[], dict[str, str]]
+
     # The cheap pre-check `--probe-only` runs: (loop, yes) -> exit status. It
     # takes `yes` because a check can itself be expensive enough to ask about.
     # None where a target has nothing cheap to offer.
@@ -105,6 +109,10 @@ class Target:
 
     # One line naming what a run of this actually touches.
     blurb: str = ""
+
+    # Two sentences for a newcomer, at the top of the front display: what
+    # the thing being searched is responsible for, and what GEPA does to it.
+    about: str = ""
 
 
 # ------------------------------------------------------------------- extract
@@ -189,6 +197,12 @@ def _extract_weights() -> dict[str, float]:
     return WEIGHTS
 
 
+def _extract_legend() -> dict[str, str]:
+    from tools.gepa.metric_extract import LEGEND
+
+    return LEGEND
+
+
 def _extract_check(loop, yes: bool = False) -> int:
     outcomes = gates.run_probes(
         loop, _extract_seed()[EXTRACT_COMPONENT], probes.load(EXTRACT_COMPONENT)
@@ -210,8 +224,15 @@ EXTRACT = Target(
     label=_extract_label,
     notes=_extract_notes,
     weights=_extract_weights,
+    legend=_extract_legend,
     check=_extract_check,
     blurb="config/prompts/extract.md",
+    about=(
+        'The "extract" node is responsible for writing down what the agent '
+        "learned from a query, so the next question is answered from notes "
+        "instead of exploration. GEPA optimizes the prompt that tells it what "
+        "to write down."
+    ),
 )
 
 
@@ -406,6 +427,12 @@ def _tools_weights() -> dict[str, float]:
     return WEIGHTS
 
 
+def _tools_legend() -> dict[str, str]:
+    from tools.gepa.metric_turn import LEGEND
+
+    return LEGEND
+
+
 def _tools_check(loop, yes: bool = False) -> int:
     return _turn_check(
         loop, yes, name="tools", seed=_tools_seed(),
@@ -534,6 +561,7 @@ TOOLS = Target(
     label=_tools_label,
     notes=_tools_notes,
     weights=_tools_weights,
+    legend=_tools_legend,
     check=_tools_check,
     templates=_tools_templates,
     # A whole cold turn a rollout, against `extract`'s single model call.
@@ -542,6 +570,11 @@ TOOLS = Target(
     budget=60,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the four `description` strings in app/tools.py",
+    about=(
+        "The four tool descriptions tell the model when to list tables, "
+        "describe one, sample a column or count its values. GEPA optimizes "
+        "those four descriptions."
+    ),
 )
 
 
@@ -795,11 +828,16 @@ CONFIG = Target(
     label=_config_label,
     notes=_config_notes,
     weights=_tools_weights,
+    legend=_tools_legend,
     check=_config_check,
     templates=_config_templates,
     budget=60,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the per-node `effort` blocks in config/config.yaml",
+    about=(
+        "The config block sets how hard the model thinks at each of the six "
+        "steps of a turn. GEPA optimizes those six settings."
+    ),
 )
 
 

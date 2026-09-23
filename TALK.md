@@ -24,6 +24,7 @@ Settle this first, because it decides whether the talk fits.
 | A cold turn (T1) | ~34s | One question, one answer |
 | Two cached turns (T2, T3) | ~8s, ~6s | The payoff, and it is fast |
 | `gepa-extract --probe-only` | ~30s | Four probes, four model calls |
+| `gepa-extract --iterations 1` | ~1 min | One proposal, seen being made |
 | Reading artifacts and diffs | instant | Files |
 
 | Pre-baked | Takes | Why it cannot be live |
@@ -288,14 +289,22 @@ run the search, gate the pool, print the diff, and put the new prompt on
 stdout. Twenty minutes to two hours, so it ran the night before. Here is what
 it left.
 
+If there is a minute to spare, one step of it live: six extract calls and one
+reflection, and the proposal scrolls past as it happens.
+
+```bash
+make gepa-extract GEPA_ARGS='--iterations 1 --resume'
+```
+
 ```bash
 make gepa-extract-pareto
 ```
 
-The front, with the time it was written, then every candidate on it in full,
-seed first. Read the seed row and the survivor row: two vals of 0.966, and a
-`chars` column that says one is 64% longer. Scroll to the survivor's text and
-the 64% is visible. Hold the trade-off; section 4 is about it.
+The front, with the time it was written, then one line per candidate on it
+showing how its prompt opens, seed first. Read the seed row and the survivor
+row: two vals of 0.966, and a `chars` column that says one is 64% longer. The
+64% itself is in the transcript's diff, next. Hold the trade-off; section 4 is
+about it.
 
 ```bash
 tail -n 40 tools/gepa/out/extract.run.txt
