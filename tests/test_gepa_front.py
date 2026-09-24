@@ -180,6 +180,56 @@ def test_a_finalist_with_several_components_gets_a_line_per_component():
     assert body[5] == "[describe_table] one table"
 
 
+def test_whole_prints_the_text_as_written_with_its_line_breaks():
+    """`make gepa-tools-pareto`: four descriptions fit on a screen, so they
+    are read whole rather than cut at 120 characters, and `make
+    gepa-config-pareto` is a YAML block, which collapsed onto one line is
+    not YAML."""
+    document = {
+        **DOCUMENT,
+        "front": [
+            {
+                **DOCUMENT["front"][1],
+                "components": {
+                    "config": "plan:\n  effort: low\nexplore:\n  effort: high",
+                },
+            }
+        ],
+    }
+
+    body = front.finalists(document, whole=True)
+
+    assert body[4:8] == ["plan:", "  effort: low", "explore:", "  effort: high"]
+    assert "…" not in "".join(body)
+
+
+def test_whole_labels_each_component_on_its_own_line():
+    document = {
+        **DOCUMENT,
+        "front": [
+            {
+                **DOCUMENT["front"][1],
+                "components": {"list_tables": "word " * 40, "describe_table": "one table"},
+            }
+        ],
+    }
+
+    body = front.finalists(document, whole=True)
+
+    assert body[4] == "[list_tables]"
+    assert all(len(line) <= 78 for line in body), "wrapped, not cut"
+    assert body[body.index("[describe_table]") + 1] == "one table"
+
+
+def test_which_targets_read_whole():
+    """Tool descriptions and the config block are read whole; a node prompt is
+    pages, and shows how it opens."""
+    assert front._whole_for("tools") is True
+    assert front._whole_for("config") is True
+    assert front._whole_for("extract") is False
+    assert front._whole_for(None) is False
+
+
 # ------------------------------------------------------------------ the files
 
 

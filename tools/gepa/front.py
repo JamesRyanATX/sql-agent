@@ -149,14 +149,19 @@ def _holdout(document: dict[str, Any], styled: bool) -> list[str]:
     return lines
 
 
-def finalists(document: dict[str, Any], *, styled: bool = False) -> list[str]:
-    """How each candidate on the front opens, seed first.
+def finalists(
+    document: dict[str, Any], *, whole: bool = False, styled: bool = False
+) -> list[str]:
+    """Each candidate on the front, seed first: its text whole, or how it opens.
 
-    The first `PREVIEW` characters of each component, whitespace collapsed,
-    on the line under the finalist's name: enough to tell them apart, not
-    enough to scroll through. The full text is in the file, and the diff is
-    in the run's transcript. A candidate with several components — the four
-    tool descriptions — gets one line each.
+    Whole is for a target whose text is short enough to read on the screen —
+    four tool descriptions, a six-line config block — with line breaks kept,
+    since a YAML block collapsed onto one line is not YAML. Otherwise the
+    first `PREVIEW` characters of each component, whitespace collapsed, on
+    the line under the finalist's name: enough to tell a page-long prompt
+    from its sibling, not enough to scroll through. The full text is in the
+    file, and the diff is in the run's transcript. A candidate with several
+    components is labelled per component either way.
     """
     entries = sorted(document["front"], key=lambda e: (not e.get("seed"), e["index"]))
     lines = _heading("FINALISTS", styled)
@@ -169,8 +174,21 @@ def finalists(document: dict[str, Any], *, styled: bool = False) -> list[str]:
                             fg="yellow" if entry.get("seed") else "cyan"))
         components = entry.get("components") or {}
         for name, text in components.items():
-            label = f"[{name}] " if len(components) > 1 else ""
-            lines.append(f"{label}{_preview(text)}")
+            label = f"[{name}]" if len(components) > 1 else ""
+            if whole:
+                if label:
+                    lines.append(_style(label, styled, dim=True))
+                lines.extend(_whole(text))
+            else:
+                lines.append(f"{label} {_preview(text)}".lstrip())
+    return lines
+
+
+def _whole(text: str, width: int = 78) -> list[str]:
+    """The text as written, each of its lines wrapped to the width."""
+    lines: list[str] = []
+    for line in text.splitlines() or [""]:
+        lines.extend(textwrap.wrap(line, width=width) or [""])
     return lines
 
 
@@ -205,6 +223,15 @@ def _words_for(target: str | None) -> dict[str, str]:
 
     chosen = targets.TARGETS.get(target or "")
     return chosen.legend() if chosen else {}
+
+
+def _whole_for(target: str | None) -> bool:
+    """Whether this target's finalists are printed whole. Unknown target:
+    previewed, which is the safe size."""
+    from tools.gepa import targets
+
+    chosen = targets.TARGETS.get(target or "")
+    return bool(chosen and chosen.whole)
 
 
 def _style(text: str, on: bool, **kwargs: Any) -> str:
@@ -247,7 +274,9 @@ def main(paths: list[str]) -> int:
             click.echo(line)
         for line in render(document, legend=_words_for(document.get("target")), styled=styled):
             click.echo(line)
-        for line in finalists(document, styled=styled):
+        for line in finalists(
+            document, whole=_whole_for(document.get("target")), styled=styled
+        ):
             click.echo(line)
         click.echo()
     return 1 if failed else 0

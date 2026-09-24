@@ -114,6 +114,12 @@ class Target:
     # the thing being searched is responsible for, and what GEPA does to it.
     about: str = ""
 
+    # Whether the front display prints each finalist's text whole. A tool
+    # description is a sentence or two and a config block is six lines, and
+    # both are read whole; a node prompt is pages, and the display shows how
+    # it opens and leaves the rest to the file and the transcript's diff.
+    whole: bool = False
+
 
 # ------------------------------------------------------------------- extract
 
@@ -570,6 +576,7 @@ TOOLS = Target(
     budget=60,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the four `description` strings in app/tools.py",
+    whole=True,
     about=(
         "The four tool descriptions tell the model when to list tables, "
         "describe one, sample a column or count its values. GEPA optimizes "
@@ -834,6 +841,7 @@ CONFIG = Target(
     budget=60,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the per-node `effort` blocks in config/config.yaml",
+    whole=True,
     about=(
         "The config block sets how hard the model thinks at each of the six "
         "steps of a turn. GEPA optimizes those six settings."
