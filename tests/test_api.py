@@ -348,6 +348,9 @@ def scores(monkeypatch):
     monkeypatch.setattr(
         api.tracing, "score", lambda **kw: bool(recorded.append(kw) or True)
     )
+    monkeypatch.setattr(
+        api.tracing, "score_text", lambda **kw: bool(recorded.append(kw) or True)
+    )
     return recorded
 
 
@@ -378,11 +381,7 @@ async def test_a_wrong_answer_files_the_prose_with_the_verdict(
     )
 
     assert resp.status_code == 202, resp.text
-    assert resp.json() == {
-        "trace_id": "0123456789abcdef" * 2,
-        "name": "correct",
-        "value": 0.0,
-    }
+    assert resp.json() == {"trace_id": "0123456789abcdef" * 2, "filed": ["correct"]}
     assert scores == [
         {
             "trace_id": "0123456789abcdef" * 2,
@@ -429,6 +428,58 @@ async def test_tracing_off_now_is_the_same_answer(client: AsyncClient, conn, mon
 
 async def test_an_unknown_turn_is_a_404(client: AsyncClient, scores):
     assert (await client.post(feedback(10**9), json={"correct": True})).status_code == 404
+    assert scores == []
+
+
+async def test_a_reference_query_is_filed_as_text_with_the_reading(
+    client: AsyncClient, conn, scores
+):
+    """No verdict at all: the answer moves with the date, so nobody can judge
+    it, but the query it should have come from is known. Filing that alone is
+    enough to make the turn a case."""
+    turn_id = await a_turn(conn, trace_id="d" * 32)
+
+    resp = await client.post(
+        feedback(turn_id),
+        json={"reference_sql": "SELECT sum(total) FROM orders", "reading": "gross, before refunds"},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {"trace_id": "d" * 32, "filed": ["reference"]}
+    assert scores == [
+        {
+            "trace_id": "d" * 32,
+            "name": "reference",
+            "value": "SELECT sum(total) FROM orders",
+            "comment": "gross, before refunds",
+        }
+    ]
+
+
+async def test_a_verdict_and_a_reference_file_as_two_scores(client: AsyncClient, conn, scores):
+    turn_id = await a_turn(conn, trace_id="e" * 32)
+
+    resp = await client.post(
+        feedback(turn_id),
+        json={"correct": False, "comment": "counted everyone",
+              "reference_sql": "SELECT count(*) FROM customer WHERE deleted_at IS NULL"},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["filed"] == ["correct", "reference"]
+    assert [s["name"] for s in scores] == ["correct", "reference"]
+    assert scores[1]["comment"] is None
+
+
+async def test_nothing_to_file_is_refused(client: AsyncClient, conn, scores):
+    """A body with neither a verdict nor a reference would 202 and land
+    nothing, which is the corpus-never-fills-up failure `extra="forbid"`
+    exists to prevent, arriving by another door."""
+    turn_id = await a_turn(conn, trace_id="b" * 32)
+
+    resp = await client.post(feedback(turn_id), json={"comment": "hm"})
+
+    assert resp.status_code == 422
     assert scores == []
 
 

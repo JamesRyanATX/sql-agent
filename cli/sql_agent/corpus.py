@@ -53,9 +53,10 @@ FORMAT_VERSION = 1
 class Case:
     """The parts of a golden case this command needs.
 
-    Four fields of the seven on disk. `reference_sql` and `tables` are for the
-    optimiser, which can run a query; this command only compares against an
-    answer already written down.
+    Five fields of the seven on disk. `expect` is what this command compares
+    against; `reference_sql` and `reading` are what it files on the turn's
+    trace, so the turn is a case for the searches downstream. `tables` is for
+    the optimiser alone.
     """
 
     name: str
@@ -63,6 +64,8 @@ class Case:
     expect: list[list[Any]] | None
     ordered: bool
     reading: str
+    # Lines on disk, one query here, as `tools/gepa/golden.py` reads it.
+    reference_sql: str
 
 
 @click.command("corpus")
@@ -113,6 +116,7 @@ def read_cases(directory: Path) -> list[Case]:
                 question=row["question"],
                 expect=row.get("expect"),
                 ordered=bool(row.get("ordered")),
+                reference_sql="\n".join(row.get("reference_sql") or []),
                 reading=row.get("reading") or "",
             )
         )
@@ -223,19 +227,28 @@ async def _record(directory: Path, verbose: bool) -> None:
 
             spent += taken.answered.get("cost") or 0.0
 
+            # The reference goes on every turn: it is what makes the turn a
+            # case for the tools and config searches, and it needs no verdict.
+            # The verdict goes on only where the answer key fixes the number.
             if case.expect is None:
                 unscored += 1
-                click.echo(render.dim("  no written answer — asked, not scored"))
+                await turn.file_verdict(
+                    taken.answered, reference_sql=case.reference_sql, reading=case.reading
+                )
+                click.echo(render.dim("  no written answer — reference filed, not judged"))
             else:
                 correct = matches(taken.rows, case.expect, ordered=case.ordered)
                 comment = None if correct else _difference(case, taken.rows)
-                await turn.file_verdict(taken.answered, correct, comment)
+                await turn.file_verdict(
+                    taken.answered, correct=correct, comment=comment,
+                    reference_sql=case.reference_sql, reading=case.reading,
+                )
                 judged += 1
                 approved += correct
                 if correct:
-                    click.secho("  correct — filed on this turn's trace", fg="green")
+                    click.secho("  correct — filed on this turn's trace, with the reference", fg="green")
                 else:
-                    click.secho("  not the answer — filed, with what differed", fg="yellow")
+                    click.secho("  not the answer — filed, with what differed and the reference", fg="yellow")
 
             if ceiling and spent >= ceiling:
                 click.secho(
@@ -303,14 +316,15 @@ def _summary(
     if unscored:
         click.echo(
             render.dim(
-                f"  {unscored} asked but not scored — no written answer, "
-                f"because revenue and date windows move"
+                f"  {unscored} with no written answer: reference filed, not "
+                f"judged — revenue and date windows move"
             )
         )
     if spent:
         click.echo(render.bold(f"${spent:.4f} spent"))
     click.echo(
         render.dim(
-            "  the verdicts are on the traces; `sql-agent turns` is what they cost"
+            "  the verdicts and references are on the traces, where the tools and "
+            "config searches read them; `sql-agent turns` is what they cost"
         )
     )

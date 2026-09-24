@@ -202,9 +202,15 @@ async def test_every_question_is_asked_cold_and_the_memory_is_left_alone(scripte
 async def test_a_matching_answer_is_filed_as_correct(scripted):
     await run(scripted)
 
-    assert scripted["posted"] == [
-        {"path": "/turns/7/feedback", "json": {"correct": True, "comment": None}}
-    ]
+    assert scripted["posted"][0] == {
+        "path": "/turns/7/feedback",
+        "json": {
+            "correct": True,
+            "comment": None,
+            "reference_sql": "SELECT count(*) FROM customer WHERE deleted_at IS NULL",
+            "reading": "Customers that still exist.",
+        },
+    }
 
 
 async def test_a_differing_answer_is_filed_with_what_differed(scripted):
@@ -222,14 +228,20 @@ async def test_a_differing_answer_is_filed_with_what_differed(scripted):
     assert "Customers that still exist" in filed["comment"]
 
 
-async def test_a_case_with_no_written_answer_is_asked_and_not_scored(scripted, capsys):
+async def test_a_case_with_no_written_answer_gets_its_reference_and_no_verdict(scripted, capsys):
     """Its answer moves, so there is nothing to compare against. It is still
-    asked, because the trace is what a later harvest reads."""
+    asked, and its reference query is still filed: that is what makes the
+    turn a case for the tools and config searches, and it needs no verdict."""
     await run(scripted)
 
     assert "ask:what was our total revenue?" in scripted["calls"]
-    assert len(scripted["posted"]) == 1, "only the case with an answer is filed"
-    assert "1 asked but not scored" in capsys.readouterr().out
+    filed = [p["json"] for p in scripted["posted"]]
+    assert len(filed) == 2, "both turns file something"
+    unjudged = filed[1]
+    assert "correct" not in unjudged
+    assert unjudged["reference_sql"] == "SELECT sum(oi.qty * oi.price) FROM order_item oi"
+    assert unjudged["reading"] == "Line price at the time of sale."
+    assert "1 with no written answer: reference filed, not judged" in capsys.readouterr().out
 
 
 async def test_nobody_is_asked_anything(scripted, monkeypatch):

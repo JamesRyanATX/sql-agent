@@ -48,9 +48,11 @@ from app.schemas import (
 )
 from app.settings import settings
 
-# The name every verdict is filed under, so a harvest has one thing to filter
-# on. Here rather than in `tracing`, which does not know what is being scored.
+# The names a verdict and a reference query are filed under, so a harvest has
+# two things to filter on. Here rather than in `tracing`, which does not know
+# what is being scored. `tools/gepa/harvest.py` reads both back.
 SCORE = "correct"
+REFERENCE = "reference"
 
 
 async def require_token(authorization: str = Header(default="")) -> None:
@@ -395,19 +397,37 @@ async def leave_feedback(
         ) from None
 
     trace_id = turn["trace_id"] or ""
-    value = 1.0 if body.correct else 0.0
     # Both halves of "there is nowhere to put this": the turn ran with tracing
     # off, or it is off now. A 202 in either case would be a lie a user only
     # discovers when the corpus comes back empty.
-    if not trace_id or not tracing.score(
-        trace_id=trace_id, name=SCORE, value=value, comment=body.comment
-    ):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=(
-                f"turn {turn_id} has no trace to score — tracing was off when it "
-                "ran, or is off now. Set both Langfuse keys and ask again."
-            ),
-        )
-    return FeedbackOut(trace_id=trace_id, name=SCORE, value=value)
+    nowhere = HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail=(
+            f"turn {turn_id} has no trace to score — tracing was off when it "
+            "ran, or is off now. Set both Langfuse keys and ask again."
+        ),
+    )
+    if not trace_id:
+        raise nowhere
+
+    filed: list[str] = []
+    if body.correct is not None:
+        value = 1.0 if body.correct else 0.0
+        if not tracing.score(
+            trace_id=trace_id, name=SCORE, value=value, comment=body.comment
+        ):
+            raise nowhere
+        filed.append(SCORE)
+    if body.reference_sql:
+        # The query the answer should have come from, with the reading as its
+        # comment: what makes this turn a case for the tools and config
+        # searches. A TEXT score, so the query is the value and not prose in a
+        # comment somebody would have to parse back out.
+        if not tracing.score_text(
+            trace_id=trace_id, name=REFERENCE, value=body.reference_sql,
+            comment=body.reading,
+        ):
+            raise nowhere
+        filed.append(REFERENCE)
+    return FeedbackOut(trace_id=trace_id, filed=filed)
 

@@ -72,15 +72,28 @@ async def take(
     return Taken(answered=answered, rows=rows, fatal=fatal)
 
 
-async def file_verdict(answered: dict, correct: bool, comment: str | None) -> None:
-    """Put a verdict on a turn's trace.
+async def file_verdict(
+    answered: dict,
+    *,
+    correct: bool | None = None,
+    comment: str | None = None,
+    reference_sql: str | None = None,
+    reading: str | None = None,
+) -> None:
+    """Put a verdict, a reference query, or both on a turn's trace.
 
     `corpus` is the one caller now. The endpoint is what a person or another
     tool would use too, and what lands on the trace is one shape whoever
     produced it, so a later reader cannot tell them apart and does not have
-    to.
+    to. The reference is the query the answer should have come from; with it
+    filed, the turn is a case for the tools and config searches whether or
+    not anyone could judge the answer.
     """
-    await http.post(
-        f"/turns/{answered['turn_id']}/feedback",
-        json={"correct": correct, "comment": comment or None},
-    )
+    body: dict = {}
+    if correct is not None:
+        body["correct"] = correct
+        body["comment"] = comment or None
+    if reference_sql:
+        body["reference_sql"] = reference_sql
+        body["reading"] = reading or None
+    await http.post(f"/turns/{answered['turn_id']}/feedback", json=body)

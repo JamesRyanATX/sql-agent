@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import Config
 
@@ -29,7 +29,15 @@ class AskBody(BaseModel):
 
 
 class FeedbackBody(BaseModel):
-    """What a person thought of one answer.
+    """What a person thought of one answer, and what it should have run.
+
+    Two things can be filed, together or alone. `correct` is the verdict.
+    `reference_sql` is the query the answer should have come from, with
+    `reading` as the sentence saying how the question was read; with it on
+    the trace, the turn is a case for the tools and config searches whether
+    or not anyone could judge the answer. `make corpus` files both from the
+    answer key; a person files a correction from the Langfuse UI in the same
+    shape.
 
     `extra="forbid"`, so a client sending `verdict` or `correct_sql` learns that
     here rather than by watching a corpus never fill up.
@@ -37,19 +45,27 @@ class FeedbackBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    correct: bool
+    correct: bool | None = None
     # Free text, and only worth asking for when the answer was wrong. It is the
     # side information a later optimisation reads, so it is prose rather than an
     # enum of reasons somebody guessed in advance.
     comment: str | None = None
+    reference_sql: str | None = None
+    reading: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_file(self) -> FeedbackBody:
+        if self.correct is None and not self.reference_sql:
+            raise ValueError("nothing to file: give `correct`, `reference_sql`, or both")
+        return self
 
 
 class FeedbackOut(BaseModel):
-    """Where the verdict went. The trace is the record, not a row here."""
+    """Where it went. The trace is the record, not a row here; `filed` names
+    the scores that landed on it."""
 
     trace_id: str
-    name: str
-    value: float
+    filed: list[str]
 
 
 class CacheEntryOut(BaseModel):
