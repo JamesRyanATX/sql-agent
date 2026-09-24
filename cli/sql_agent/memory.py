@@ -7,6 +7,8 @@ demo. `reset` throws both away.
 
 from __future__ import annotations
 
+from typing import Any
+
 import click
 
 from sql_agent import config, http, render
@@ -29,38 +31,82 @@ async def _cache(kind: str | None) -> None:
     )
     summary, entries = body["summary"], body["entries"]
 
-    click.echo(
-        click.style(
-            f"{summary['total']} entries, {summary['verified']} verified", bold=True
-        )
-        + render.dim(
-            f"  ({summary['stale']} stale, {summary['disabled']} disabled)"
-        )
-    )
+    click.echo(click.style(_header(summary), bold=True) + _trouble(summary))
     if not entries:
         click.echo("cache is empty")
         return
 
+    # Every line starts at column one. The blank line is what separates entries;
+    # indenting the body under the name only pushed long claims into wrapping,
+    # and a multi-line SQL fragment fell back to the margin anyway.
     for e in entries:
-        marks = [click.style("✓", fg="green") if e["verified"] else " "]
-        if e["origin"] == "human":
-            marks.append(click.style("[human]", fg="green"))
-        if e["pinned"]:
-            marks.append(click.style("[pinned]", fg="green"))
-        if e["tombstone"]:
-            marks.append(click.style("[tombstone]", fg="yellow"))
-        if e["stale"]:
-            marks.append(click.style("[STALE]", fg="red"))
-
-        name = click.style(e["name"] or "(unnamed)", bold=True)
-        meta = render.dim(f"{e['kind']}  ×{e['hits']}")
         click.echo()
-        click.echo(f"{' '.join(marks)} {name}  {meta}")
-        click.echo(f"    {e['claim']}")
+        click.echo("  ".join(_title(e)))
+        if e["kind"] == "recipe" and not e["verified"]:
+            # Said only when it is so, and as where the SQL came from rather
+            # than as a verdict. Three wordings of "verified" on every recipe
+            # each needed a paragraph; a receipt reading "not stolen" on every
+            # item. The check is `graph.grounded_in`: the fragment the model
+            # typed into the note, against the query the agent executed. It
+            # fails when the model writes the query it thinks should have run.
+            click.secho(
+                "this SQL was not part of any query the agent ran; "
+                "it is the model's suggestion",
+                fg="yellow",
+            )
+        click.echo(e["claim"])
         if e["sql_fragment"]:
-            click.secho(f"    SQL: {e['sql_fragment']}", fg="cyan")
+            first, *rest = e["sql_fragment"].splitlines() or [""]
+            click.secho(f"SQL: {first}", fg="cyan")
+            for line in rest:
+                # Under the first line of SQL, not under "SQL:", so a query
+                # reads as the block it was written as.
+                click.secho(f"     {line}", fg="cyan")
         if e["tables"]:
-            click.echo(render.dim(f"    tables: {', '.join(e['tables'])}"))
+            click.echo(render.dim(f"tables: {', '.join(e['tables'])}"))
+
+
+def _header(summary: dict[str, Any]) -> str:
+    """The count, and nothing about the SQL check: "4 entries, 1 verified"
+    read as three entries with something wrong, when three were schema facts
+    the check does not apply to. The check speaks on the entry, when it
+    failed."""
+    noun = "entry" if summary["total"] == 1 else "entries"
+    return f"{summary['total']} {noun}"
+
+
+def _trouble(summary: dict[str, Any]) -> str:
+    """Stale and disabled counts, only when there are any. Two zeros in every
+    header is a line nobody reads, and then the one time it matters it is
+    missed."""
+    parts = []
+    if summary["stale"]:
+        parts.append(click.style(f"{summary['stale']} stale", fg="red"))
+    if summary["disabled"]:
+        parts.append(render.dim(f"{summary['disabled']} disabled"))
+    return "  " + ", ".join(parts) if parts else ""
+
+
+def _title(e: dict[str, Any]) -> list[str]:
+    """Name, kind, how much it has been used, then the marks that apply."""
+    parts = [click.style(e["name"] or "(unnamed)", bold=True), render.dim(e["kind"])]
+    parts.append(render.dim(_usage(e["hits"])))
+    if e["origin"] == "human":
+        parts.append(click.style("[human]", fg="green"))
+    if e["pinned"]:
+        parts.append(click.style("[pinned]", fg="green"))
+    if e["tombstone"]:
+        parts.append(click.style("[tombstone]", fg="yellow"))
+    if e["stale"]:
+        parts.append(click.style("[STALE]", fg="red"))
+    return parts
+
+
+def _usage(hits: int) -> str:
+    """`hits` is how many finished turns leaned on the entry."""
+    if hits == 0:
+        return "unused"
+    return "used in 1 turn" if hits == 1 else f"used in {hits} turns"
 
 
 @click.command()

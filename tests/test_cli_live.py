@@ -66,9 +66,44 @@ async def test_cache_renders_what_the_model_would_read(capsys, agent_conn):
         assert "revenue excludes cancelled orders" in out
         assert "SQL: WHERE status <> 'cancelled'" in out
         assert "tables: orders" in out
+        assert "unused" in out
+        # A recipe whose SQL was run says nothing about it. "1 verified" in
+        # the header, then "verified" on the line, then three rewordings of
+        # it: each needed a paragraph, on a check that passes 97% of the time.
+        assert "verified" not in out
+        assert "suggestion" not in out
+        # Every line starts at the margin; the blank line separates entries.
+        assert not any(line.startswith("    ") for line in out.splitlines())
     finally:
         await agent_conn.execute(
             "DELETE FROM cache_entry WHERE name = 'spec:cli revenue'"
+        )
+
+
+async def test_a_recipe_the_agent_never_ran_says_so(capsys, agent_conn):
+    """The one case the check exists for: the model wrote the query it thinks
+    should have run. Said as where the SQL came from, on that entry only."""
+    await store.write_entries(
+        agent_conn,
+        [
+            store.CacheEntry(
+                kind="recipe",
+                name="spec:cli engaged customer",
+                claim="engaged customers also ordered in the last 90 days",
+                sql_fragment="orders WHERE created > now() - interval '90 days'",
+                tables=["customer", "orders"],
+                verified=False,
+            )
+        ],
+    )
+    try:
+        await memory._cache(None)
+        out = capsys.readouterr().out
+        assert "this SQL was not part of any query the agent ran" in out
+        assert out.count("model's suggestion") == 1
+    finally:
+        await agent_conn.execute(
+            "DELETE FROM cache_entry WHERE name = 'spec:cli engaged customer'"
         )
 
 
