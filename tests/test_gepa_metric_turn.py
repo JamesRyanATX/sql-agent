@@ -250,6 +250,24 @@ def test_right_rows_in_the_wrong_order_are_told_that_specifically():
     assert "the order is not" in result.text()
 
 
+def test_a_revenue_the_graph_wrote_as_a_string_is_a_right_answer():
+    """The rows on a `TurnReplayed` came through `json.dumps(default=str)`, so
+    a `SUM` over a `numeric` column is the string `"1803600.84"`; the reference
+    fetched the `Decimal`. Every revenue case in the first config run scored
+    zero on exactly this, with feedback quoting the same number twice."""
+    from decimal import Decimal
+
+    result = score(
+        turn(rows=[{"revenue": "1803600.84"}]),
+        case(name="revenue_total", expect=None),
+        reference((Decimal("1803600.84"),)),
+    )
+
+    assert result.terms["correct"] == 1.0
+    assert result.value == pytest.approx(1.0)
+    assert WITHHELD not in result.text()
+
+
 def test_a_scalar_that_is_merely_wrong_says_so_plainly():
     result = score(turn(rows=[{"n": 2000}]), case(), reference((1840,)))
 

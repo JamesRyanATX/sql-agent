@@ -90,6 +90,46 @@ def test_two_timestamps_at_one_instant_match():
     assert normalise(utc) == normalise(other)
 
 
+def test_a_number_the_graph_wrote_as_a_string_is_still_the_number():
+    """The graph serialises rows with `json.dumps(default=str)`, so a Postgres
+    `numeric` reaches the metric as `"1803600.84"` while the reference fetched
+    the `Decimal`. Same answer. This is the mismatch that scored every revenue
+    case in the config run at zero."""
+    assert compare(rows(("1803600.84",)), rows((Decimal("1803600.84"),)), ordered=False).exact
+    assert compare(rows(("1840",)), rows((1840,)), ordered=False).exact
+    assert compare(rows(("-5",)), rows((-5,)), ordered=False).exact
+    # The cents rule still applies once it is a number again.
+    assert compare(rows(("768.6297",)), rows((768.63,)), ordered=False).exact
+    assert not compare(rows(("768.62",)), rows((768.63,)), ordered=False).exact
+
+
+def test_a_label_that_is_not_a_plain_number_stays_a_label():
+    """`Decimal()` would take these. A label is not a number because a parser
+    is generous."""
+    for text in ("12 west", "1_000", "inf", "nan", "1,840", "$5"):
+        assert normalise(text) == text.casefold()
+        assert not compare(rows((text,)), rows((1840,)), ordered=False).exact
+
+
+def test_a_timestamp_the_graph_wrote_as_a_string_is_still_the_instant():
+    """`str(datetime)` uses a space where `isoformat()` uses a T. The graph
+    writes the first; the reference side has the object."""
+    aware = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    # Naive on purpose: a `timestamp without time zone` column comes back
+    # without one, and its string has no offset to parse.
+    naive = datetime(2026, 1, 1, 12, 0)
+    assert compare(rows((str(aware),)), rows((aware,)), ordered=False).exact
+    assert compare(rows((str(naive),)), rows((naive,)), ordered=False).exact
+    # And a bare date is a date, not midnight.
+    assert compare(rows(("2026-01-01",)), rows((date(2026, 1, 1),)), ordered=False).exact
+    assert not compare(rows(("2026-01-01",)), rows((naive.replace(hour=0),)), ordered=False).exact
+
+
+def test_a_label_shaped_like_a_date_but_not_one_stays_a_label():
+    assert normalise("2026-Q1 plan") == "2026-q1 plan"
+    assert normalise("2026-13-45") == "2026-13-45"
+
+
 # --------------------------------------------------------------------- rows
 
 
@@ -153,6 +193,22 @@ def test_ties_may_be_ordered_either_way():
     swapped = rows(("ana", 10), ("cy", 9), ("bo", 9), ("di", 8))
 
     assert compare(swapped, answer, ordered=True).exact
+
+
+def test_order_is_checked_when_the_measures_arrived_as_strings():
+    """The graph writes a `numeric` revenue as a string, and the order check
+    picks its measures by `Decimal`. Before strings were read back, a
+    candidate's money column carried no measures at all, so an ordered money
+    case could never have its order checked."""
+    answer = rows(("ana", Decimal("10.50")), ("bo", Decimal("9.25")), ("di", Decimal("8.00")))
+    right = rows(("ana", "10.50"), ("bo", "9.25"), ("di", "8.00"))
+    reversed_ = rows(("di", "8.00"), ("bo", "9.25"), ("ana", "10.50"))
+
+    assert compare(right, answer, ordered=True).exact
+    found = compare(reversed_, answer, ordered=True)
+    assert not found.exact
+    assert not found.order_ok
+    assert found.first_disorder == 0
 
 
 def test_a_genuinely_wrong_order_is_still_wrong():

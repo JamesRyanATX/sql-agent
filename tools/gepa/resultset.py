@@ -29,6 +29,7 @@ Pure. No database, no clock, no model.
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -141,6 +142,10 @@ def normalise(value: Cell) -> Cell:
     about. Postgres does distinguish them, and no case in `demo/golden/` returns
     a boolean cell. The test that needs the distinction is the one that should
     introduce it.
+
+    A `str` is read back before it is folded: the candidate's rows arrive
+    through `json.dumps(default=str)`, so a number or a timestamp on that side
+    is a string of one. See `_retyped`.
     """
     if value is None:
         return value
@@ -155,8 +160,45 @@ def normalise(value: Cell) -> Cell:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, str):
-        return value.strip().casefold()
+        return _retyped(value.strip())
     return str(value)
+
+
+# A number as `str(Decimal)` or `str(float)` writes one. Strict on purpose: what
+# `Decimal()` accepts is wider — `"1_000"`, `"inf"`, `"  nan"` — and a label
+# that happens to look like one of those is a label.
+NUMBER = re.compile(r"[+-]?\d+(\.\d+)?([eE][+-]?\d+)?")
+
+
+def _retyped(text: str) -> Cell:
+    """A string read back as the value it was before `json.dumps(default=str)`.
+
+    The graph serialises every row that way (`app/graph.py`, the `rows` event),
+    so on the candidate side a Postgres `numeric` arrives as `"1803600.84"` and
+    a timestamp as `"2026-01-01 12:00:00+00:00"`. The reference side fetches
+    directly and has the `Decimal` and the `datetime`. This is the one function
+    both sides pass through, so it is where the two spellings meet, and a text
+    column that happens to hold `"12"` is folded the same way on each side and
+    still matches itself. It also puts a
+    `Decimal` back where `_measure` looks for one, which is what lets an
+    ordered money case have its order checked at all.
+    """
+    if NUMBER.fullmatch(text):
+        return _number(Decimal(text))
+    # Four digits and a dash is the front of an ISO date; nothing else is
+    # worth handing to a parser.
+    if len(text) >= 10 and text[4] == "-" and text[:4].isdigit():
+        # Date first: `datetime.fromisoformat` accepts a bare date and would
+        # make it midnight, and a `date` cell normalises without a time.
+        try:
+            return normalise(date.fromisoformat(text))
+        except ValueError:
+            pass
+        try:
+            return normalise(datetime.fromisoformat(text))
+        except ValueError:
+            pass
+    return text.casefold()
 
 
 def _number(value: int | float | Decimal) -> Cell:
