@@ -396,8 +396,9 @@ def _tools_notes() -> str:
         "`input_schema` do not change, and a candidate could not have changed\n"
         "them.\n\n"
         "A description that reads well is not the same as one that made the\n"
-        "explore loop shorter. What was measured is whole turns against\n"
-        "demo/golden/, and nothing here saw a database other than the demo.\n"
+        "explore loop shorter. What was measured is whole turns against the\n"
+        "scored turns in the traces, and nothing here saw a database other\n"
+        "than the one those turns ran on.\n"
     )
 
 
@@ -780,8 +781,8 @@ def _config_notes() -> str:
         "to promote: config/config.yaml — replace each node's `effort` with the\n"
         "value above. The `model:` block does not change, and a candidate could\n"
         "not have changed it.\n\n"
-        "What was measured is whole cold turns against demo/golden/ on the\n"
-        "model config.yaml names. Effort is a fraction of a model's own\n"
+        "What was measured is whole cold turns against the scored turns in\n"
+        "the traces, on the model config.yaml names. Effort is a fraction of a model's own\n"
         "thinking, so a profile found on one model is not a profile for\n"
         "another. `plan` made no call on these cold turns, so its value above\n"
         "is the seed's, untested. Two nodes were charged and not judged:\n"

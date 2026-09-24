@@ -160,9 +160,11 @@ The GIF. It is the same script, recorded, with real numbers.
 ## 2. A corpus from traces, and the human in it — 5 min
 
 **Status: built and run against the live model. `make corpus` asks the nineteen
-golden questions and files a verdict on each trace. There was a menu after
-every `sql-agent ask` answer; it was removed, because nothing read what it
-filed. The human in this loop wrote the reference queries.**
+golden questions and files, on each trace, the reference query and, where the
+answer is fixed, a verdict. The tools and config searches read their cases
+back from those traces. There was a menu after every `sql-agent ask` answer;
+it was removed, because nothing read what it filed. The human in this loop
+wrote the reference queries.**
 
 ### Say
 
@@ -186,15 +188,19 @@ Pre-baked the night before; on stage, show the table it printed and one trace.
 
 - `demo/golden/` holds a reference query per question, and nine of them carry
   the number `demo/demo.sql` fixes. This asks all nineteen with the memory off,
-  compares the rows against the written answer, and files the verdict on the
-  turn's trace as a score named `correct`, beside the tool calls and the SQL.
+  files each one's reference query on the turn's trace as a score named
+  `reference`, and for the nine, compares the rows against the written answer
+  and files the verdict as a score named `correct`, beside the tool calls and
+  the SQL.
 - Be precise about what that means. **I still wrote the labels.** I wrote
   nineteen reference queries instead of judging nineteen answers one at a
   time. The human effort moved; it did not vanish. You can automate the verdict
   exactly when you already have ground truth, and getting ground truth is the
   expensive part. A customer's warehouse does not come with it.
 - The other ten have no written answer because theirs moves with the date.
-  They are asked anyway: their traces are what the harvest reads.
+  They are asked anyway, and the reference alone makes each a case: the
+  searches run the reference and the candidate's query at the same moment and
+  compare rows, so a moving answer is no special case there.
 - The questions are aimed at the traps on purpose. A corpus the agent already
   answers perfectly measures nothing, because a candidate cannot win where the
   seed already wins. Measured on the dev model, the seed gets 10 of 19; the
@@ -203,10 +209,14 @@ Pre-baked the night before; on stage, show the table it printed and one trace.
 Then, in Langfuse: one trace, the score on it, in the same field a metric's
 own feedback goes into.
 
-- **What nothing does yet: read them back.** The corpus the optimiser trains on
-  was authored by hand, not harvested from these verdicts. The verdict is
-  recorded where a metric's own feedback is recorded, and that is where a human
-  correction would enter. Say that, and no more.
+- **And then read them back.** `make gepa-tools` and `make gepa-config` harvest
+  their cases from these traces: a turn with a reference query is a case, and
+  a turn judged right with no reference uses the query it ran. `make corpus`
+  primes that with nineteen; after it, any turn anyone asks and scores in
+  Langfuse, or files a corrected query on, is in the next harvest. That is
+  the flywheel, and the human's part of it is the reference: written once
+  in the answer key, or typed once into the field the metric's own feedback
+  goes into.
 
 ---
 
@@ -445,12 +455,13 @@ never revisited. They live outside the prompt files, nobody calls them prompts,
 and they are in the model's context on every cold turn.
 
 They are four keys of one candidate, scored by running whole cold turns against
-`demo/golden/` — nineteen questions with a known answer. A candidate that gets a
-question wrong which the seed got right is discarded whatever it scored, and
-nothing is averaged.
+the scored turns harvested from the traces — the nineteen `make corpus` filed,
+plus whatever has been asked and scored since. A candidate that gets a question
+wrong which the seed got right is discarded whatever it scored, and nothing is
+averaged.
 
 ```bash
-make gepa-tools GEPA_ARGS=--probe-only   # the seed over all 19, ~220k tokens
+make gepa-tools GEPA_ARGS=--probe-only   # harvest, then the seed over every case, ~220k tokens
 make gepa-tools                          # the search, ~690k tokens, asks first
 ```
 
@@ -496,7 +507,7 @@ generate_sql: {effort: high}     answer:   {effort: low}
   model, 73% of the corpus's spend. That is where a search has room.
 
 ```bash
-make gepa-config GEPA_ARGS=--probe-only  # the seed over all 19, and where its tokens went
+make gepa-config GEPA_ARGS=--probe-only  # harvest, then the seed over every case, and where its tokens went
 make gepa-config                         # the search, ~690k tokens, asks first
 ```
 

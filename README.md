@@ -243,13 +243,24 @@ make demo-verify   # check the take from the turn table
 
 The cache makes a turn cheaper. This makes the prompt better — a second
 flywheel, turning traces the agent has already produced into a search over the
-prose that produced them. It is built for the `extract` node only, it is manual,
-and a human commits the result.
+prose that produced them. Three things are searchable: the `extract` node's
+prompt, the four tool descriptions, and the per-node effort block. Each is
+manual, and a human commits the result.
 
 ```bash
 make gepa-extract              # read the new prompt
 make gepa-extract > new.md     # keep it
+make gepa-tools                # the four tool descriptions
+make gepa-config               # the per-node effort block
 ```
+
+Every one of them reads its corpus from Langfuse. `extract` reads its own
+recorded calls. `tools` and `config` read whole turns whose trace carries a
+reference query — the query the answer should have come from — or a verdict
+that the query they ran was right. `make corpus` primes that by asking the
+nineteen questions in `demo/golden/` cold and filing each one's reference and,
+where the answer is fixed, a verdict; after that the corpus grows from use, and
+a verdict or a corrected query filed in the Langfuse UI is in the next harvest.
 
 **One command, needing no other.** It harvests the telemetry, searches, gates
 the pool on the probes and prints the winner — fresh corpus and fresh run dir

@@ -79,14 +79,17 @@ one thing a whole-turn metric needs.
   `ordered` (whether row order is part of the answer), and `tables` — which
   schema areas it touches, so a split can hold out an area.
 - 15–20 cases, and it must clear `THIN_CORPUS = 12` with margin.
-- **No traces exist yet.** The first step is `make corpus`: nineteen questions,
-  each asked with the memory off, so every turn is cold and the demo's memory is
-  left as it was. That run also produces nineteen distinct `extract` calls,
-  which is the corpus item 7 has been waiting for. It is unattended: the verdict
-  is computed by comparing against the answer written in the case file. A case arrives from it already certified:
-  the score says the answer was right, and the `sql.execute` span says what ran.
-- `extract` keeps its own trace-based harvest either way (`harvest.py`); this is
-  a second harvest beside it, not a replacement.
+- **Built, the other way round.** `make corpus` asks the nineteen questions
+  cold and files, on each turn's trace, the reference query as a TEXT score
+  named `reference` (its comment the reading) and, where the answer is fixed,
+  a `correct` verdict. `harvest.turn_cases` reads those back: a turn with a
+  reference is a case; a turn judged right with no reference uses the query
+  it ran; a turn judged wrong with no reference is dropped and counted. The
+  case is a `GoldenCase`, so nothing downstream changed shape. `demo/golden/`
+  is the answer key that primes the pump, not the training set, and the
+  corpus grows from any turn scored or corrected in the Langfuse UI.
+- `extract` keeps its own trace-based harvest (`harvest.extract_cases`); this
+  is a second harvest beside it, not a replacement.
 
 **Why `demo/golden/` may be committed when `tools/gepa/out/` is not.** That
 directory is gitignored because a harvested case holds a recorded prompt, and a
@@ -120,13 +123,11 @@ to the turn's trace as a score named `correct` and a comment.
   afternoon's traces from memory. The corpus fills as a by-product of using the
   agent, which is the reason to build this at all.
 
-  **Not built. The verdict is written and nothing reads it.** `tracing.score`
-  has one caller and no counterpart: `harvest.py` filters on span names and
-  prompt fingerprints, and `demo/golden/` was authored by hand rather than
-  harvested. So the write half is real and the sentence above is still a plan.
-  Closing it needs a scores reader in `app/tracing.py` and a second harvest
-  beside `extract_cases` that turns an approved turn into a case. Until then,
-  say so on stage rather than implying the loop is joined.
+  **Built.** `tracing.scores` reads verdicts and references back through the
+  v3 endpoint, and `harvest.turn_cases` turns a scored turn into a case:
+  approved with no reference, the query it ran is the reference; with a
+  `reference` score, that query is. The loop is joined, and the keystroke
+  that joins it is a verdict or a corrected query in the Langfuse UI.
 - **A `2` produces prose, which is not a scorable case.** "That was wrong" gives a
   metric nothing to compare 150 rollouts against. Such a turn enters the corpus
   only once a corrected `reference_sql` arrives; until then it is *reflection*

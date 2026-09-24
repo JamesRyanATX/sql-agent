@@ -106,9 +106,17 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # One make target per searchable thing. `make gepa-extract` is a node's prompt;
 # `make gepa-tools` is the four tool descriptions in app/tools.py and
 # `make gepa-config` is the per-node effort block in config/config.yaml, both
-# scored by running whole cold turns against demo/golden/. Anything else says
-# why it is not searchable rather than failing. `gepa` is a dependency group,
-# so none of this is in the image.
+# scored by running whole cold turns against a corpus of scored turns. Anything
+# else says why it is not searchable rather than failing. `gepa` is a
+# dependency group, so none of this is in the image.
+#
+# Every target harvests its corpus from Langfuse, which is the flywheel: the
+# agent's own turns, read back. `extract` reads its recorded calls; `tools`
+# and `config` read whole turns whose trace carries a reference query or a
+# verdict that the query they ran was right. `make corpus` primes that with
+# the answer key's nineteen questions; after that it grows from use, one
+# scored turn at a time. `--days` is the window and `--resume` reuses the
+# last harvest, for all three.
 #
 #   make gepa-tools                                    read it
 #   make gepa-tools > new.md                           keep it
@@ -203,24 +211,27 @@ config:  ## what the server is running — config.yaml under config.local.yaml
 
 # --- the corpus: questions, asked cold, certified against a known answer ----
 #
-# The optimisation downstream needs turns with a label on them. For the demo's
-# questions the label is computable: `demo/golden/` holds what the answer should
-# be, so this asks each question and compares. Nobody is at the keyboard, so it
-# can be left running. Verdicts land on the traces, so Langfuse has to be up
+# The searches downstream need turns with a reference query on them. For the
+# demo's questions that is written down: `demo/golden/` holds the query each
+# answer should come from, and where the fixture fixes the number, the number.
+# This asks each question cold, files the reference on the turn's trace, and
+# where it can, a verdict too. Nobody is at the keyboard, so it can be left
+# running. Everything lands on the traces, so Langfuse has to be up
 # (`make langfuse-up`) and the server restarted with both keys.
 #
-# Nine of the nineteen get a verdict. The rest have no written answer because
-# theirs moves — revenue and date windows — and they are asked anyway, because
-# their traces are what a later harvest reads.
+# All nineteen get a reference; nine also get a verdict. The other ten have no
+# written answer because theirs moves — revenue and date windows — and the
+# reference alone makes each of them a case.
 #
-# To judge one by hand instead, `sql-agent ask` has the menu. That is the beat
-# the talk shows; this is the one that fills the corpus.
+# This primes the pump. After it, the corpus is whatever anyone asked and
+# scored: a verdict or a corrected query filed in the Langfuse UI is read by
+# the next `make gepa-tools` the same way.
 #
 # Every question is asked with the memory off, so a run reads nothing the demo
 # taught the agent and writes nothing back. The turns still land in the turn log
 # — which is why `demo-verify` reads the five most recent rather than all of
 # them.
-corpus:  ## ask demo/golden cold and certify each answer (~19 model turns)
+corpus:  ## ask demo/golden cold, file the reference and, where known, the verdict (~19 model turns)
 	uv run sql-agent corpus demo/golden
 
 demo: health reset  ## record the terminal demo — live, 20-30 min of real model time

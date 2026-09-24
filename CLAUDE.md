@@ -39,6 +39,7 @@ make corpus                            # ask demo/golden cold, certify each answ
 - All cache entries (including tombstones) load on every turn.  
 - One memory, always. `sql-agent ask --no-memory` is a turn that neither reads it nor writes to it; `memory: false` in the ask body, `memory` in `TurnState`, gating `load_cache` and the *save* in `extract` (never the `extract` model call, which the optimiser harvests).  
 - Per‑node `effort` controls model usage; there is no global override.  
+- Every `make gepa-*` target harvests its corpus from Langfuse. `extract` reads its recorded calls; `tools` and `config` read whole turns whose trace carries a `reference` score (the query the answer should have come from, as a TEXT score) or a `correct` verdict of 1. `demo/golden/` is the answer key `make corpus` files, not the training set. Rollouts open no `turn` span, which is what keeps them out of the next harvest.  
 - Dialect capabilities (read‑only, DML/DDL blocks, statement timeout) live in `app/dialects.py`.  
 - SQL is executed via `exec_driver_sql`, never `text()`.  
 - Identifiers are quoted using `quoted_name(.., quote=True)`.  
@@ -60,7 +61,7 @@ The demo (`demo/demo.sql`) encodes five intentional pitfalls; tests in `tests/te
 
 ## Observability
 Langfuse tracing is enabled only when both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set. No partial enablement. Traces capture system prompts, model generations, SQL statements, and row counts.  
-A verdict on a turn (`POST /v1/turns/{id}/feedback`, which `make corpus` calls) is a Langfuse score named `correct`, with any prose as its comment. `sql-agent ask` no longer asks for one: nothing read what the menu filed. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
+A verdict on a turn (`POST /v1/turns/{id}/feedback`, which `make corpus` calls) is a Langfuse score named `correct`, with any prose as its comment; the same endpoint files a reference query as a TEXT score named `reference`, with the reading as its comment. `tracing.scores()` reads either back. `sql-agent ask` no longer asks for one: nothing read what the menu filed. It rides on the trace rather than a column: `make reset` empties the turn log, and the label has to outlive that. 409 when the turn has no trace.
 
 ## Prompt Management
 Prompts live in `config/prompts/*.md`. Each file is the full prompt for a graph node; loading is memoised per process. Missing or empty prompts raise errors. The loader (`app/prompts.py`) reads from `$CONFIG_DIR/prompts/<node>.md`.
