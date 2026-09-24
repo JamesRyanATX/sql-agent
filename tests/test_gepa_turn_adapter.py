@@ -245,7 +245,9 @@ def test_only_the_components_gepa_asked_about_come_back(adapter, monkeypatch, po
 def check_with(monkeypatch, cases, model) -> tuple[int, str]:
     from tools.gepa import cli  # noqa: F401 — imported for the monkeypatch below
 
-    monkeypatch.setattr(golden, "load", lambda: cases)
+    # The check reads the same harvested corpus a search would; here it is
+    # handed the cases directly, as the harvest would hand them over.
+    monkeypatch.setattr(targets, "_turn_corpus", lambda name, **kw: cases)
     monkeypatch.setattr(llm, "complete", model)
     with Loop() as loop:
         return targets._tools_check(loop, yes=True)

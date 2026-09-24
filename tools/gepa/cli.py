@@ -186,7 +186,7 @@ def cli(
         if chosen.check is None:
             raise click.ClickException(f"{chosen.name} has no cheap pre-check")
         with Loop() as loop:
-            raise SystemExit(chosen.check(loop, yes))
+            raise SystemExit(chosen.check(loop, yes, days=days, resume=resume))
 
     # An overfit run keeps its own run dir, front and transcript, so the real
     # run's are not wiped by the demonstration of what the real run refuses

@@ -422,3 +422,107 @@ def test_an_approved_answer_needs_no_comment(monkeypatch):
     assert tracing.score(trace_id="abc", name="correct", value=1.0) is True
     assert fake.scores[0]["value"] == 1.0
     assert fake.scores[0]["comment"] is None
+
+
+# ------------------------------------------------------------- reading scores
+
+
+class FakeScoresApi:
+    """The one read the harvest depends on: `api.scores_v3.get_many_v3`,
+    cursor-paged like observations. Pages are handed back in order, each
+    naming the cursor for the next, and the last names none."""
+
+    def __init__(self, pages: list[list[object]]) -> None:
+        self.pages = pages
+        self.asked: list[dict] = []
+
+    def get_many_v3(self, **kwargs):
+        self.asked.append(kwargs)
+        number = int(kwargs["cursor"] or 0)
+        data = self.pages[number] if number < len(self.pages) else []
+        following = str(number + 1) if number + 1 < len(self.pages) else None
+        meta = type("Meta", (), {"cursor": following})()
+        return type("Response", (), {"data": data, "meta": meta})()
+
+
+class FakeRow:
+    def __init__(self, **fields) -> None:
+        self.__dict__.update(fields)
+
+
+def on_trace(trace_id: str):
+    return type("Subject", (), {"kind": "trace", "id": trace_id})()
+
+
+def _client_with(pages):
+    api = FakeScoresApi(pages)
+    holder = type("Api", (), {"scores_v3": api})()
+    return type("Client", (), {"api": holder})(), api
+
+
+def test_scores_reads_every_page_under_one_name(monkeypatch):
+    """A harvest joins these to turn spans by trace id, so `trace_id`,
+    `value`, `string_value` and `comment` are the contract. The trace id
+    comes off the score's subject; a BOOLEAN score's value arrives as a bool
+    and leaves as 1.0 or 0.0, a TEXT score's as `string_value`."""
+    client, api = _client_with([
+        [FakeRow(subject=on_trace("t1"), name="correct", value=True,
+                 comment=None, timestamp=1, source="API")],
+        [FakeRow(subject=on_trace("t2"), name="correct", value=False,
+                 comment="counted the cancelled orders", timestamp=2, source="API"),
+         FakeRow(subject=on_trace("t2"), name="reference", value="SELECT 1",
+                 comment="the reading", timestamp=2, source="API")],
+    ])
+    monkeypatch.setattr(tracing, "client", lambda: client)
+
+    rows = list(tracing.scores(name="correct", since="yesterday"))
+
+    assert [r["trace_id"] for r in rows] == ["t1", "t2", "t2"]
+    assert [r["value"] for r in rows] == [1.0, 0.0, None]
+    assert rows[2]["string_value"] == "SELECT 1"
+    assert rows[1]["comment"] == "counted the cancelled orders"
+    assert [a["cursor"] for a in api.asked] == [None, "1"], "followed the cursor to the end"
+    assert api.asked[0]["name"] == "correct"
+    assert api.asked[0]["from_timestamp"] == "yesterday"
+    assert api.asked[0]["fields"] == "details,subject", "without these, no trace and no comment"
+
+
+def test_a_score_on_a_session_has_no_trace_to_join_on(monkeypatch):
+    session = type("Subject", (), {"kind": "session", "id": "s1"})()
+    client, _ = _client_with([[FakeRow(subject=session, name="correct", value=True,
+                                       comment=None, timestamp=1, source="API")]])
+    monkeypatch.setattr(tracing, "client", lambda: client)
+
+    assert next(iter(tracing.scores(name="correct")))["trace_id"] is None
+
+
+def test_scores_yields_nothing_when_tracing_is_off(monkeypatch):
+    monkeypatch.setattr(tracing, "client", lambda: None)
+    assert list(tracing.scores(name="correct")) == []
+
+
+def test_a_reference_query_lands_as_a_text_score(monkeypatch):
+    """The query in the value, the reading in the comment, TEXT so the API
+    takes a string where `score()`'s BOOLEAN takes a 1 or a 0."""
+    fake = FakeClient()
+    monkeypatch.setattr(tracing, "client", lambda: fake)
+
+    assert tracing.score_text(
+        trace_id="abc", name="reference",
+        value="SELECT count(*) FROM customer WHERE deleted_at IS NULL",
+        comment="a deleted customer is not a customer",
+    ) is True
+    assert fake.scores == [
+        {
+            "name": "reference",
+            "value": "SELECT count(*) FROM customer WHERE deleted_at IS NULL",
+            "trace_id": "abc",
+            "data_type": "TEXT",
+            "comment": "a deleted customer is not a customer",
+        }
+    ]
+
+
+def test_a_reference_query_has_nowhere_to_land_when_tracing_is_off(monkeypatch):
+    monkeypatch.setattr(tracing, "client", lambda: None)
+    assert tracing.score_text(trace_id="abc", name="reference", value="SELECT 1") is False

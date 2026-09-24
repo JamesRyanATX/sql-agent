@@ -1,8 +1,9 @@
 """The one module that knows Langfuse exists.
 
 `import langfuse` appears here and nowhere else. The rest of `app/` sees three
-context managers — `turn`, `generation`, `span` — plus `observations()` and a
-boolean. A tool observation is a `span` with `as_type="tool"`.
+context managers — `turn`, `generation`, `span` — plus `score` and `score_text`
+to write a verdict, `observations()` and `scores()` to read everything back,
+and a boolean. A tool observation is a `span` with `as_type="tool"`.
 
 **Off is the default, and off is free.** With no keys set no client is
 constructed, `langfuse` is never imported, and every helper yields the same
@@ -107,6 +108,34 @@ def score(
         trace_id=trace_id,
         # 1 or 0 and nothing else; the API rejects any other value at this type.
         data_type="BOOLEAN",
+        comment=comment,
+    )
+    return True
+
+
+def score_text(
+    *,
+    trace_id: str,
+    name: str,
+    value: str,
+    comment: str | None = None,
+) -> bool:
+    """Attach a piece of text to a turn that has already finished.
+
+    The reference query is the case: `make corpus` files the golden query on
+    every turn it asks, and a person files a corrected one from the Langfuse
+    UI, in the same field. A TEXT score carries a string where `score()`
+    carries a 1 or a 0; everything else about it is the same, including that
+    True means accepted, not stored.
+    """
+    lf = client()
+    if lf is None:
+        return False
+    lf.create_score(
+        name=name,
+        value=value,
+        trace_id=trace_id,
+        data_type="TEXT",
         comment=comment,
     )
     return True
@@ -263,6 +292,72 @@ def observations(
         cursor = response.meta.cursor
         if not cursor:
             return
+
+
+def scores(
+    *,
+    name: str,
+    since: Any = None,
+    page: int = 100,
+) -> Iterator[dict[str, Any]]:
+    """Every score filed under one name, oldest page first.
+
+    The other half of `score()` and `score_text()`. A verdict or a reference
+    query lands on a trace, and this is how a harvest reads it back: `value`
+    for a BOOLEAN or NUMERIC score (a 1.0 or a 0.0), `string_value` for a TEXT
+    or CATEGORICAL one, `comment` for either. Through the v3 endpoint: the v2
+    one is gone on a Langfuse v4 server, which is what `make langfuse-up`
+    runs, and it answers 404 with a sentence saying so. A score names what it
+    is on as a `subject`; only one on a trace, or on an observation inside a
+    trace, has a trace id to join on.
+
+    Yields nothing when tracing is off.
+    """
+    lf = client()
+    if lf is None:
+        return
+
+    cursor = None
+    while True:
+        # Like `observations()`: the core fields come alone unless the groups
+        # are named. `subject` is the trace the score is on, `details` its
+        # comment; without them a verdict reads back as a bare 1 or 0 on
+        # nothing. An unknown group name is a 400.
+        response = lf.api.scores_v3.get_many_v3(
+            name=name,
+            from_timestamp=since,
+            fields="details,subject",
+            limit=page,
+            cursor=cursor,
+        )
+        for row in response.data:
+            value = getattr(row, "value", None)
+            yield {
+                "trace_id": _trace_of(row),
+                "name": row.name,
+                "value": float(value) if isinstance(value, (bool, int, float)) else None,
+                "string_value": value if isinstance(value, str) else None,
+                "comment": row.comment,
+                "timestamp": row.timestamp,
+                "source": getattr(row, "source", None),
+            }
+        cursor = response.meta.cursor
+        if not cursor:
+            return
+
+
+def _trace_of(row: Any) -> str | None:
+    """The trace a score is on, from its subject. A session or an experiment
+    score has none, and a harvest keyed on turns cannot use it."""
+    subject = getattr(row, "subject", None)
+    if subject is None:
+        return None
+    kind = getattr(subject, "kind", None)
+    if kind == "trace":
+        return subject.id
+    if kind == "observation":
+        return getattr(subject, "trace_id", None)
+    return None
 
 
 def _as_json(value: Any) -> Any:

@@ -218,3 +218,25 @@ async def test_resolving_cannot_write(pool):
     with pytest.raises(Exception) as e:
         await reference.resolve([delete])
     assert dialects.is_read_only_error(e.value)
+
+
+# ------------------------------------------------------------ the jsonl cache
+
+
+def test_a_harvest_round_trips_through_jsonl(tmp_path):
+    """`tools` and `config` cache their harvest as one case a line and reuse
+    it under `--resume`. The multi-line reference query has to come back as
+    the one string it left as."""
+    path = tmp_path / "tools.jsonl"
+
+    golden.write_jsonl(path, CASES)
+
+    assert golden.read_jsonl(path) == CASES
+
+
+def test_a_stale_jsonl_cache_says_to_re_harvest(tmp_path):
+    path = tmp_path / "tools.jsonl"
+    path.write_text('{"name": "x", "format_version": 0}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Re-harvest"):
+        golden.read_jsonl(path)

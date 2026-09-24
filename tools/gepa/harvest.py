@@ -1,10 +1,17 @@
-"""Turn recorded `extract` calls into a replayable corpus.
+"""Turn what the traces recorded into replayable corpora.
+
+Two harvests. `extract_cases` turns recorded `extract` calls into cases for the
+`extract` search. `turn_cases` turns whole scored turns into cases for the
+`tools` and `config` searches: a turn is a case when its trace carries a
+reference query, filed as a score, or a verdict that the query it ran was
+right. Both read only Langfuse.
 
 **Langfuse is the record, and this reads only Langfuse.** Which prose produced a
 call comes from its turn span's metadata, never from a join to `turn.trace_id`:
 `make reset` empties that table by design while the trace store keeps
 everything, so the join would turn every earlier recording into debris — intact
-and unattributable.
+and unattributable. The verdicts live there for the same reason: a label has to
+outlive the turn log.
 
 Worth knowing for later: Langfuse has the *inputs*, Postgres has the *outcomes*
 — whether the SQL errored, how many fix attempts — and only Postgres gets reset.
@@ -17,10 +24,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from app import tracing
 from tools.gepa.cases import ExtractCase, filed_from, sql_from
+from tools.gepa.golden import GoldenCase
 from tools.gepa.replay import NODE as REPLAY_NODE
+
+# The two score names a turn is read back through. `correct` is the verdict
+# `make corpus` files where the answer is fixed, or a person files in the UI;
+# `reference` is the query the answer should have come from, as a TEXT score
+# whose comment is the reading. The API writes both; see app/api.py.
+CORRECT = "correct"
+REFERENCE = "reference"
 
 
 @dataclass
@@ -161,3 +177,142 @@ def _label(trace_id: str, message: str) -> str:
     question = message.removeprefix("Question: ").split("\n", 1)[0]
     slug = re.sub(r"[^a-z0-9]+", "-", question.casefold()).strip("-")[:36]
     return f"{trace_id[:8]}-{slug}" if slug else trace_id[:8]
+
+
+# ------------------------------------------------------------------ whole turns
+
+
+@dataclass
+class TurnHarvest:
+    """What came back, and what did not, one counter per reason."""
+
+    cases: list[GoldenCase] = field(default_factory=list)
+    seen: int = 0
+    incomplete: int = 0
+    unjudged: int = 0
+    wrong_unreferenced: int = 0
+    duplicate: int = 0
+
+    def report(self) -> str:
+        lines = [f"{len(self.cases)} cases from {self.seen} recorded turns"]
+        dropped = [
+            ("did not finish: no question or no SQL on the turn", self.incomplete),
+            ("no verdict and no reference query on the trace", self.unjudged),
+            ("judged wrong, and nobody wrote what right is", self.wrong_unreferenced),
+            ("the same question as a case already kept", self.duplicate),
+        ]
+        if any(n for _, n in dropped):
+            lines.append(f"  dropped {self.seen - len(self.cases)}:")
+            lines += [f"    {n} {label}" for label, n in dropped if n]
+        return "\n".join(lines)
+
+
+def turn_cases(*, days: int = 30, since: datetime | None = None) -> TurnHarvest:
+    """Every recorded turn with a reference query, as a case.
+
+    The reference comes from the trace one of two ways. A `reference` score is
+    the query the answer should have come from, filed by `make corpus` from the
+    answer key or by a person from the Langfuse UI; its comment is the reading.
+    Failing that, a `correct` verdict of 1 says the query the turn itself ran
+    was right, so that query is the reference. A turn judged wrong with no
+    reference is dropped and counted: there is nothing to score a candidate
+    against.
+
+    Keyed on the `turn` span, which is also what keeps GEPA's own rollouts
+    out: `replay_turn` drives the graph without opening one (its docstring
+    says why), so a thousand rollouts never become the next round's corpus.
+    """
+    since = since or datetime.now(timezone.utc) - timedelta(days=days)
+    verdicts = _latest(tracing.scores(name=CORRECT, since=since))
+    references = _latest(tracing.scores(name=REFERENCE, since=since))
+
+    harvest = TurnHarvest()
+    # Newest turn first, so the case kept for a repeated question is the
+    # latest one asked; a `reference` score wins over a turn's own SQL.
+    spans = sorted(
+        tracing.observations(name="turn", kind="SPAN", since=since),
+        key=lambda s: _when({"timestamp": s.get("start_time")}),
+        reverse=True,
+    )
+    spans.sort(key=lambda s: (s.get("trace_id") or "") not in references)
+    kept: set[str] = set()
+
+    for span in spans:
+        harvest.seen += 1
+        trace_id = span.get("trace_id") or ""
+        question = ((span.get("input") or {}).get("question") or "").strip()
+        ran = ((span.get("output") or {}).get("sql") or "").strip()
+        if not question or not ran:
+            harvest.incomplete += 1
+            continue
+
+        reference = references.get(trace_id)
+        verdict = verdicts.get(trace_id)
+        if reference is None and verdict is None:
+            harvest.unjudged += 1
+            continue
+
+        if reference is not None:
+            sql = (reference.get("string_value") or "").strip()
+            reading = (reference.get("comment") or "").strip()
+        elif verdict.get("value"):
+            sql, reading = ran, ""
+        else:
+            harvest.wrong_unreferenced += 1
+            continue
+        if not sql:
+            harvest.unjudged += 1
+            continue
+
+        key = " ".join(question.casefold().split())
+        if key in kept:
+            harvest.duplicate += 1
+            continue
+        kept.add(key)
+
+        harvest.cases.append(
+            GoldenCase(
+                name=_label(trace_id, question),
+                question=question,
+                reference_sql=sql,
+                tables=[],
+                expect=None,
+                ordered=_orders(sql),
+                reading=reading,
+            )
+        )
+
+    return harvest
+
+
+def _latest(rows: Any) -> dict[str, dict[str, Any]]:
+    """trace_id -> the newest score under one name. A verdict can be filed
+    twice; the later one is the one meant."""
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        trace_id = row.get("trace_id") or ""
+        current = latest.get(trace_id)
+        if current is None or _when(row) >= _when(current):
+            latest[trace_id] = row
+    return latest
+
+
+def _when(row: dict[str, Any]) -> tuple[bool, Any]:
+    """A sortable stand-in for a timestamp that may be missing: anything
+    dated is later than nothing dated, and two blanks are equal."""
+    stamp = row.get("timestamp")
+    return (stamp is not None, stamp if stamp is not None else 0)
+
+
+def _orders(sql: str) -> bool:
+    """Whether row order is part of the answer: an ORDER BY outside any
+    parenthesis. A subquery's ordering says nothing about the result."""
+    depth = 0
+    for token in re.finditer(r"\(|\)|order\s+by", sql, re.IGNORECASE):
+        if token.group() == "(":
+            depth += 1
+        elif token.group() == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            return True
+    return False

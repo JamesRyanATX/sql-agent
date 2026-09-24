@@ -282,3 +282,21 @@ async def test_the_effort_each_node_ran_at_is_on_the_record(monkeypatch, pool):
     assert out.efforts["explore"] == "low"
     assert out.efforts["generate_sql"] == config().effort_for("generate_sql")
     assert set(out.efforts) == {"plan", "explore", "generate_sql", "fix", "extract", "answer"}
+
+
+async def test_a_rollout_opens_no_turn_span(monkeypatch, pool):
+    """The harvests key on the `turn` span: `turn_scope` for extract, and
+    `turn_cases` outright. A rollout that opened one would be the next
+    round's training data. This was a comment in `replay_turn`; now it is
+    checked."""
+    from app import tracing
+
+    def never(**kwargs):
+        raise AssertionError(f"a rollout opened a turn span: {kwargs}")
+
+    monkeypatch.setattr(tracing, "turn", never)
+    monkeypatch.setattr(llm, "complete", cold_turn())
+
+    out = await replay()
+
+    assert out.error is None

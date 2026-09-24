@@ -1,10 +1,18 @@
-"""Questions whose answer we know, written down by hand.
+"""Questions whose answer we know, written down by hand: the answer key.
 
-`cases.py` reads Langfuse, because an `extract` case *is* a recorded model call
-and the only place it exists is the trace. A golden case is the opposite: it is
-a claim about a fixture, and the fixture is `demo/demo.sql`, in this repo. So
-these are authored, and every reference query is executed before it is committed
+Not the training set. `make corpus` asks each of these cold and files its
+reference query, and where the fixture fixes it a verdict, on the turn's trace;
+the `tools` and `config` searches then read their cases back from the traces
+(`harvest.turn_cases`), the same way `extract` reads its calls. So the
+directory primes the pump, once, and after that the corpus grows from use: any
+turn anyone asks and scores. A golden case is a claim about a fixture, and the
+fixture is `demo/demo.sql`, in this repo, so these are authored, and every
+reference query is executed before it is committed
 (`tests/test_golden_corpus.py`).
+
+`GoldenCase` is also the shape a harvested turn case takes — name, question,
+reference query, whether order matters, the reading — so `write_jsonl` and
+`read_jsonl` below are what a harvest is cached and reused through.
 
 **A reference query, and where the fixture fixes it, the number too.** Two
 queries can be wrong together — the reference was subtly wrong when it was
@@ -37,7 +45,7 @@ Imports nothing from `app`.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -114,4 +122,32 @@ def load(directory: Path = GOLDEN) -> list[GoldenCase]:
     for row in rows:
         # Lines on disk, one query in memory. See the module docstring.
         row["reference_sql"] = "\n".join(row["reference_sql"])
+    return [GoldenCase(**row) for row in rows]
+
+
+def write_jsonl(path: Path, cases: list[GoldenCase]) -> None:
+    """A harvest, cached beside the run so `--resume` can reuse it. One case
+    a line, `reference_sql` as the one string it is in memory: this file is
+    read by the next run, not reviewed by a person, so the list-of-lines form
+    the committed files use buys nothing here."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for case in cases:
+            f.write(json.dumps(asdict(case)) + "\n")
+
+
+def read_jsonl(path: Path) -> list[GoldenCase]:
+    """The version is checked on the raw row first, as `load` does; a stale
+    harvest is re-harvested rather than edited, and the message says so."""
+    rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    stale = {row.get("format_version") for row in rows} - {FORMAT_VERSION}
+    if stale:
+        raise ValueError(
+            f"{path} holds cases at format_version {sorted(stale)}, and "
+            f"golden.py is at {FORMAT_VERSION}. Re-harvest: run without --resume."
+        )
     return [GoldenCase(**row) for row in rows]

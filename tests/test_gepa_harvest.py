@@ -264,3 +264,213 @@ def test_tracing_off_yields_an_empty_harvest_rather_than_an_error(monkeypatch):
     monkeypatch.setattr(tracing, "client", lambda: None)
     result = harvest.extract_cases()
     assert result.cases == [] and result.seen == 0
+
+
+# ------------------------------------------------------------- whole turns
+#
+# `turn_cases`: a turn is a case when its trace carries a reference query, or
+# a verdict that the query it ran was right. Both arrive as scores, so the
+# second stubbed function is `tracing.scores`, keyed by score name like the
+# observations store is keyed by observation name.
+
+RAN = "SELECT count(*) AS customers FROM customer"
+GOLDEN = "SELECT count(*) AS customers FROM customer WHERE deleted_at IS NULL"
+
+
+def finished_turn(trace_id: str, *, question: str = "how many customers do we have?",
+                  sql: str | None = RAN, start: int = 1) -> dict:
+    span = turn_span(trace_id)
+    span["input"] = {"question": question}
+    span["output"] = {"type": "answer", "text": "2,000 customers.", "sql": sql}
+    span["start_time"] = start
+    return span
+
+
+def verdict(trace_id: str, value: float, *, comment: str | None = None, at: int = 1) -> dict:
+    return {"trace_id": trace_id, "name": "correct", "value": value,
+            "string_value": None, "comment": comment, "timestamp": at, "source": "API"}
+
+
+def reference(trace_id: str, sql: str = GOLDEN, *, reading: str = "deleted customers are not customers",
+              at: int = 1) -> dict:
+    return {"trace_id": trace_id, "name": "reference", "value": None,
+            "string_value": sql, "comment": reading, "timestamp": at, "source": "API"}
+
+
+@pytest.fixture
+def scored(recorded, monkeypatch):
+    """The observations store, plus a scores store keyed by score name."""
+    store: dict[str, list[dict]] = {"correct": [], "reference": []}
+
+    def fake(*, name, since=None, page=100):
+        yield from store.get(name, [])
+
+    monkeypatch.setattr(tracing, "scores", fake)
+    return recorded, store
+
+
+def test_a_reference_score_makes_the_turn_a_case(scored):
+    """The answer key's query, filed by `make corpus`, or a person's correction
+    from the UI: the reference is what the turn *should* have run, whatever it
+    did run, and the reading rides in the comment."""
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1")]
+    scores["reference"] = [reference("t1")]
+
+    result = harvest.turn_cases()
+
+    assert len(result.cases) == 1
+    case = result.cases[0]
+    assert case.question == "how many customers do we have?"
+    assert case.reference_sql == GOLDEN
+    assert case.reading == "deleted customers are not customers"
+    assert case.name.startswith("t1-how-many-customers")
+    assert case.expect is None and case.tables == []
+
+
+def test_a_correct_verdict_makes_the_turns_own_query_the_reference(scored):
+    """Nobody wrote a reference, but somebody said the answer was right, so
+    the query that produced it is one."""
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1", sql=GOLDEN)]
+    scores["correct"] = [verdict("t1", 1.0)]
+
+    result = harvest.turn_cases()
+
+    assert [c.reference_sql for c in result.cases] == [GOLDEN]
+    assert result.cases[0].reading == ""
+
+
+def test_a_reference_wins_over_a_correct_turns_own_query(scored):
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1", sql=RAN)]
+    scores["correct"] = [verdict("t1", 1.0)]
+    scores["reference"] = [reference("t1", GOLDEN)]
+
+    assert harvest.turn_cases().cases[0].reference_sql == GOLDEN
+
+
+def test_a_turn_judged_wrong_with_no_reference_is_dropped_and_counted(scored):
+    """There is nothing to score a candidate against. The report names it,
+    because the fix is a person writing the query down."""
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1")]
+    scores["correct"] = [verdict("t1", 0.0, comment="expected 1840, got 2000")]
+
+    result = harvest.turn_cases()
+
+    assert result.cases == []
+    assert result.wrong_unreferenced == 1
+    assert "nobody wrote what right is" in result.report()
+
+
+def test_a_turn_judged_wrong_with_a_reference_is_a_case(scored):
+    """The valuable kind: a question the seed gets wrong is where a candidate
+    has room to win, and the reference says what winning looks like."""
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1")]
+    scores["correct"] = [verdict("t1", 0.0)]
+    scores["reference"] = [reference("t1")]
+
+    assert len(harvest.turn_cases().cases) == 1
+
+
+def test_an_unjudged_turn_is_dropped_and_counted(scored):
+    turns, _ = scored
+    turns["turn"] = [finished_turn("t1")]
+
+    result = harvest.turn_cases()
+
+    assert result.cases == [] and result.unjudged == 1
+    assert "no verdict and no reference" in result.report()
+
+
+def test_a_turn_that_never_ran_sql_is_dropped(scored):
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1", sql=None)]
+    scores["reference"] = [reference("t1")]
+
+    result = harvest.turn_cases()
+
+    assert result.cases == [] and result.incomplete == 1
+
+
+def test_a_rollout_leaves_no_turn_span_and_so_is_never_seen(scored):
+    """The contamination guard, stated from this side: scores on a trace with
+    no turn span are not a case, because a case is keyed on the span and
+    `replay_turn` opens none."""
+    turns, scores = scored
+    turns["turn"] = []
+    scores["correct"] = [verdict("rollout", 1.0)]
+
+    assert harvest.turn_cases().seen == 0
+
+
+def test_a_repeated_question_keeps_the_newest_turn(scored):
+    """T1 asked five times is one case, weighted once. The newest, because
+    that is the one under the prose on disk."""
+    turns, scores = scored
+    turns["turn"] = [
+        finished_turn("old", sql="SELECT 1", start=1),
+        finished_turn("new", sql="SELECT 2", start=2),
+    ]
+    scores["correct"] = [verdict("old", 1.0), verdict("new", 1.0)]
+
+    result = harvest.turn_cases()
+
+    assert [c.reference_sql for c in result.cases] == ["SELECT 2"]
+    assert result.duplicate == 1
+
+
+def test_a_repeated_question_prefers_the_turn_with_a_reference(scored):
+    turns, scores = scored
+    turns["turn"] = [
+        finished_turn("referenced", sql=RAN, start=1),
+        finished_turn("newer", sql="SELECT 2", start=2),
+    ]
+    scores["correct"] = [verdict("newer", 1.0)]
+    scores["reference"] = [reference("referenced", GOLDEN)]
+
+    assert [c.reference_sql for c in harvest.turn_cases().cases] == [GOLDEN]
+
+
+def test_the_latest_verdict_on_a_trace_is_the_one_meant(scored):
+    turns, scores = scored
+    turns["turn"] = [finished_turn("t1", sql=GOLDEN)]
+    scores["correct"] = [verdict("t1", 1.0, at=1), verdict("t1", 0.0, at=2)]
+
+    assert harvest.turn_cases().wrong_unreferenced == 1
+
+
+def test_order_matters_when_the_reference_orders_at_the_top_level(scored):
+    turns, scores = scored
+    turns["turn"] = [finished_turn("a", question="who signed up first?"),
+                     finished_turn("b", question="how many in each region?")]
+    scores["reference"] = [
+        reference("a", "SELECT name FROM customer ORDER BY signed_up LIMIT 1"),
+        reference("b", "SELECT region, count(*) FROM (SELECT * FROM customer ORDER BY id) c GROUP BY 1"),
+    ]
+
+    by_question = {c.question: c.ordered for c in harvest.turn_cases().cases}
+
+    assert by_question == {"who signed up first?": True, "how many in each region?": False}
+
+
+def test_the_turn_report_accounts_for_every_turn_it_saw(scored):
+    turns, scores = scored
+    turns["turn"] = [finished_turn("kept"), finished_turn("wrong", question="q2"),
+                     finished_turn("unjudged", question="q3"), finished_turn("kept", start=0)]
+    scores["correct"] = [verdict("kept", 1.0), verdict("wrong", 0.0)]
+
+    result = harvest.turn_cases()
+
+    dropped = result.incomplete + result.unjudged + result.wrong_unreferenced + result.duplicate
+    assert result.seen == 4
+    assert len(result.cases) + dropped == result.seen
+    assert result.report().startswith("1 cases from 4 recorded turns")
+
+
+def test_tracing_off_yields_an_empty_turn_harvest_rather_than_an_error(monkeypatch):
+    monkeypatch.setattr(tracing, "client", lambda: None)
+    result = harvest.turn_cases()
+    assert result.cases == [] and result.seen == 0

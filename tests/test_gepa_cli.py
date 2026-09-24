@@ -20,7 +20,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 from app import llm, prompts, tracing  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 from tools.gepa import cli as gepa  # noqa: E402
-from tools.gepa import metric_extract, targets  # noqa: E402
+from tools.gepa import golden, metric_extract, targets  # noqa: E402
 from tools.gepa.adapter import COMPONENT  # noqa: E402
 from tools.gepa.cases import ExtractCase  # noqa: E402
 from tests.test_gepa_adapter import GOOD_OUTPUT, SQL  # noqa: E402
@@ -389,13 +389,18 @@ TOOLS_SEED = None  # filled by the fixture; the live descriptions
 def a_tools_run(monkeypatch, tmp_path, well_behaved):
     """A finished tools search, faked from the gate backwards.
 
-    The corpus is the real `demo/golden/` — it is tracked, it costs nothing to
-    read, and using it means the split and the gate see the shape they will see
-    for real.
+    The corpus is the real `demo/golden/`, handed over in place of a harvest:
+    it is tracked, it costs nothing to read, and it is the shape a harvest
+    produces, so the split and the gate see what they will see for real.
     """
     seed = targets.TOOLS.seed()
     better = {**seed, "list_tables": "Every table, with its column count."}
     monkeypatch.setattr(gepa, "OUT", tmp_path)
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "tools",
+        dataclasses.replace(targets.TOOLS, corpus=lambda **kwargs: golden.load()),
+    )
     monkeypatch.setattr(
         gepa,
         "_search",
@@ -509,6 +514,12 @@ def a_config_run(monkeypatch, tmp_path, well_behaved):
     seed = targets.CONFIG.seed()
     better = {"efforts": seed["efforts"].replace("explore:\n  effort: ", "explore:\n  effort: low  # was ", 1)}
     monkeypatch.setattr(gepa, "OUT", tmp_path)
+    # The answer key in place of a harvest, as `a_tools_run` does.
+    monkeypatch.setitem(
+        targets.TARGETS,
+        "config",
+        dataclasses.replace(targets.CONFIG, corpus=lambda **kwargs: golden.load()),
+    )
     monkeypatch.setattr(
         gepa,
         "_search",
@@ -548,7 +559,7 @@ def test_the_config_target_is_searchable_and_the_rest_still_say_why_not(monkeypa
     monkeypatch.setitem(
         targets.TARGETS,
         "config",
-        dataclasses.replace(targets.CONFIG, check=lambda loop, yes: 0),
+        dataclasses.replace(targets.CONFIG, check=lambda loop, yes, **kw: 0),
     )
 
     result = CliRunner().invoke(gepa.cli, ["config", "--probe-only", "--yes"])

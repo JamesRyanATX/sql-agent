@@ -89,10 +89,12 @@ class Target:
     # prints above the front. Same keys as `weights`.
     legend: Callable[[], dict[str, str]]
 
-    # The cheap pre-check `--probe-only` runs: (loop, yes) -> exit status. It
-    # takes `yes` because a check can itself be expensive enough to ask about.
-    # None where a target has nothing cheap to offer.
-    check: Callable[[Any, bool], int] | None = None
+    # The cheap pre-check `--probe-only` runs: (loop, yes, days=, resume=) ->
+    # exit status. It takes `yes` because a check can itself be expensive
+    # enough to ask about, and the harvest window because a whole-turn check
+    # runs the seed over the same harvested corpus a search would. None where
+    # a target has nothing cheap to offer.
+    check: Callable[..., int] | None = None
 
     # component -> the reflection prompt GEPA renders for it. None uses GEPA's
     # own generic one, which is right for a node instruction and wrong for a
@@ -209,7 +211,8 @@ def _extract_legend() -> dict[str, str]:
     return LEGEND
 
 
-def _extract_check(loop, yes: bool = False) -> int:
+def _extract_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
+    # The probes are authored, so the harvest window means nothing here.
     outcomes = gates.run_probes(
         loop, _extract_seed()[EXTRACT_COMPONENT], probes.load(EXTRACT_COMPONENT)
     )
@@ -260,19 +263,60 @@ def _tools_seed() -> dict[str, str]:
     return {s["name"]: s["description"] for s in tools.SCHEMAS}
 
 
-def _tools_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
-    """Tracked on disk, not harvested. `days` and `resume` mean nothing to a
-    directory in git, and are ignored rather than the command knowing which
-    targets read them."""
-    from tools.gepa import golden
+def _turn_corpus(name: str, *, days: int, resume: bool, verbose: bool) -> list[Any]:
+    """Harvested from the traces every run, like `extract`'s: a turn whose
+    trace carries a reference query, or a verdict that its own query was
+    right, is a case. `make corpus` files the answer key's references to prime
+    it; after that the corpus is whatever anyone asked and scored. Only
+    `--resume` reuses what is on disk, for the reason `_extract_corpus` gives:
+    GEPA's state references its trainset.
 
-    cases = golden.load()
-    say(f"corpus    {len(cases)} golden cases from {golden.GOLDEN}")
+    `name` is the target, so `tools` and `config` each keep their own file and
+    `make gepa-<target>-reset` deletes the right one.
+    """
+    from tools.gepa import cli, golden
+
+    path = cli.corpus(name)
+    if resume and path.exists():
+        cases = golden.read_jsonl(path)
+        say(f"corpus    {len(cases)} cases reused from {path}")
+        return cases
+
+    from app import tracing
+    from tools.gepa.harvest import turn_cases
+
+    if not tracing.enabled():
+        raise click.ClickException(
+            "tracing is off, so there is nothing to harvest — set both "
+            "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY (make langfuse-up), "
+            "run `make corpus`, then try again."
+        )
+
+    harvested = turn_cases(days=days)
     if verbose:
-        with_expect = sum(1 for c in cases if c.expect is not None)
-        say(f"          {with_expect} carry a literal answer; the rest are "
-            f"checked against their reference query alone")
-    return cases
+        say(harvested.report())
+    else:
+        say(
+            f"harvest   {len(harvested.cases)} cases from {harvested.seen} "
+            f"recorded turns (-v for what was dropped)"
+        )
+    if not harvested.cases:
+        raise click.ClickException(
+            f"no cases — no turn in the last {days} days carries a reference "
+            f"query or a verdict. `make corpus` files both on the answer key's "
+            f"questions; a verdict in the Langfuse UI does it for any turn."
+        )
+
+    golden.write_jsonl(path, harvested.cases)
+    return harvested.cases
+
+
+def _tools_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
+    return _turn_corpus("tools", days=days, resume=resume, verbose=verbose)
+
+
+def _config_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
+    return _turn_corpus("config", days=days, resume=resume, verbose=verbose)
 
 
 def _tools_overrides(candidate: dict[str, str]):
@@ -439,17 +483,19 @@ def _tools_legend() -> dict[str, str]:
     return LEGEND
 
 
-def _tools_check(loop, yes: bool = False) -> int:
+def _tools_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
     return _turn_check(
         loop, yes, name="tools", seed=_tools_seed(),
         to_overrides=_tools_overrides, focus=_tools_focus,
+        cases=_tools_corpus(days=days, resume=resume, verbose=False),
     )
 
 
 def _turn_check(
-    loop, yes: bool, *, name: str, seed: dict[str, str], to_overrides, focus
+    loop, yes: bool, *, name: str, seed: dict[str, str], to_overrides, focus,
+    cases: list[Any],
 ) -> int:
-    """The seed over the whole golden corpus, once, before any search.
+    """The seed over the whole corpus, once, before any search.
 
     Two things nothing else will tell you. Whether the corpus is answerable at
     all — if the seed gets most of it wrong, `correct` never reaches 1.0, the
@@ -459,16 +505,15 @@ def _turn_check(
     the only form the talk can show a tool-description or an effort change in.
 
     Shared by every whole-turn target, because the seed rollouts are the same
-    rollouts whichever component is about to be searched: the same nineteen
+    rollouts whichever component is about to be searched: the same harvested
     questions, under the text and the efforts on disk.
 
-    Nineteen cold turns, so it asks first like a search does.
+    One cold turn per case, so it asks first like a search does.
     """
-    from tools.gepa import cli, golden
+    from tools.gepa import cli
     from tools.gepa.adapter import TurnAdapter
 
-    cases = golden.load()
-    say(f"\n{name:<9} the seed over all {len(cases)} golden cases")
+    say(f"\n{name:<9} the seed over all {len(cases)} cases from the traces")
     say(f"  budget      {len(cases)} rollouts at roughly "
         f"{COLD_TURN_TOKENS:,} tokens each — about "
         f"{len(cases) * COLD_TURN_TOKENS:,} tokens")
@@ -816,17 +861,18 @@ def _config_templates() -> dict[str, str]:
     }
 
 
-def _config_check(loop, yes: bool = False) -> int:
+def _config_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
     return _turn_check(
         loop, yes, name="config", seed=_config_seed(),
         to_overrides=_config_overrides, focus=_config_focus,
+        cases=_config_corpus(days=days, resume=resume, verbose=False),
     )
 
 
 CONFIG = Target(
     name="config",
     seed=_config_seed,
-    corpus=_tools_corpus,
+    corpus=_config_corpus,
     adapter=_config_adapter,
     gate=lambda loop, result, seed, cases: gates.turn_gate(
         loop, result, seed, cases=cases
