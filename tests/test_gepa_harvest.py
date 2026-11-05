@@ -148,7 +148,8 @@ def test_what_the_recorded_call_cost_rides_along_too(recorded):
 
 
 def test_a_call_langfuse_has_no_usage_for_still_harvests(recorded):
-    """Zero is the honest answer, and the metric knows to skip cost for it."""
+    """Zero is the honest answer when Langfuse recorded no usage. The extract
+    score does not read this field, so a zero changes no score."""
     missing = generation("t1")
     missing["usage"] = {}
     recorded["extract"] = [missing]

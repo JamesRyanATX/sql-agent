@@ -41,6 +41,17 @@ EXTRACT_COMPONENT = "extract"
 # than imported: `tools/` does not depend on the client package.
 COLD_TURN_TOKENS = 11_500
 
+# Metric calls for a search whose rollout is a whole cold turn (`tools` and
+# `config`), when `--budget` does not say. See the comment on `TOOLS` for the
+# arithmetic.
+TURN_BUDGET = 180
+
+# How much longer than the current `extract` prompt a candidate may be. A
+# candidate over this length scores 0 on every case without being run; see
+# `ExtractAdapter._too_long`. 1.5 is where the probe gate used to warn that a
+# candidate had grown, before the limit existed.
+MAX_GROWTH = 1.5
+
 
 @dataclass(frozen=True)
 class Target:
@@ -79,15 +90,11 @@ class Target:
     # a passing gate still does not prove. Empty is allowed.
     notes: Callable[[], str]
 
-    # The metric's weighted terms, which are the axes of this target's Pareto
-    # front and the column order of the table under it. Per target because
-    # each metric has its own terms: reading one metric's weights for every
-    # target puts `nan` in four of five columns and nobody on the front.
-    weights: Callable[[], dict[str, float]]
-
-    # term -> what a score of 1.0 means, in plain words, for the legend that
-    # prints above the front. Same keys as `weights`.
-    legend: Callable[[], dict[str, str]]
+    # One sentence saying what the number GEPA selects on means for this
+    # target, for the SCORE section of the report. A function, like the other
+    # fields, so the metric modules are imported only when it is called; the
+    # turn targets build their sentence from `metric_turn.WEIGHTS`.
+    score: Callable[[], str]
 
     # The cheap pre-check `--probe-only` runs: (loop, yes, days=, resume=) ->
     # exit status. It takes `yes` because a check can itself be expensive
@@ -105,8 +112,9 @@ class Target:
     # is one model call for one target and a whole turn for another.
     budget: int = 150
 
-    # Roughly what one rollout costs, for the sentence before the spend. Zero
-    # means cheap enough not to ask.
+    # Roughly what one rollout costs, for the figures `--probe-only` prints
+    # before it runs the seed over a whole corpus. Zero where a rollout is one
+    # model call. Every search asks before it starts, whatever this is.
     rollout_tokens: int = 0
 
     # One line naming what a run of this actually touches.
@@ -141,7 +149,7 @@ def _extract_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
     path = cli.corpus(EXTRACT_COMPONENT)
     if resume and path.exists():
         cases = read_jsonl(path)
-        say(f"corpus    {len(cases)} cases reused from {path}")
+        say(f"corpus: {len(cases)} cases reused from {path}")
         return cases
 
     from app import tracing
@@ -159,7 +167,7 @@ def _extract_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
         say(harvested.report())
     else:
         say(
-            f"harvest   {len(harvested.cases)} cases from {harvested.seen} "
+            f"harvest: {len(harvested.cases)} cases from {harvested.seen} "
             f"recorded extract calls (-v for what was dropped)"
         )
     if not harvested.cases:
@@ -175,7 +183,12 @@ def _extract_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
 def _extract_adapter(loop) -> Any:
     from tools.gepa.adapter import ExtractAdapter
 
-    return ExtractAdapter(loop)
+    # The working prompt, not the seed the search starts from. This is
+    # deliberate: with `--from`, a search can start from a 90-character prompt,
+    # and it needs room to grow up to MAX_GROWTH times the working prompt
+    # rather than 1.5 times its own short start.
+    seed = _extract_seed()[EXTRACT_COMPONENT]
+    return ExtractAdapter(loop, max_chars=int(MAX_GROWTH * len(seed)))
 
 
 def _extract_render(candidate: dict[str, str]) -> str:
@@ -199,16 +212,14 @@ def _extract_notes() -> str:
     return "\n".join(lines)
 
 
-def _extract_weights() -> dict[str, float]:
-    from tools.gepa.metric_extract import WEIGHTS
-
-    return WEIGHTS
-
-
-def _extract_legend() -> dict[str, str]:
-    from tools.gepa.metric_extract import LEGEND
-
-    return LEGEND
+def _extract_score() -> str:
+    return (
+        "0 when the call failed, nothing was recorded, no recipe was recorded, "
+        "a note records a count, or a note overwrites or duplicates a filed "
+        "name; otherwise the fraction of recipes whose SQL fragment is copied "
+        "from the query that ran and carries more than a bare table or "
+        "function name."
+    )
 
 
 def _extract_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
@@ -232,8 +243,7 @@ EXTRACT = Target(
     render=_extract_render,
     label=_extract_label,
     notes=_extract_notes,
-    weights=_extract_weights,
-    legend=_extract_legend,
+    score=_extract_score,
     check=_extract_check,
     blurb="config/prompts/extract.md",
     about=(
@@ -279,7 +289,7 @@ def _turn_corpus(name: str, *, days: int, resume: bool, verbose: bool) -> list[A
     path = cli.corpus(name)
     if resume and path.exists():
         cases = golden.read_jsonl(path)
-        say(f"corpus    {len(cases)} cases reused from {path}")
+        say(f"corpus: {len(cases)} cases reused from {path}")
         return cases
 
     from app import tracing
@@ -297,7 +307,7 @@ def _turn_corpus(name: str, *, days: int, resume: bool, verbose: bool) -> list[A
         say(harvested.report())
     else:
         say(
-            f"harvest   {len(harvested.cases)} cases from {harvested.seen} "
+            f"harvest: {len(harvested.cases)} cases from {harvested.seen} "
             f"recorded turns (-v for what was dropped)"
         )
     if not harvested.cases:
@@ -472,16 +482,21 @@ def _argument_line(schema: dict) -> str:
     ) + "."
 
 
-def _tools_weights() -> dict[str, float]:
+def _turn_score() -> str:
+    """The rule in `metric_turn.score`, with the numbers read from its
+    weights, so the sentence changes when a weight does."""
     from tools.gepa.metric_turn import WEIGHTS
 
-    return WEIGHTS
-
-
-def _tools_legend() -> dict[str, str]:
-    from tools.gepa.metric_turn import LEGEND
-
-    return LEGEND
+    correct, cost, calls = WEIGHTS["correct"], WEIGHTS["cost"], WEIGHTS["tool_calls"]
+    return (
+        f"0 when the turn failed, wrote no SQL, its SQL never ran, or it "
+        f"returned no rows where the known answer has some; otherwise a "
+        f"wrong answer scores {correct:.2f} times how closely its rows match "
+        f"the known answer; a right answer scores {correct:.2f}, plus up to "
+        f"{cost:.2f} for using no more tokens than the current text's turn "
+        f"on the same question, plus up to {calls:.2f} for making no more "
+        f"tool calls than it did."
+    )
 
 
 def _tools_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
@@ -612,14 +627,19 @@ TOOLS = Target(
     render=_tools_render,
     label=_tools_label,
     notes=_tools_notes,
-    weights=_tools_weights,
-    legend=_tools_legend,
+    score=_turn_score,
     check=_tools_check,
     templates=_tools_templates,
-    # A whole cold turn a rollout, against `extract`'s single model call.
-    # CHALLENGE's own figure: 60 with a 10-case train split is under 700k
-    # tokens. The default of 150 would be 1.7 million.
-    budget=60,
+    # A whole cold turn a rollout, against `extract`'s single model call, so
+    # this is about two million tokens, and the command says so and asks before
+    # it spends them. It was 60, which was under 700k tokens. With the nine
+    # validation cases of the run that used it, 60 allowed seven proposals:
+    # nine rollouts to score the current descriptions, six for each proposal,
+    # and nine more for each one accepted. That run kept one new candidate.
+    # 180 allows more than twenty proposals with a validation set of that
+    # size, which is the fifteen to twenty GEPA's own guidance asks for. The
+    # default rather than a flag, so `make gepa-tools` is the whole command.
+    budget=TURN_BUDGET,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the four `description` strings in app/tools.py",
     whole=True,
@@ -881,11 +901,12 @@ CONFIG = Target(
     render=_config_render,
     label=_config_label,
     notes=_config_notes,
-    weights=_tools_weights,
-    legend=_tools_legend,
+    score=_turn_score,
     check=_config_check,
     templates=_config_templates,
-    budget=60,
+    # The same as `tools`, for the same reason: a rollout is a cold turn
+    # whichever component it is measuring.
+    budget=TURN_BUDGET,
     rollout_tokens=COLD_TURN_TOKENS,
     blurb="the per-node `effort` blocks in config/config.yaml",
     whole=True,

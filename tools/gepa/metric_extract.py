@@ -10,8 +10,20 @@ Two things this does not do. It does not measure correctness: a prompt can score
 not measure the flywheel, because whether the cache makes turn N+1 cheaper is a
 property of a sequence and one `extract` call is not one.
 
-The weights are in one dict so a reader can argue with them, which is the only
-defence a number like 0.35 has.
+The score is one number per case, and it can be said in one sentence: 0 when
+the call failed, nothing was recorded, no recipe was recorded, a note records
+a count, or a note overwrites or duplicates a filed name; otherwise the
+fraction of recipes whose SQL fragment is copied from the query that ran and
+carries more than a bare table or function name. It used to be six weighted terms. Two of them, `census`
+and `names`, were 1.00 for every candidate in every run, so in practice the
+search compared grounding against prompt length, and the committed winner led
+by 0.0004. A count in a note and an overwritten name are failures rather than
+preferences, so they are gates here, and the invariant probes check them again
+on every candidate that survives.
+
+The size of the prompt is not part of the score. `ExtractAdapter` refuses a
+prompt longer than a fixed multiple of the current one before any model call
+is made; see `targets.MAX_GROWTH`.
 """
 
 from __future__ import annotations
@@ -24,95 +36,43 @@ from tools.gepa.replay import Replayed
 # tree already reads it as `metric_extract.Score`.
 from tools.gepa.score import Score  # noqa: F401
 
-WEIGHTS = {
-    # The production gate, not a re-implementation of it, clamped so that
-    # satisfying it cheaply is not free. See `_grounding`.
-    "grounding": 0.35,
-    # A prose-only invariant with a delayed failure: a recorded count is right
-    # today and wrong forever after, and nothing revisits it.
-    "census": 0.25,
-    # Overwrites and paraphrases. The upsert reports success either way, so
-    # nothing else will ever tell you.
-    "names": 0.20,
-    # A band, not a direction. "Fewer entries is better" rewards deleting the
-    # job, which is the cheapest way to satisfy every other term here. Halved to
-    # make room for `length`: it is the weakest term here and it says so itself.
-    "shape": 0.05,
-    # What the model wrote, one-sided against the recorded baseline. Halved
-    # because it is one half of a bill and `length` is the other.
-    "cost": 0.05,
-    # What the model was *sent*, which is mostly the prompt. Without this the
-    # prompt is free and nothing opposes adding text: measured, every candidate
-    # in an unweighted run grew, by 132% to 259%, and the winner was 3.6 times
-    # the seed with every other term saying it was better. `metric_turn` charges
-    # both sides already and its winner grew 32% — same machinery, same
-    # reflection model, and the only difference is which half of the bill the
-    # metric can see.
-    "length": 0.10,
-}
-
-# One plain line per term, for the legend above every front: what a score of
-# 1.0 means. Beside the weights because they are one statement, and a test
-# says the keys agree, so a seventh term cannot land without its words.
-LEGEND = {
-    "grounding": "every note that quotes SQL quotes the query that actually ran",
-    "census": "no note records today's row count or percentage, which goes stale",
-    "names": "no note overwrites or duplicates one the agent already has",
-    "shape": "two to six notes, each under 200 characters",
-    "cost": "the notes cost no more output tokens than the current prompt's did",
-    "length": "the prompt is no longer than the current prompt",
-}
-
-# 2-6 entries is what a good turn produces. Outside the band is a mild penalty
-# rather than a cliff: a genuinely rich query can establish seven things.
+# 2-6 entries is what a good turn produces. Outside the band is a note in the
+# feedback and does not change the score: a genuinely rich query can establish
+# seven things.
 ENTRY_BAND = (2, 6)
 # A claim is a note a colleague reads aloud, not a paragraph.
 CLAIM_LIMIT = 200
 
 
-TERMS = tuple(WEIGHTS)
-
-
-def _zero() -> dict[str, float]:
-    """Every term, explicitly zero.
-
-    The gates below used to return `{}`, and that put a hole in the Pareto
-    front that nothing reported. `terms` becomes
-    `EvaluationBatch.objective_scores`, which GEPA averages per objective
-    across the validation set — and a missing key lowers that objective's
-    *count* rather than its total. So a candidate that failed three cases
-    outright had its remaining terms averaged over eight instances while
-    another's were averaged over eleven, and the two were then compared.
-
-    Observed, which is how it was found: a run produced a candidate reading
-    1.00 on all five objectives and sitting on the front, whose aggregate score
-    was 0.909 — second worst in the pool. A fresh dict each call, because a
-    module-level constant here would be one mutable object shared by every
-    Score in a run.
-    """
-    return dict.fromkeys(TERMS, 0.0)
-
-
 def score(r: Replayed) -> Score:
     """One case, one candidate.
 
-    Two gates before the weighted terms. The empty-extraction gate is the
-    load-bearing one: census, names and cost are all vacuously perfect when
-    nothing was recorded, so without it three of five terms reward a prompt for
-    doing nothing.
+    Five things score the case 0: the call failed, nothing was recorded, no
+    recipe was recorded, a note records a count, or a note overwrites or
+    duplicates a filed name. Otherwise the case scores the fraction of its
+    recipes whose SQL fragment is copied from the query that ran and carries
+    more than a bare table or function name. The no-recipe case is
+    `_grounding` returning 0, not a gate of its own.
+
+    The empty-extraction gate comes before the other two because census and
+    names are both satisfied when nothing was recorded, so without it a prompt
+    that records nothing would pass them.
+
+    The feedback carries every note that applies, including on a case the
+    census or names gate scored 0, and including the note about the number and
+    size of the entries, which does not change the score. The reflection model
+    reads the feedback, so it should see every problem with a case and not only
+    the one that decided the number.
     """
     # A candidate whose output does not fit EXTRACT_SCHEMA scores zero rather
     # than ending the run. That is GEPA's adapter contract.
     if r.error:
-        return Score(
-            0.0, _zero(), [f"The call did not produce usable output: {r.error}"]
-        )
+        return Score(0.0, feedback=[f"The call did not produce usable output: {r.error}"])
 
     if not r.entries:
         return Score(
             0.0,
-            _zero(),
-            [
+            feedback=[
                 "Nothing was recorded. `extract` runs only after a query has "
                 "already succeeded, so an empty result is the node declining to "
                 "do its one job — and the next turn pays full price to "
@@ -120,22 +80,16 @@ def score(r: Replayed) -> Score:
             ],
         )
 
-    terms = _zero()
-    feedback: list[str] = []
-    for name, fn in (
-        ("grounding", _grounding),
-        ("census", _census),
-        ("names", _names),
-        ("shape", _shape),
-        ("cost", _cost),
-        ("length", _length),
-    ):
-        terms[name], note = fn(r)
-        if note:
-            feedback.append(note)
+    grounding, grounding_note = _grounding(r)
+    census, census_note = _census(r)
+    names, names_note = _names(r)
+    feedback = [
+        note for note in (grounding_note, census_note, names_note, _shape(r)) if note
+    ]
 
-    value = sum(WEIGHTS[k] * v for k, v in terms.items())
-    return Score(value, terms, feedback)
+    if census < 1.0 or names < 1.0:
+        return Score(0.0, feedback=feedback)
+    return Score(grounding, feedback=feedback)
 
 
 # ----------------------------------------------------------------------- terms
@@ -251,24 +205,28 @@ def _names(r: Replayed) -> tuple[float, str]:
     )
 
 
-def _shape(r: Replayed) -> tuple[float, str]:
+def _shape(r: Replayed) -> str:
+    """A note about how many entries there are and how long each one is.
+
+    Feedback only: it does not change the score. The number of entries that is
+    right depends on the query, so this says what it sees and leaves the
+    judgement to the reflection model.
+    """
     low, high = ENTRY_BAND
     n = len(r.entries)
     if n < low:
-        count_score = n / low
         note = (
             f"Only {n} entries from a query this substantial — the next turn "
             f"will have to rediscover what this one already established."
         )
     elif n > high:
-        count_score = max(0.0, 1 - (n - high) / (high * 2))
         note = (
             f"{n} entries. The cache is sent in full on every turn, so each one "
             f"is a bill that recurs — record the conventions, not every "
             f"observation."
         )
     else:
-        count_score, note = 1.0, ""
+        note = ""
 
     long = [e for e in r.entries if len(e.claim) > CLAIM_LIMIT]
     if long:
@@ -276,49 +234,4 @@ def _shape(r: Replayed) -> tuple[float, str]:
             f'  name="{e.name}" is {len(e.claim)} characters — a note, not a paragraph.'
             for e in long
         )
-    length_score = 1 - (len(long) / len(r.entries) if r.entries else 0)
-
-    return (count_score + length_score) / 2, note
-
-
-def _cost(r: Replayed) -> tuple[float, str]:
-    """One-sided. Cheaper than the baseline earns 1.0, never more.
-
-    An unbounded reward for terseness is the same failure as "fewer entries is
-    better", and this is the term most likely to delete a paragraph whose payoff
-    no metric here can see.
-    """
-    baseline = r.case.baseline_tokens_out
-    if not baseline:
-        return 1.0, ""
-    over = (r.tokens_out - baseline) / baseline
-    if over <= 0:
-        return 1.0, ""
-    return max(0.0, 1 - over), (
-        f"{r.tokens_out} output tokens against a recorded {baseline} — "
-        f"{over:.0%} more for this case."
-    )
-
-
-def _length(r: Replayed) -> tuple[float, str]:
-    """What the call was sent, one-sided against what production sent.
-
-    The message is the same for every candidate on a given case, so what varies
-    here is the instruction. A prompt is paid for on every turn it will ever
-    run, and it is the one cost the model's own output does not reveal.
-
-    One-sided for the same reason `_cost` is: an unbounded reward for brevity
-    deletes the paragraph whose payoff nothing here can measure. The gate warns
-    in both directions; this only charges for growth.
-    """
-    baseline = r.case.baseline_tokens_in
-    if not baseline:
-        return 1.0, ""
-    over = (r.tokens_in - baseline) / baseline
-    if over <= 0:
-        return 1.0, ""
-    return max(0.0, 1 - over), (
-        f"{r.tokens_in} input tokens against a recorded {baseline} — "
-        f"{over:.0%} more, and almost all of that is the instruction rather "
-        f"than the case. Every turn that runs this prompt pays it again."
-    )
+    return note

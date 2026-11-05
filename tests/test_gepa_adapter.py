@@ -23,7 +23,6 @@ import pytest
 pytest.importorskip("gepa", reason="uv run --group gepa")
 
 from app import llm  # noqa: E402
-from tools.gepa import metric_extract as metric  # noqa: E402
 from tools.gepa.adapter import COMPONENT, ExtractAdapter, Loop  # noqa: E402
 from tools.gepa.cases import ExtractCase  # noqa: E402
 
@@ -160,11 +159,93 @@ def test_the_harness_never_writes_under_the_node_it_harvests(loop, scripted):
     assert scripted["calls"][0]["node"] == "extract.replay"
 
 
-def test_per_term_scores_are_exposed_as_objectives(loop, scripted):
-    """Grounding and cost genuinely trade off. A Pareto front over the real
-    objectives is more honest than one scalar pretending it was settled."""
+def test_only_the_one_score_per_case_reaches_gepa(loop, scripted):
+    """The extract score is one number per case. GEPA selects parents from
+    candidates against validation examples, and per-term scores would only
+    give it a second table that nothing here reads."""
     result = ExtractAdapter(loop).evaluate(cases(2), {COMPONENT: "a prompt"})
-    assert set(result.objective_scores[0]) == set(metric.WEIGHTS)
+    assert result.objective_scores is None
+
+
+# ------------------------------------------------------------ the size limit
+
+
+def test_a_prompt_over_the_limit_scores_zero_on_every_case_and_calls_nothing(
+    loop, scripted
+):
+    adapter = ExtractAdapter(loop, max_chars=10)
+    result = adapter.evaluate(
+        cases(3), {COMPONENT: "a prompt that is longer than ten"}, capture_traces=True
+    )
+
+    assert result.scores == [0.0, 0.0, 0.0]
+    assert scripted["calls"] == [], "no model call for a prompt over the limit"
+    assert adapter.calls == 0, "nothing was called, so nothing is counted"
+    for t in result.trajectories:
+        assert "the limit is 10" in t.score.text()
+
+
+def test_a_prompt_over_the_limit_reports_zero_metric_calls(loop, scripted):
+    """GEPA charges `len(batch)` against the budget unless the batch says how
+    many calls it made. None were made, so the batch says 0."""
+    adapter = ExtractAdapter(loop, max_chars=10)
+    result = adapter.evaluate(cases(3), {COMPONENT: "a prompt that is longer than ten"})
+
+    assert result.num_metric_calls == 0
+
+
+def test_a_run_batch_leaves_the_metric_call_count_to_gepa(loop, scripted):
+    result = ExtractAdapter(loop, max_chars=1_000).evaluate(cases(2), {COMPONENT: "p"})
+    assert result.num_metric_calls is None
+
+
+def test_every_record_from_a_parents_batch_states_the_limit(loop, scripted):
+    """GEPA reflects on the parent's batch and never on a rejected child's,
+    so the reason a child was rejected is never read. The limit is stated on
+    the parent's records instead, before the next prompt is written."""
+    adapter = ExtractAdapter(loop, max_chars=3_114)
+    parent = "p" * 2_076
+    scripted["payload"] = GOOD_OUTPUT
+    good = adapter.evaluate(cases(1), {COMPONENT: parent}, capture_traces=True)
+    scripted["payload"] = CENSUS_OUTPUT
+    bad = adapter.evaluate(cases(1), {COMPONENT: parent}, capture_traces=True)
+    merged = type(good)(
+        outputs=good.outputs + bad.outputs,
+        scores=good.scores + bad.scores,
+        trajectories=good.trajectories + bad.trajectories,
+    )
+
+    records = adapter.make_reflective_dataset({COMPONENT: parent}, merged, [COMPONENT])[
+        COMPONENT
+    ]
+
+    sentence = (
+        "The prompt is 2,076 characters. A prompt longer than 3,114 characters "
+        "is not run and scores 0 on every case."
+    )
+    assert len(records) == 2
+    for record in records:
+        assert record["Feedback"].endswith(sentence)
+
+
+def test_no_limit_sentence_when_there_is_no_limit(loop, scripted):
+    adapter = ExtractAdapter(loop)
+    batch = adapter.evaluate(cases(1), {COMPONENT: "p"}, capture_traces=True)
+    record = adapter.make_reflective_dataset({COMPONENT: "p"}, batch, [COMPONENT])[
+        COMPONENT
+    ][0]
+
+    assert record["Feedback"] == "No problems found."
+    assert "characters" not in record["Feedback"]
+
+
+def test_a_prompt_at_the_limit_is_run(loop, scripted):
+    adapter = ExtractAdapter(loop, max_chars=len("a prompt"))
+    result = adapter.evaluate(cases(2), {COMPONENT: "a prompt"})
+
+    assert len(scripted["calls"]) == 2
+    assert adapter.calls == 2
+    assert all(s > 0 for s in result.scores)
 
 
 def test_a_model_failure_scores_zero_rather_than_ending_the_run(loop, monkeypatch):
@@ -263,27 +344,14 @@ def test_gepa_turns_over_against_the_adapter(loop, scripted):
     assert scripted["reflections"] > 0, "the reflection model was never asked"
 
 
-def test_every_term_is_present_even_on_the_gates():
-    """`terms` becomes `EvaluationBatch.objective_scores`, and GEPA averages
-    each objective across the valset — a missing key lowers that objective's
-    *count*, not its total. So a candidate that failed three cases outright had
-    its remaining terms averaged over eight instances while another's were
-    averaged over eleven, and the front then compared the two.
+def test_the_reflection_record_carries_one_score_and_no_breakdown(loop, scripted):
+    """The extract score has no parts, so a breakdown would be an empty dict
+    in front of the reflection model."""
+    adapter = ExtractAdapter(loop)
+    batch = adapter.evaluate(cases(1), {COMPONENT: "p"}, capture_traces=True)
+    record = adapter.make_reflective_dataset({COMPONENT: "p"}, batch, [COMPONENT])[
+        COMPONENT
+    ][0]
 
-    Found by reading a real front: a candidate showing 1.00 on all five
-    objectives, sitting on the front, whose aggregate was 0.909 — second worst
-    in the pool.
-    """
-    from tools.gepa import metric_extract
-    from tools.gepa.replay import Replayed
-
-    case = ExtractCase.authored(
-        name="gated", question="q", sql=SQL, findings="f"
-    )
-    broke = metric_extract.score(Replayed(case=case, error="RuntimeError: no"))
-    empty = metric_extract.score(Replayed(case=case, entries=[]))
-
-    for scored in (broke, empty):
-        assert scored.value == 0.0
-        assert set(scored.terms) == set(metric_extract.WEIGHTS)
-        assert all(v == 0.0 for v in scored.terms.values())
+    assert record["score"] == 1.0
+    assert "score_breakdown" not in record

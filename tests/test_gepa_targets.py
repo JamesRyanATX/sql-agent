@@ -172,36 +172,58 @@ def test_every_target_says_what_it_is_for_a_newcomer():
     for target in targets.TARGETS.values():
         assert target.about.count(". ") >= 1, f"{target.name}: two sentences"
         assert "GEPA optimizes" in target.about, target.name
-    # 60 rollouts, per CHALLENGE's own arithmetic. The command's old default of
-    # 150 would be 1.7 million tokens.
-    assert targets.TOOLS.budget == 60
+    # 180 rollouts, which allows about twenty-two proposals. It was 60, which
+    # allowed seven, and the run that used it kept one new candidate. The
+    # default, so `make gepa-tools` needs no arguments.
+    assert targets.TOOLS.budget == 180
     assert targets.EXTRACT.rollout_tokens == 0, "one model call — do not ask"
 
 
-def test_each_target_names_its_own_objectives():
-    """The Pareto front's axes are the metric's terms, and the two metrics do
-    not share terms. Reading one metric's weights for every target put nan in
-    four of five columns and nobody on the front — found by running it."""
-    from tools.gepa import metric_extract, metric_turn
-
-    assert targets.EXTRACT.weights() == metric_extract.WEIGHTS
-    assert targets.TOOLS.weights() == metric_turn.WEIGHTS
-    assert targets.CONFIG.weights() == metric_turn.WEIGHTS
-    assert set(targets.EXTRACT.weights()) != set(targets.TOOLS.weights())
-    assert targets.EXTRACT.legend() == metric_extract.LEGEND
-    assert targets.TOOLS.legend() == metric_turn.LEGEND
-    assert targets.CONFIG.legend() == metric_turn.LEGEND
+def test_each_target_says_in_one_sentence_what_its_score_means():
+    """The SCORE section of the report prints this. One sentence, so it ends
+    in one full stop and has no line break in it."""
+    for target in targets.TARGETS.values():
+        sentence = target.score()
+        assert sentence.endswith("."), target.name
+        assert sentence.count(". ") == 0 and "\n" not in sentence, target.name
 
 
-def test_every_term_has_its_words_and_no_words_are_orphaned():
-    """The legend above a front is one line per term. A seventh term without
-    a line would print its weight and nothing else, and a line for a term
-    that no longer exists would describe nothing."""
-    from tools.gepa import metric_extract, metric_turn
+def test_the_extract_sentence_states_the_rule():
+    assert targets.EXTRACT.score() == (
+        "0 when the call failed, nothing was recorded, no recipe was recorded, "
+        "a note records a count, or a note overwrites or duplicates a filed "
+        "name; otherwise the fraction of recipes whose SQL fragment is copied "
+        "from the query that ran and carries more than a bare table or "
+        "function name."
+    )
 
-    for metric in (metric_extract, metric_turn):
-        assert set(metric.LEGEND) == set(metric.WEIGHTS), metric.__name__
-        assert all(metric.LEGEND.values()), "an empty line is not a legend"
+
+def test_the_turn_sentence_is_built_from_the_turn_metric_weights(monkeypatch):
+    """Both turn targets share the metric, so they share the sentence, and
+    its numbers come from `metric_turn.WEIGHTS`: changing a weight changes
+    the sentence, so the report cannot describe weights the metric no longer
+    uses."""
+    from tools.gepa import metric_turn
+
+    assert targets.TOOLS.score() == targets.CONFIG.score()
+    assert targets.TOOLS.score() == (
+        "0 when the turn failed, wrote no SQL, its SQL never ran, or it "
+        "returned no rows where the known answer has some; otherwise a "
+        "wrong answer scores 0.60 times how closely its rows match the known "
+        "answer; a right answer scores 0.60, plus up to 0.25 for using no more "
+        "tokens than the current text's turn on the same question, plus up to "
+        "0.15 for making no more tool calls than it did."
+    )
+
+    monkeypatch.setitem(metric_turn.WEIGHTS, "cost", 0.35)
+    assert "plus up to 0.35 for using no more tokens" in targets.TOOLS.score()
+
+
+def test_the_extract_adapter_refuses_a_prompt_past_the_growth_limit():
+    from app import prompts
+
+    adapter = targets.EXTRACT.adapter(None)
+    assert adapter.max_chars == int(targets.MAX_GROWTH * len(prompts.get("extract")))
 
 
 def test_every_target_offers_a_cheap_check():
@@ -354,7 +376,7 @@ def test_the_config_focus_is_the_per_node_ledger():
 def test_the_config_target_is_a_whole_turn_target():
     """Same budget, same rollout cost, same gate and check as `tools`: a
     rollout is a cold turn whichever component it is measuring."""
-    assert targets.CONFIG.budget == targets.TOOLS.budget == 60
+    assert targets.CONFIG.budget == targets.TOOLS.budget == targets.TURN_BUDGET
     assert targets.CONFIG.rollout_tokens == targets.TOOLS.rollout_tokens
     assert targets.CONFIG.check is not None
     assert targets.CONFIG.templates is not None

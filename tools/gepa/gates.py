@@ -110,26 +110,29 @@ def probe_gate(loop, result, seed: dict[str, str], *, node: str) -> list[Survivo
                 say(f"      {o.reason.strip()}")
             continue
 
-        # Neither direction is rejection — a shorter prompt can be right, and
-        # so can a longer one. Both have to be *seen*.
-        #
-        # `metric_extract._length` now charges growth, which is why this fires
-        # at +64% rather than the +280% of the run before that term existed.
-        # But it carries 0.10 of the weight, so a candidate that wins a heavier
-        # term outright can still buy that win with size: the run on 2026-09-22
-        # took grounding from 0.909 to 1.000 and paid length 1.000 -> 0.711 for
-        # it, a net gain of 0.0004 on a prompt 64% larger. The aggregate cannot
-        # tell that trade from a real improvement. A person reading the diff can.
-        if len(text) < 0.6 * len(seed_text) or len(text) > 1.5 * len(seed_text):
-            grew = (len(text) - len(seed_text)) / len(seed_text)
+        # A shorter prompt can be right, so this is a warning and not a
+        # rejection, but it has to be seen: a prompt that lost two fifths of
+        # its text may have lost a rule that nothing here measures. There is
+        # no warning for a longer prompt, because `ExtractAdapter` refuses one
+        # over `targets.MAX_GROWTH` times the seed before it is run.
+        if len(text) < 0.6 * len(seed_text):
+            shrank = (len(text) - len(seed_text)) / len(seed_text)
             say(
                 f"  candidate {i} (val {score:.3f}) is {len(text)} chars against "
-                f"the seed's {len(seed_text)} ({grew:+.0%}) — read the diff "
-                f"closely; length is only 0.10 of the score",
+                f"the seed's {len(seed_text)} ({shrank:+.0%}) — read the diff "
+                f"closely for a rule that was removed",
                 fg="yellow",
             )
         else:
-            say(f"  candidate {i} (val {score:.3f}) survives", fg="green")
+            # The baseline is the seed's own pass set, so a survivor can still
+            # fail a probe the seed failed. When the seed is a short prompt
+            # from `--from`, that is likely, and the count says so.
+            passed = sum(1 for o in outcomes if o.ok)
+            say(
+                f"  candidate {i} (val {score:.3f}) survives, passing "
+                f"{passed}/{len(outcomes)} probes",
+                fg="green",
+            )
         survivors.append(Survivor(index=i, candidate=candidate, score=score))
 
     return sorted(survivors, key=lambda s: -s.score)
@@ -158,7 +161,8 @@ def report(outcomes: list[Outcome], label: str) -> list[Outcome]:
 
 
 def _asked(valset, key) -> str:
-    """The question behind one of GEPA's validation scores.
+    """The question behind one of GEPA's validation scores, or the case's name
+    where the case has no question.
 
     `val_subscores` is keyed by *position in the valset*, not by anything this
     repo names. The first version was handed the whole corpus and looked the key
@@ -168,7 +172,10 @@ def _asked(valset, key) -> str:
     rather than the ones GEPA uses.
     """
     if isinstance(key, int) and 0 <= key < len(valset):
-        return getattr(valset[key], "question", str(key))
+        case = valset[key]
+        # A turn case has a question. An extract case has none, and its name
+        # is what the harvest gave it, which is the only label it has.
+        return getattr(case, "question", None) or getattr(case, "name", str(key))
     return str(key)
 
 

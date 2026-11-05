@@ -53,12 +53,12 @@ class ExtractCase:
     # Once a candidate ships, new traces come from the thing being optimised, and
     # without this a second round trains on the first round's output.
     prompt_fp: str | None = None
-    # The recorded run's output tokens, so the cost term measures a candidate
-    # against what production paid rather than an absolute nobody chose.
+    # What the recorded call wrote and what it was sent, in tokens. The extract
+    # score used to charge a candidate against both; it no longer reads either.
+    # Kept so a corpus harvested before that change still reads back, and
+    # because a person comparing a candidate's cost with production's wants
+    # them.
     baseline_tokens_out: int = 0
-    # What the recorded call was *sent*, which is mostly the prompt. The
-    # `length` term is one-sided against this, so a candidate that grows the
-    # instruction pays for it on every turn it will ever run.
     baseline_tokens_in: int = 0
     format_version: int = FORMAT_VERSION
 

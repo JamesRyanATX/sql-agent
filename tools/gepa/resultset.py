@@ -3,8 +3,7 @@
 The whole-turn metric needs one judgement no prompt can make for it: the
 candidate wrote its own SQL, ran it, and got rows back — are those the rows?
 Everything hard about that question is in here, kept out of `metric_turn` so
-that file reads as gates, terms and weights the way `metric_extract` does, and
-so `tests/test_golden_corpus.py` can check a corpus without importing a metric.
+that file reads as gates, terms and weights, and so `tests/test_golden_corpus.py` can check a corpus without importing a metric.
 
 **Column names are discarded at the door.** What a query calls its columns is
 the model's to choose; `customer_count` and `n` and `total` are the same answer.

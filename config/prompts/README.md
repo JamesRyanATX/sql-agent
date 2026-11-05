@@ -40,8 +40,10 @@ a harvest can tell which prose produced which trace.
 Edit the file and commit it. The commit message is where the reason goes — which
 failure the new wording addresses — because the file body cannot carry a comment.
 
-`make gepa-extract` searches for better prose and prints the winner on stdout,
-with the diff and the invariant checklist on stderr. It writes nothing here:
+`make gepa-extract GEPA_EXTRACT_FROM=` searches for better prose than the file
+here and prints the winner on stdout, with the diff and the invariant checklist
+on stderr. Without `GEPA_EXTRACT_FROM=` the search starts from the one-sentence
+prompt in `demo/gepa/extract.short.md`, not from `extract.md`. It writes nothing here:
 what you paste in, you read first, and nothing promotes itself.
 
 ## Notes

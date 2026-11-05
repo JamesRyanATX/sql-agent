@@ -15,10 +15,12 @@ below names the rows that differed and never names the query that got them
 right. The rows are a diagnosis. The reference SQL is the answer key, and
 `tests/test_gepa_metric_turn.py` asserts it never leaks.
 
-The weights are in one dict so a reader can argue with them, and `score` takes
-them as an argument so the sensitivity check — cost at 0.15 and at 0.35, does
-the winner change — is a flag rather than an edit. A weight nobody varied is a
-guess with a decimal point on it.
+The weights are in one dict so a reader can argue with them. `score` also
+takes them as an argument, so a caller can score one rollout under different
+weights without editing this file; one test does that. No command-line option
+passes them, so checking whether the winner changes with cost at 0.15 and at
+0.35 still means calling `score` from code. A weight nobody varied is a guess
+with a decimal point on it.
 
 Pure and synchronous. The reference has already been run; see `reference.py`.
 """
@@ -40,10 +42,10 @@ WEIGHTS = {
     # preference. Gated as well as weighted, below: 0.60 of a wrong answer is
     # still a number a cheap wrong candidate can win on.
     "correct": 0.60,
-    # One-sided against what the seed spent on this same question, as
-    # `metric_extract._cost` is. Cheaper earns 1.0 and never more — an unbounded
-    # reward for terseness buys a candidate that skips the explore loop, and the
-    # explore loop is what finds `deleted_at`.
+    # One-sided against what the seed spent on this same question. Cheaper
+    # earns 1.0 and never more — an unbounded reward for terseness buys a
+    # candidate that skips the explore loop, and the explore loop is what
+    # finds `deleted_at`.
     "cost": 0.25,
     # Fewer introspection calls, one-sided. This is the term the four tool
     # descriptions are aimed at: a description saying what a tool returns is one
@@ -51,13 +53,6 @@ WEIGHTS = {
     # call is already charged there in tokens, and this exists to make the
     # *shape* visible rather than to bill it twice.
     "tool_calls": 0.15,
-}
-
-# What a score of 1.0 means, one line per term, for the legend above a front.
-LEGEND = {
-    "correct": "the rows it returned match the known answer",
-    "cost": "the turn used no more tokens than the current prompt's turn did",
-    "tool_calls": "the turn made no more tool calls than the current prompt's did",
 }
 
 TERMS = tuple(WEIGHTS)
@@ -88,9 +83,9 @@ def rejected(reason: str) -> Score:
 class Baseline:
     """What the seed spent on this question, measured this run.
 
-    Not stored on the case. `metric_extract` keeps its baseline on the case
-    because it is a recorded property of the trace the case came from; this one
-    is a fact about a model version, and putting it in `demo/golden/` would make
+    Not stored on the case. An extract case keeps what its recorded call cost,
+    because that is a property of the trace the case came from; this one is a
+    fact about a model version, and putting it in `demo/golden/` would make
     a committed fixture go stale every time the model changed.
     """
 
@@ -146,8 +141,8 @@ def _zero() -> dict[str, float]:
 
     A fresh dict each call: a module-level constant here would be one mutable
     object shared by every Score in a run. And all three keys on every path,
-    including the gates, because `terms` becomes `objective_scores` and a
-    missing key reshapes the Pareto front without saying so.
+    including the gates, because the seed check in `targets.py` reads
+    `terms["correct"]` on every case, whichever path scored it.
     """
     return dict.fromkeys(TERMS, 0.0)
 
@@ -281,10 +276,10 @@ def _headline(m: Match) -> str:
 def _cost(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
     """One-sided. At or under the seed's tokens for this question earns 1.0.
 
-    Unbounded reward for cheapness is the same failure as "fewer entries is
-    better" in `metric_extract._shape`: the cheapest turn is the one that never
-    explores. The correctness gate above already refuses that, and keeping this
-    one-sided means the gate is not the only thing holding it.
+    An unbounded reward for cheapness would pay most for the cheapest turn,
+    and the cheapest turn is the one that never explores. The correctness
+    gate above already refuses that, and keeping this one-sided means the
+    gate is not the only thing holding it.
     """
     if baseline is None or not baseline.tokens:
         return 1.0, ""

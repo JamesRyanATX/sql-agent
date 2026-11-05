@@ -73,7 +73,7 @@ def tools(*calls) -> list[ToolCall]:
 def test_a_right_answer_with_nothing_to_compare_against_scores_one():
     """No baseline is the first pass, before the seed has been measured. Cost
     and tool calls have nothing to be one-sided against, so they cannot
-    penalise — the same way `metric_extract._cost` handles a missing one."""
+    penalise."""
     result = score(turn(), case(), reference((1840,)))
 
     assert result.value == pytest.approx(1.0)
@@ -325,9 +325,9 @@ def test_an_errored_call_is_named_as_an_argument_nobody_explained():
     ],
 )
 def test_every_term_is_present_on_every_path(broken):
-    """`terms` becomes `EvaluationBatch.objective_scores`, which is what the
-    Pareto front is drawn from. `metric_extract` returns an empty dict on its
-    gates; doing that here would put holes in the front that nothing reports.
+    """The seed check in `targets.py` reads `terms["correct"]` on every case,
+    whichever path scored it, so a gate that left the key out would be a
+    KeyError there rather than a zero.
     """
     result = score(turn(**broken), case(), reference((1840,)))
 

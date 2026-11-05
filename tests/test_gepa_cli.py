@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from dataclasses import dataclass, field
 
 import pytest
@@ -20,7 +21,7 @@ pytest.importorskip("gepa", reason="uv run --group gepa")
 from app import llm, prompts, tracing  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 from tools.gepa import cli as gepa  # noqa: E402
-from tools.gepa import golden, metric_extract, targets  # noqa: E402
+from tools.gepa import golden, targets  # noqa: E402
 from tools.gepa.adapter import COMPONENT  # noqa: E402
 from tools.gepa.cases import ExtractCase  # noqa: E402
 from tests.test_gepa_adapter import GOOD_OUTPUT, SQL  # noqa: E402
@@ -30,18 +31,34 @@ BETTER = "a better instruction, which also honours every invariant"
 
 @dataclass
 class FakeResult:
-    """Enough of `GEPAResult` for the command. The three per-objective fields
-    default to None exactly as they do on the real type, which is how a run
-    with no objective scores reaches `_pareto`."""
+    """Enough of `GEPAResult` for the command. An empty `val_subscores` is how
+    a run with no per-example scores reaches `_pareto`."""
 
     candidates: list[dict[str, str]]
     val_aggregate_scores: list[float] = field(default_factory=list)
     total_metric_calls: int = 42
-    val_aggregate_subscores: list[dict[str, float]] | None = None
-    per_objective_best_candidates: dict[str, set[int]] | None = None
-    objective_pareto_front: dict[str, float] | None = None
-    # Per candidate, per validation case. The turn gate's whole evidence base.
-    val_subscores: list[dict[str, float]] = field(default_factory=list)
+    # Per candidate, per validation case, keyed by position in the valset.
+    # The turn gate's whole evidence base, and the report's table.
+    val_subscores: list[dict] = field(default_factory=list)
+    # Per validation case, the candidates with the top score on it.
+    per_val_instance_best_candidates: dict = field(default_factory=dict)
+
+
+# The real question, kept so the tests about it can put it back.
+ASK = gepa.ask_before_spending
+
+
+@pytest.fixture(autouse=True)
+def somebody_agreed(monkeypatch):
+    """Every search asks "Start?" before it starts, and a test has nobody at a
+    terminal to answer. So the question is answered for every test here, and
+    the tests that are about the question ask for `the_real_question`."""
+    monkeypatch.setattr(gepa, "ask_before_spending", lambda yes=False: None)
+
+
+@pytest.fixture
+def the_real_question(somebody_agreed, monkeypatch):
+    monkeypatch.setattr(gepa, "ask_before_spending", ASK)
 
 
 @pytest.fixture
@@ -182,7 +199,7 @@ def test_a_winner_that_scored_below_the_seed_is_not_offered(a_run, monkeypatch):
 
     assert result.exit_code == gepa.NO_IMPROVEMENT
     assert result.stdout == ""
-    assert "nothing better" in result.stderr
+    assert "nothing beat the starting text" in result.stderr
 
 
 def test_an_empty_pool_is_reported_as_a_result_rather_than_a_crash(a_run, monkeypatch):
@@ -199,115 +216,103 @@ def test_an_empty_pool_is_reported_as_a_result_rather_than_a_crash(a_run, monkey
     assert "GEPA proposed nothing" in result.stderr
 
 
-# ----------------------------------------------------------------- the front
+# ---------------------------------------------------------------- the report
 #
-# The metric collapses five weighted terms into one number, which settles the
-# grounding-against-cost trade on the reader's behalf. These say the front
-# survives that collapse, lands in a file, and never reaches stdout.
-
-# Read from the metric, not spelled again. A hardcoded list here went stale the
-# moment a sixth term was added, and the failure was four front tests rather
-# than anything pointing at the cause.
-TERMS = tuple(metric_extract.WEIGHTS)
-
-
-def _row(*values: float) -> tuple[float, ...]:
-    """One candidate's terms, padded with 1.0 to however many the metric has.
-
-    The last value is repeated into any extra terms so a candidate that gives
-    up the final term keeps giving it up. Written this way because a literal
-    five-tuple went stale the moment a sixth term was added.
-    """
-    padding = (values[-1],) * (len(TERMS) - len(values))
-    return values + padding
-
-
-def _subscores(*rows: tuple[float, ...]) -> list[dict[str, float]]:
-    return [dict(zip(TERMS, row)) for row in rows]
+# GEPA selects the next candidate to mutate from a table of candidates against
+# validation examples. These say that table lands in a file and on stderr, is
+# labelled with the cases it was scored on, and never reaches stdout.
 
 
 @pytest.fixture
-def a_front(a_run, monkeypatch):
-    """Four candidates. 0 is the seed, 1 dominates it outright, 2 is worst
-    everywhere, 3 buys the cheapest turn by giving up grounding."""
+def a_pool(a_run, monkeypatch):
+    """Four candidates over a two-case valset. 0 is the seed and 1 ties it on
+    the first example, so both are best there; 3 is the only one best on the
+    second; 2 is best on neither, so GEPA would never pick it to mutate.
+
+    Returns the valset GEPA was handed, so a test can check the labels."""
     pool = [
         {COMPONENT: a_run},
         {COMPONENT: BETTER},
-        {COMPONENT: "worse on every term"},
-        {COMPONENT: "terse, and ungrounded"},
+        {COMPONENT: "worse on every example"},
+        {COMPONENT: "good on the second example only"},
     ]
-    monkeypatch.setattr(
-        gepa,
-        "_search",
-        lambda *a, **k: FakeResult(
+    handed: dict = {}
+
+    def search(*a, **k):
+        handed["valset"] = k["valset"]
+        return FakeResult(
             pool,
             [0.80, 0.95, 0.40, 0.72],
-            # Candidate 1 dominates the seed, 2 is worst everywhere, and 3
-            # buys the last term outright by giving up the first. Padded to
-            # however many terms the metric has, so the shape of the front —
-            # not the term count — is what these assert.
-            val_aggregate_subscores=_subscores(
-                _row(0.80, 1.00, 1.00, 0.75, 0.90),
-                _row(0.95, 1.00, 1.00, 0.90, 0.90),
-                _row(0.50, 0.90, 0.90, 0.50, 0.50),
-                _row(0.30, 1.00, 1.00, 1.00, 1.00),
-            ),
-            per_objective_best_candidates={
-                TERMS[0]: {1},
-                TERMS[1]: {0, 1, 3},
-                TERMS[2]: {0, 1, 3},
-                TERMS[-2]: {3},
-                TERMS[-1]: {3},
-            },
-            objective_pareto_front=dict(
-                zip(TERMS, _row(0.95, 1.0, 1.0, 1.0, 1.0))
-            ),
-        ),
-    )
-    return a_run
+            # Keyed by position in the valset, as GEPA keys them.
+            val_subscores=[
+                {0: 1.0, 1: 0.6},
+                {0: 1.0, 1: 0.9},
+                {0: 0.5, 1: 0.3},
+                {0: 0.44, 1: 1.0},
+            ],
+            per_val_instance_best_candidates={0: {1, 0}, 1: {3}},
+        )
+
+    monkeypatch.setattr(gepa, "_search", search)
+    return handed
 
 
-def test_the_front_is_written_without_touching_stdout(a_front, tmp_path):
+def test_the_report_is_written_without_touching_stdout(a_pool, tmp_path):
     """The whole command's contract, applied to a second artifact: a file is
     written, a table is printed, and the prompt on stdout is untouched."""
     path = tmp_path / "artifacts" / "extract.pareto.json"
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
 
-    assert result.exit_code == 0
-    assert result.stdout == BETTER + "\n", "the front must not reach stdout"
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout == BETTER + "\n", "the report must not reach stdout"
 
     document = json.loads(path.read_text())
+    assert list(document) == ["target", "score", "examples", "pool", "candidates"]
     assert document["target"] == "extract"
-    assert document["objectives"] == list(TERMS)
-    assert document["pool"]["seed_index"] == 0
-    # The whole argument for a front: no single candidate has all of it.
-    assert document["best_per_objective"]["grounding"] == 0.95
-    assert document["best_per_objective"]["cost"] == 1.0
+    assert document["score"] == targets.EXTRACT.score()
+    assert document["pool"] == {
+        "candidates": 4, "eligible": 3, "metric_calls": 42, "seed_index": 0,
+    }
 
-    for term in TERMS:
-        assert term in result.stderr
+    assert "4 candidates over 2 validation examples, 3 best on at least one" in result.stderr
+    assert "E1    E2" in result.stderr, "the table's example columns"
 
 
-def test_a_dominated_candidate_is_not_on_the_front(a_front, tmp_path):
-    """Candidate 2 is worse than candidate 1 on all five terms, so no reading
-    of "better" puts it on a front. Candidate 3 is worse on grounding and
-    better on shape and cost, so it belongs there — and it is the one that
-    makes the trade-off visible, which is the point of showing a front at all.
+def test_the_examples_are_the_valset_in_the_order_gepa_was_given_it(a_pool, tmp_path):
+    """GEPA keys its scores by position, so E1 has to be `valset[0]`. An
+    extract case has no question, so its name is its label."""
+    path = tmp_path / "report.json"
 
-    This is also what stops somebody quietly substituting GEPA's
-    `per_objective_best_candidates`, which is a different, smaller set.
-    """
-    path = tmp_path / "front.json"
+    result = CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
+
+    names = [case.name for case in a_pool["valset"]]
+    assert json.loads(path.read_text())["examples"] == names
+    assert f"E1  {names[0]}" in result.stderr
+    assert f"E2  {names[1]}" in result.stderr
+
+
+def test_every_candidate_is_listed_with_the_examples_it_is_best_on(a_pool, tmp_path):
+    """Candidate 2 is best on no example and is listed anyway: the file is
+    the whole pool, and which candidates are eligible is a column in it."""
+    path = tmp_path / "report.json"
 
     CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
 
-    on_front = {entry["index"] for entry in json.loads(path.read_text())["front"]}
-    assert 2 not in on_front, "dominated on every term"
-    assert {1, 3} <= on_front, "neither beats the other on everything"
+    rows = json.loads(path.read_text())["candidates"]
+    assert [r["index"] for r in rows] == [0, 1, 2, 3], "discovery order"
+    assert [r["seed"] for r in rows] == [True, False, False, False]
+    assert [r["best_on"] for r in rows] == [[1], [1], [], [2]]
+    assert rows[3]["scores"] == [0.44, 1.0]
+    assert rows[1]["val"] == 0.95
+    assert rows[1]["chars"] == len(BETTER)
+    assert rows[1]["components"] == {COMPONENT: BETTER}
+    assert list(rows[0]) == [
+        "index", "seed", "val", "scores", "best_on", "chars", "components",
+    ]
 
 
-def test_the_front_is_byte_stable_across_runs(a_front, tmp_path):
+def test_the_report_is_byte_stable_across_runs(a_pool, tmp_path):
     """The file is committed and read in a diff. GEPA hands back sets, and one
     unsorted set reaching the JSON makes every rerun a spurious change."""
     first, second = tmp_path / "a.json", tmp_path / "b.json"
@@ -318,20 +323,20 @@ def test_the_front_is_byte_stable_across_runs(a_front, tmp_path):
     assert first.read_bytes() == second.read_bytes()
 
 
-def test_the_front_is_always_written_to_the_run_directory(a_front, tmp_path):
+def test_the_report_is_always_written_to_the_run_directory(a_pool, tmp_path):
     """`--pareto` names a tracked copy. Not passing it must not mean losing the
     evidence — `out/` is where every other artifact of a run already lands."""
     result = CliRunner().invoke(gepa.cli, ["extract"])
 
     assert result.exit_code == 0
-    assert json.loads(gepa.pareto("extract").read_text())["front"]
+    assert json.loads(gepa.pareto("extract").read_text())["candidates"]
 
 
-def test_a_result_with_no_objective_scores_says_so_rather_than_crashing(
+def test_a_result_with_no_per_example_scores_says_so_rather_than_crashing(
     a_run, monkeypatch
 ):
-    """An adapter that returns no per-term breakdown is a run with no front,
-    not a run that failed. Says so in one line and writes nothing."""
+    """A result with no validation rows is a run with no table, not a run
+    that failed. Says so in one line and writes nothing."""
     monkeypatch.setattr(
         gepa,
         "_search",
@@ -342,28 +347,51 @@ def test_a_result_with_no_objective_scores_says_so_rather_than_crashing(
 
     assert result.exit_code == 0
     assert result.stdout == BETTER + "\n"
-    assert "no per-objective scores" in result.stderr
+    assert "no per-example scores" in result.stderr
     assert not gepa.pareto("extract").exists()
 
 
-def test_a_candidate_that_scored_nothing_anywhere_is_left_off(a_run, monkeypatch):
-    """`metric_extract.score` returns empty terms on both its gates, so a
-    candidate whose every validation case errored arrives with no terms at all.
-    It is ineligible for the front rather than a KeyError.
+def test_a_mean_that_is_not_a_number_is_written_as_null(a_run, monkeypatch):
+    """GEPA averages a candidate with no validation scores to -inf, and
+    `json.dumps` would write that as `-Infinity`, which a JSON reader
+    refuses."""
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [{COMPONENT: a_run}, {COMPONENT: BETTER}],
+            [0.9, float("-inf")],
+            val_subscores=[{0: 0.9, 1: 0.9}, {}],
+            per_val_instance_best_candidates={0: {0}, 1: {0}},
+        ),
+    )
 
-    The run also ends NO_IMPROVEMENT, and the front is on disk anyway. That is
-    the reason `_pareto` runs before the pool is judged: a run that produced
-    nothing promotable is the one whose evidence is most worth keeping.
+    CliRunner().invoke(gepa.cli, ["extract"])
+
+    text = gepa.pareto("extract").read_text()
+    assert "Infinity" not in text
+    rows = json.loads(text)["candidates"]
+    assert rows[1]["val"] is None
+    assert rows[0]["val"] == 0.9
+
+
+def test_a_candidate_missing_scores_shows_null_rather_than_crashing(a_run, monkeypatch):
+    """GEPA can hold a candidate it scored on only some of the validation
+    examples. Its missing cells are null in the file and `-` in the table.
+
+    The run also ends NO_IMPROVEMENT, and the report is on disk anyway. That
+    is the reason `_pareto` runs before the pool is judged: a run that
+    produced nothing promotable is the one whose evidence is most worth
+    keeping.
     """
     monkeypatch.setattr(
         gepa,
         "_search",
         lambda *a, **k: FakeResult(
             [{COMPONENT: a_run}, {COMPONENT: BETTER}],
-            [0.8, 0.0],
-            val_aggregate_subscores=[dict.fromkeys(TERMS, 0.9), {}],
-            per_objective_best_candidates={term: {0} for term in TERMS},
-            objective_pareto_front=dict.fromkeys(TERMS, 0.9),
+            [0.9, 0.0],
+            val_subscores=[{0: 0.9, 1: 0.9}, {1: 0.0}],
+            per_val_instance_best_candidates={0: {0}, 1: {0}},
         ),
     )
 
@@ -371,10 +399,10 @@ def test_a_candidate_that_scored_nothing_anywhere_is_left_off(a_run, monkeypatch
 
     assert result.exit_code == gepa.NO_IMPROVEMENT
     assert result.stdout == ""
-    on_front = {
-        e["index"] for e in json.loads(gepa.pareto("extract").read_text())["front"]
-    }
-    assert on_front == {0}
+    rows = json.loads(gepa.pareto("extract").read_text())["candidates"]
+    assert rows[1]["scores"] == [None, 0.0]
+    assert rows[1]["best_on"] == []
+    assert rows[0]["best_on"] == [1, 2]
 
 
 # --------------------------------------------------------- more than one thing
@@ -430,10 +458,11 @@ def budget_of(monkeypatch, seed, argv: list[str]) -> int:
 
 
 def test_a_whole_turn_target_brings_its_own_budget(a_tools_run, monkeypatch):
-    """`--budget` used to default to 150 for everything. A whole-turn rollout is
-    about 11,500 tokens, so that default silently means 1.7 million — the most
-    expensive thing an unnoticed default could do in this repo."""
-    assert budget_of(monkeypatch, a_tools_run[0], ["tools", "--yes"]) == 60
+    """A whole-turn rollout is about 11,500 tokens, so a whole-turn target
+    names its own budget rather than taking the command's 150. It is 180,
+    about two million tokens, which the run states before it asks: `make
+    gepa-tools` is the whole command, with nothing to pass."""
+    assert budget_of(monkeypatch, a_tools_run[0], ["tools", "--yes"]) == 180
 
 
 def test_the_cheap_target_keeps_the_budget_it_always_had(a_run, monkeypatch):
@@ -444,37 +473,41 @@ def test_an_explicit_budget_still_wins(a_tools_run, monkeypatch):
     assert budget_of(monkeypatch, a_tools_run[0], ["tools", "--budget", "4", "--yes"]) == 4
 
 
-def test_an_expensive_run_says_what_it_will_spend_before_it_spends(a_tools_run):
+def test_a_run_prints_the_harvest_and_the_split_and_nothing_else_before_it_asks(
+    a_tools_run,
+):
+    """What is on the screen before "Start?": where the cases came from and how
+    they were split, which names the budget. No summary of the target and no
+    paragraph about what the run will not touch."""
     result = CliRunner().invoke(gepa.cli, ["tools", "--yes"])
 
     assert result.exit_code == 0
-    assert "60 rollouts" in result.stderr
-    assert "690,000 tokens" in result.stderr
-    assert "components  4" in result.stderr
-    # Not on stdout, where the artifact is.
-    assert "rollouts" not in result.stdout
+    assert "split: " in result.stderr and "budget 180 calls" in result.stderr
+    for gone in ("rollouts at roughly", "components ", "proposals ", "memory off"):
+        assert gone not in result.stderr, gone
 
 
-def test_an_expensive_run_refuses_a_pipe_rather_than_spending_into_it(
-    a_tools_run, monkeypatch
+@pytest.mark.parametrize("target", ["tools", "extract"])
+def test_every_run_refuses_a_pipe_rather_than_spending_into_it(
+    target, request, the_real_question, monkeypatch
 ):
-    """`make gepa-tools > new.md` and every CI job: nobody is there to agree to
-    the money, and the run would spend it anyway."""
+    """Every CI job, and any run with nobody at a terminal: nobody is there to
+    agree, and the run would spend anyway. The cheap target asks as well, so
+    every target reads the same."""
+    request.getfixturevalue("a_tools_run" if target == "tools" else "a_run")
     monkeypatch.setattr(
-        gepa, "_search", lambda *a, **k: pytest.fail("it spent the money")
+        gepa, "_search", lambda *a, **k: pytest.fail("it started without asking")
     )
 
-    result = CliRunner().invoke(gepa.cli, ["tools"])
+    result = CliRunner().invoke(gepa.cli, [target])
 
     assert result.exit_code == 1
     assert "nobody at a terminal" in result.output
     assert result.stdout == ""
 
 
-def test_a_cheap_run_does_not_ask(a_run, monkeypatch):
-    """One model call a rollout. Asking about it would train people to type
-    `--yes`, which is how a confirmation stops being read."""
-    result = CliRunner().invoke(gepa.cli, ["extract"])
+def test_yes_starts_a_run_without_asking(a_run, the_real_question):
+    result = CliRunner().invoke(gepa.cli, ["extract", "--yes"])
 
     assert result.exit_code == 0
     assert "Start?" not in result.stderr
@@ -546,9 +579,8 @@ def test_the_config_winner_is_a_yaml_block_that_pastes_into_the_file(a_config_ru
     assert "explore:\n  effort: low\n" in result.stdout
     assert "# was" not in result.stdout
     assert result.stdout.count("effort:") == 6
-    # The diff names where a person would go, and the spend was said first.
+    # The diff names where a person would go.
     assert "config/config.yaml" in result.stderr
-    assert "components  1" in result.stderr
 
 
 def test_the_config_target_is_searchable_and_the_rest_still_say_why_not(monkeypatch):
@@ -659,12 +691,12 @@ def test_overfit_trains_on_the_cases_the_seed_does_worst_on(a_run, monkeypatch):
 
 
 def test_the_held_out_cases_are_scored_for_every_candidate_and_written(
-    a_front, tmp_path
+    a_pool, tmp_path
 ):
     """The number the section exists for. Every candidate in the pool, the
     seed included, on the cases the search never saw; on stderr as a table and
-    in the front's file as a block, at the overfit path — the real run's front
-    is not touched."""
+    in the report's file as a block, at the overfit path — the real run's
+    report is not touched."""
     result = CliRunner().invoke(gepa.cli, ["extract", "--overfit", "3"])
 
     assert result.exit_code == 0, result.stderr
@@ -751,7 +783,7 @@ def test_a_run_leaves_its_whole_stderr_beside_the_front(a_run, tmp_path):
 
     assert result.exit_code == 0, result.stderr
     kept = (tmp_path / "extract.run.txt").read_text()
-    assert "split     " in kept, "the run's own narration"
+    assert "split: " in kept, "the run's own narration"
     assert "candidate 1" in kept, "the gate's verdict"
     assert "chars ->" in kept, "the diff's summary line"
     assert kept.strip() == result.stderr.strip(), "the terminal's text, nothing more"
@@ -865,3 +897,362 @@ def test_zero_iterations_is_a_usage_error(a_run, monkeypatch):
 
     assert result.exit_code == 2
     assert "at least one" in result.output
+
+
+# -------------------------------------------------------------------- --from
+#
+# A search can start from the text in a file rather than the working text.
+# The demo starts `extract` from a deliberately short prompt.
+
+SHORT = "Record what this query established, as short notes the next question can use."
+
+
+@pytest.fixture
+def short_file(tmp_path):
+    path = tmp_path / "extract.short.md"
+    path.write_text(SHORT + "\n\n", encoding="utf-8")
+    return path
+
+
+def from_the_seed(monkeypatch) -> dict:
+    """A search that returns its seed and one better candidate, and keeps
+    what it was handed."""
+    seen: dict = {}
+
+    def search(*a, **k):
+        seen.update(k)
+        return FakeResult([k["seed_candidate"], {COMPONENT: BETTER}], [0.5, 0.9])
+
+    monkeypatch.setattr(gepa, "_search", search)
+    return seen
+
+
+def test_from_makes_the_files_text_the_seed_the_search_receives(
+    a_run, monkeypatch, short_file
+):
+    seen = from_the_seed(monkeypatch)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert result.exit_code == 0, result.stderr
+    assert seen["seed_candidate"] == {COMPONENT: SHORT}, "read and stripped"
+    assert result.stdout == BETTER + "\n"
+
+
+def test_from_says_which_text_the_search_started_from(a_run, monkeypatch, short_file):
+    from_the_seed(monkeypatch)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert (
+        f"seed: {short_file}, {len(SHORT):,} chars, in place of the working "
+        f"text's {len(a_run):,}"
+    ) in result.stderr
+    assert f"seed: {short_file}" in (gepa.OUT / "extract.run.txt").read_text()
+
+
+def test_the_diff_header_names_the_file_the_search_started_from(
+    a_run, monkeypatch, short_file
+):
+    from_the_seed(monkeypatch)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert f"--- {short_file}" in result.stderr
+    assert "--- " + str(prompts.directory() / "extract.md") not in result.stderr
+
+
+def test_an_empty_from_file_is_refused(a_run, monkeypatch, tmp_path):
+    monkeypatch.setattr(gepa, "_search", lambda *a, **k: pytest.fail("a search was started"))
+    empty = tmp_path / "empty.md"
+    empty.write_text("  \n\n", encoding="utf-8")
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(empty)])
+
+    assert result.exit_code == 2
+    assert f"--from {empty} is empty" in result.stderr
+
+
+def test_from_is_refused_for_a_target_with_several_components(
+    monkeypatch, tmp_path, short_file
+):
+    """The tools target has one component per tool, and a file holds one
+    text, so there is no saying which description it replaces."""
+    monkeypatch.setattr(gepa, "_search", lambda *a, **k: pytest.fail("a search was started"))
+
+    result = CliRunner().invoke(gepa.cli, ["tools", "--from", str(short_file)])
+
+    assert result.exit_code == 2
+    assert (
+        f"tools has {len(targets.TOOLS.seed())}" in result.stderr
+    ), "the message says how many components"
+
+
+def test_the_size_limit_stays_tied_to_the_working_prompt(a_run, monkeypatch, short_file):
+    """A search that starts from a short prompt needs room to grow to 1.5
+    times the working prompt, not 1.5 times its own start."""
+    seen = from_the_seed(monkeypatch)
+
+    CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert seen["adapter"].max_chars == int(targets.MAX_GROWTH * len(a_run))
+    assert seen["adapter"].max_chars > int(targets.MAX_GROWTH * len(SHORT))
+
+
+def test_probe_only_with_from_checks_the_working_text_and_says_so(
+    monkeypatch, tmp_path, short_file
+):
+    """The real check, under a scripted model: the probes are replayed
+    against the working prompt, and the file is named only to say it is not
+    used."""
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    sent: list[str] = []
+
+    async def fake_complete(**kwargs):
+        sent.append(kwargs["system"])
+        return llm.Result(
+            text=json.dumps(GOOD_OUTPUT),
+            stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    result = CliRunner().invoke(
+        gepa.cli, ["extract", "--probe-only", "--from", str(short_file)]
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        f"--probe-only checks the working text; the --from file {short_file} "
+        f"is not used"
+    ) in result.stderr
+    assert sent and set(sent) == {prompts.get("extract")}, "the working prompt, every probe"
+    assert "all 4 probes pass" in result.stderr
+
+
+def test_with_from_the_gate_and_the_seed_check_use_the_files_text(
+    a_run, monkeypatch, tmp_path
+):
+    """The file is the seed in every comparison the search makes. Its text
+    fails two probes under this model and the working prompt fails none, so
+    the gate's baseline shows which one it read. The seed's score is found
+    by matching the file's text, so a candidate below it is not offered."""
+    from tests.test_gepa_adapter import CENSUS_OUTPUT
+
+    async def census_under_degenerate(**kwargs):
+        payload = CENSUS_OUTPUT if "DEGENERATE" in kwargs["system"] else GOOD_OUTPUT
+        return llm.Result(
+            text=json.dumps(payload), stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", census_under_degenerate)
+    start = tmp_path / "start.md"
+    start.write_text("DEGENERATE: a short prompt that records counts", encoding="utf-8")
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [k["seed_candidate"], {COMPONENT: BETTER}], [0.95, 0.90]
+        ),
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(start)])
+
+    assert "seed passes 2/4" in result.stderr, "the file's text, not the working prompt's"
+    assert result.exit_code == gepa.NO_IMPROVEMENT
+    assert "The text the search started from scored 0.950" in result.stderr
+
+
+def with_rows(monkeypatch, scores: list[float]) -> None:
+    """A search over two validation examples that returns its seed and BETTER
+    with these averages, and a full row of per-example scores for each."""
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [k["seed_candidate"], {COMPONENT: BETTER}][: len(scores)],
+            scores,
+            val_subscores=[{0: s, 1: s} for s in scores],
+            per_val_instance_best_candidates={0: {len(scores) - 1}, 1: {len(scores) - 1}},
+        ),
+    )
+
+
+def test_with_from_the_working_text_is_scored_and_written_to_the_report(
+    a_run, monkeypatch, short_file
+):
+    with_rows(monkeypatch, [0.4, 1.0])
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert result.exit_code == 0, result.stderr
+    document = json.loads(gepa.pareto("extract").read_text())
+    assert list(document) == ["target", "score", "examples", "pool", "candidates", "working"]
+    assert document["working"] == {
+        "label": str(prompts.directory() / "extract.md"),
+        "val": 1.0,
+        "scores": [1.0, 1.0],
+        "chars": len(a_run),
+    }
+    assert "working  1.000  1.00  1.00" in result.stderr, "the row in the table"
+    assert "`working` is the text the agent runs" in result.stderr
+
+
+def test_without_from_the_working_text_is_not_scored_again(a_run, monkeypatch):
+    """Without `--from` the seed is the working text, already in the pool."""
+    with_rows(monkeypatch, [0.4, 1.0])
+
+    result = CliRunner().invoke(gepa.cli, ["extract"])
+
+    assert "working" not in json.loads(gepa.pareto("extract").read_text())
+    assert "compare: " not in result.stderr
+
+
+def test_with_from_a_pool_of_one_is_still_compared(a_run, monkeypatch, short_file):
+    with_rows(monkeypatch, [0.4])
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    assert result.exit_code == gepa.NO_IMPROVEMENT
+    assert json.loads(gepa.pareto("extract").read_text())["working"]["val"] == 1.0
+
+
+def test_with_from_the_winner_is_compared_with_the_working_text(
+    a_run, monkeypatch, short_file
+):
+    with_rows(monkeypatch, [0.4, 1.0])
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    label = prompts.directory() / "extract.md"
+    assert (
+        f"compare: started from {short_file} at 0.400, the winner scored 1.000, "
+        f"and the working text {label} scored 1.000"
+    ) in result.stderr
+    assert "is not a replacement" not in result.stderr, "not below, so no warning"
+    assert result.stdout == BETTER + "\n"
+
+
+def test_a_winner_below_the_working_text_is_printed_with_a_warning(
+    a_run, monkeypatch, short_file
+):
+    """A warning and not a refusal: the search beat the file it started
+    from, and that is what it was asked to do."""
+    with_rows(monkeypatch, [0.4, 0.8])
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
+
+    label = prompts.directory() / "extract.md"
+    assert (
+        f"The text on stdout scored 0.800, lower than the 1.000 of the text the "
+        f"agent runs, {label}. It is not a replacement for it."
+    ) in result.stderr
+    assert result.stdout == BETTER + "\n"
+
+
+# --------------------------------------------------------------- --resume
+#
+# GEPA resumes from its saved state and ignores the seed it is handed, so the
+# command keeps the seed beside the state and checks it.
+
+
+def test_a_fresh_run_records_the_text_it_started_from(a_run):
+    CliRunner().invoke(gepa.cli, ["extract"])
+
+    saved = json.loads((gepa.run_dir("extract") / "seed.json").read_text())
+    assert saved == {COMPONENT: a_run}
+
+
+def test_resume_is_refused_when_the_saved_search_started_from_other_text(
+    a_run, monkeypatch, short_file
+):
+    """The saved search started from the short file; this run's seed is the
+    working prompt."""
+    gepa.run_dir("extract").mkdir(parents=True)
+    (gepa.run_dir("extract") / "seed.json").write_text(json.dumps({COMPONENT: SHORT}))
+    monkeypatch.setattr(gepa, "_search", lambda *a, **k: pytest.fail("a search was started"))
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 1
+    assert "started from different text" in result.stderr
+    assert "make gepa-extract-reset" in result.stderr
+
+
+def test_resume_continues_when_the_saved_search_started_from_the_same_text(a_run):
+    CliRunner().invoke(gepa.cli, ["extract"])
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "could not be checked" not in result.stderr
+
+
+def test_resume_with_a_saved_search_and_no_record_checks_it_after_loading(a_run):
+    """A run directory written before the seed was recorded. GEPA's saved
+    search keeps its seed as candidate 0, which here is this run's seed, so
+    the run continues and the record is written for the next resume."""
+    gepa.run_dir("extract").mkdir(parents=True)
+    (gepa.run_dir("extract") / "gepa_state.bin").write_bytes(b"")
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        "the saved search has no record of the text it started from, so that "
+        "could not be checked before loading it"
+    ) in result.stderr
+    saved = json.loads((gepa.run_dir("extract") / "seed.json").read_text())
+    assert saved == {COMPONENT: a_run}
+
+
+def test_resume_with_a_saved_search_that_started_elsewhere_is_refused_after_loading(
+    a_run, monkeypatch
+):
+    """Candidate 0 is the saved search's seed. It is not this run's, so the
+    run stops before the report, the gate or stdout."""
+    gepa.run_dir("extract").mkdir(parents=True)
+    (gepa.run_dir("extract") / "gepa_state.bin").write_bytes(b"")
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult([{COMPONENT: SHORT}, {COMPONENT: BETTER}], [0.4, 0.9]),
+    )
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "started from different text" in result.stderr
+    assert "make gepa-extract-reset" in result.stderr
+    assert not gepa.pareto("extract").exists(), "no report written"
+    assert "checking the pool" not in result.stderr, "the gate did not run"
+    assert not (gepa.run_dir("extract") / "seed.json").exists()
+
+
+def test_resume_with_no_record_and_no_saved_search_writes_the_record_quietly(a_run):
+    """GEPA will start fresh, so there is nothing to check and nothing to say."""
+    gepa.run_dir("extract").mkdir(parents=True)
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "no record of the text" not in result.stderr
+    saved = json.loads((gepa.run_dir("extract") / "seed.json").read_text())
+    assert saved == {COMPONENT: a_run}
+
+
+def test_a_refused_resume_leaves_the_previous_transcript_as_it_was(
+    a_run, monkeypatch
+):
+    gepa.run_dir("extract").mkdir(parents=True)
+    (gepa.run_dir("extract") / "seed.json").write_text(json.dumps({COMPONENT: SHORT}))
+    transcript = gepa.transcript("extract")
+    transcript.write_text("last night's run\n", encoding="utf-8")
+    monkeypatch.setattr(gepa, "_search", lambda *a, **k: pytest.fail("a search was started"))
+
+    result = CliRunner().invoke(gepa.cli, ["extract", "--resume"])
+
+    assert result.exit_code == 1
+    assert "started from different text" in result.stderr
+    assert transcript.read_text(encoding="utf-8") == "last night's run\n"

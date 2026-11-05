@@ -130,9 +130,10 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #                                                      three cases, the gate
 #                                                      reporting only, then
 #                                                      the held-out score
-#   make gepa-extract-pareto                           the front from the last
-#   make gepa-tools-pareto                             run of that target, as
-#   make gepa-config-pareto                            a table
+#   make gepa-extract-pareto                           every candidate's score
+#   make gepa-tools-pareto                             on every validation
+#   make gepa-config-pareto                            example, from the last
+#                                                      run of that target
 #   make gepa-extract-overfit-pareto                   the overfit run's, with
 #                                                      its held-out table
 #   make gepa-extract-reset                            delete what the last run
@@ -143,11 +144,12 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 #
 # Every run also leaves its whole terminal output in tools/gepa/out/<target>.run.txt:
 # the harvest, the split, the gate's verdicts, the diff. Copy that and the
-# front to demo/gepa/ to keep them; nothing under out/ survives a clone.
+# scores file to demo/gepa/ to keep them; nothing under out/ survives a clone.
 #
-# `make gepa-tools` and `make gepa-config` cost real money and ask before they
-# spend any. Redirecting means nobody is there to agree, so they refuse unless
-# GEPA_ARGS=--yes. What every reflection read is kept beside the run, in
+# Every search prints its harvest and its split and then asks "Start?".
+# `make gepa-tools` and `make gepa-config` cost real money. With nobody at a
+# terminal to answer, a search refuses to start unless GEPA_ARGS=--yes. What
+# every reflection read is kept beside the run, in
 # tools/gepa/out/run/<target>/reflections.jsonl.
 #
 # `@` because make echoes recipes to stdout, and stdout is the artifact.
@@ -162,23 +164,49 @@ GEPA = uv run --group gepa python -m tools.gepa
 # `--overfit` is a flag on the extract search, not a target the CLI knows, so
 # this is the one name here that `gepa-%` cannot pass through. It exists so
 # the run has a command to be named by, in the talk and in the line below.
+#
+# It starts from the same text as `make gepa-extract` (see GEPA_EXTRACT_FROM
+# below), so the two runs can be compared.
 gepa-extract-overfit:  ## the extract search with the guards off: three cases, gate reporting only
-	@$(GEPA) extract --overfit 3 $(GEPA_ARGS)
+	@$(GEPA) extract --overfit 3 $(if $(GEPA_EXTRACT_FROM),--from $(GEPA_EXTRACT_FROM)) $(GEPA_ARGS)
 
-# The last run's front, from tools/gepa/out/ — every search writes one there
-# whether or not --pareto asked for a tracked copy. The overfit run is its
+# The extract search starts from a one-sentence prompt, not from the prompt the
+# agent runs. config/prompts/extract.md already scores 1.0 on almost every
+# case, and GEPA learns only from cases the starting text gets wrong, so a
+# search that starts there has nothing to work on. The short prompt is in
+# demo/gepa/extract.short.md. The agent never reads it: it is only where this
+# search begins. The limit on how long a candidate may grow is still 1.5 times
+# the prompt the agent runs.
+#
+#   make gepa-extract                          start from the short prompt
+#   make gepa-extract GEPA_EXTRACT_FROM=       start from the prompt the agent runs
+#
+# `--probe-only` checks the prompt the agent runs in either case.
+#
+# An explicit rule, so make uses it and not `gepa-%` for this one name.
+GEPA_EXTRACT_FROM ?= demo/gepa/extract.short.md
+gepa-extract:  ## GEPA over the extract prompt, starting from the short prompt in demo/gepa/
+	@$(GEPA) extract $(if $(GEPA_EXTRACT_FROM),--from $(GEPA_EXTRACT_FROM)) $(GEPA_ARGS)
+
+# The last run's scores, from tools/gepa/out/ — every search writes one there
+# whether or not --pareto asked for a tracked copy. One row per candidate, one
+# column per validation example, and the examples each candidate has the top
+# score on. That is the table GEPA picks the next candidate to mutate from: a
+# candidate is eligible when it has the top score on at least one example. The
+# score is one number per example; `tools/gepa/targets.py` says what it means
+# for each target and the report prints that sentence. The overfit run is its
 # own name, so `make gepa-extract-overfit-pareto` is section 6's and this is
 # section 3's. A committed copy is a path to the module:
 #   uv run --group gepa python -m tools.gepa.front demo/gepa/extract.pareto.json
 #
 # Before any run, the file is not there. The person who typed this wants to
 # know what to type next, not where the file would have been.
-gepa-%-pareto:  ## the Pareto front from the last run of gepa-<target>, as a table
+gepa-%-pareto:  ## each candidate's score on each validation example, from the last run of gepa-<target>
 	@test -f tools/gepa/out/$*.pareto.json || { \
-	  echo "No front for $* yet. Run 'make gepa-$*' first."; exit 1; }
+	  echo "No scores for $* yet. Run 'make gepa-$*' first."; exit 1; }
 	@uv run --group gepa python -m tools.gepa.front tools/gepa/out/$*.pareto.json
 
-# Everything cli.py writes for one run name: the corpus, the front, the
+# Everything cli.py writes for one run name: the corpus, the scores, the
 # transcript, and GEPA's run dir. The overfit run has no corpus of its own —
 # it reads extract's — so its reset leaves that alone by construction.
 gepa-%-reset:  ## delete what the last run of gepa-<target> left in tools/gepa/out/

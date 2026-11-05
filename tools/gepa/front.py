@@ -1,7 +1,8 @@
-"""A committed Pareto front, read back for a person: a legend, the front,
-and how each finalist opens.
+"""A committed GEPA report, read back for a person: what the score means,
+every candidate's score on every validation example, and how each eligible
+candidate opens.
 
-`cli._pareto` writes the front to a file and prints it to stderr once, at the
+`cli._pareto` writes the report to a file and prints it to stderr once, at the
 end of a run. The file is what survives: `demo/gepa/*.pareto.json` is tracked
 and a run's stderr usually is not. This reads a file back, so the numbers on
 a slide can be shown coming out of the file.
@@ -9,10 +10,16 @@ a slide can be shown coming out of the file.
     make gepa-extract-pareto                              # the last run's
     python -m tools.gepa.front demo/gepa/extract.pareto.json   # a committed one
 
-Three sections, each headed, each starting at column one, so the eye has a
-left edge to return to: LEGEND says what the terms are and what they weigh,
-SCORES is the table, FINALISTS is how each candidate on it opens. An
-overfit run's file adds HELD OUT between the last two.
+The table is the one GEPA selects from. Each row is a candidate and each
+column is one validation example. GEPA picks the next candidate to mutate from
+the candidates that have the top score on at least one example, which is what
+the `best on` column lists.
+
+Each section is headed and starts at column one, so the eye has a left edge to
+return to: ABOUT says what is being searched, SCORE says what the number
+means, SCORES is the table with the examples numbered under it, and FINALISTS
+is how each eligible candidate opens. An overfit run's file adds HELD OUT
+between the last two.
 
 stdout, deliberately: this is a display. The search's stdout is the promoted
 text, which is why its table went to stderr. Colour when stdout is a
@@ -36,27 +43,23 @@ PREVIEW = 120
 def summary(document: dict[str, Any]) -> str:
     pool = document["pool"]
     return (
-        f"{len(document['objectives'])} objectives over {pool['candidates']} "
-        f"candidates, {pool['on_front']} on the front"
+        f"{_plural(pool['candidates'], 'candidate')} over "
+        f"{_plural(len(document['examples']), 'validation example')}, "
+        f"{pool['eligible']} best on at least one"
     )
 
 
-def render(
-    document: dict[str, Any],
-    *,
-    legend: dict[str, str] | None = None,
-    styled: bool = False,
-) -> list[str]:
-    """LEGEND, SCORES, and HELD OUT if the run kept one, as lines at
-    column one. FINALISTS is `finalists`, so the search's own output, which
-    has the candidates' text elsewhere, can leave it out.
+def render(document: dict[str, Any], *, styled: bool = False) -> list[str]:
+    """SCORE, SCORES, and HELD OUT if the run kept one, as lines at column
+    one. FINALISTS is `finalists`, so the search's own output, which has the
+    candidates' text elsewhere, can leave it out.
 
-    Plain by default. Styled for the display: headings bold, the best value
-    in each column highlighted, the seed row marked.
+    Plain by default. Styled for the display: headings bold, the top value in
+    each example's column highlighted, the seed row marked.
     """
     lines: list[str] = []
-    lines.extend(_legend(document, legend or {}, styled))
-    lines.extend(_front(document, styled))
+    lines.extend(_score(document, styled))
+    lines.extend(_table(document, styled))
     if document.get("holdout"):
         lines.extend(_holdout(document, styled))
     return lines
@@ -73,55 +76,112 @@ def _header(text: str, styled: bool) -> list[str]:
     return [_style(text, styled, fg="bright_white", bold=True), "-" * len(text)]
 
 
-def _legend(document: dict[str, Any], words: dict[str, str], styled: bool) -> list[str]:
-    """One line per term: the term, its weight, what a 1.0 means. A term the
-    metric has no words for shows its weight alone, a gap to notice."""
-    objectives = tuple(document["objectives"])
-    weights = document.get("weights") or {}
-    if not weights and not words:
+def _score(document: dict[str, Any], styled: bool) -> list[str]:
+    """The one sentence saying what the number means, wrapped. Nothing when
+    the file has no sentence."""
+    sentence = document.get("score") or ""
+    if not sentence:
         return []
-    width = max(len(o) for o in objectives)
-    lines = _heading("LEGEND", styled)
-    lines.extend(_header(f"{'term':<{width}}  weight  what a perfect score means", styled))
-    for o in objectives:
-        weight = f"{weights[o]:.2f}" if o in weights else "-"
-        lines.append(f"{o:<{width}}  {weight:>6}  {words.get(o, '')}".rstrip())
-    return lines
+    return _heading("SCORE", styled) + textwrap.wrap(sentence, width=78)
 
 
-def _front(document: dict[str, Any], styled: bool) -> list[str]:
-    objectives = tuple(document["objectives"])
-    front = document["front"]
-    width = {o: max(len(o), 5) for o in objectives}
-    name_width = max([4] + [len(_who(e)) for e in front])
+def _table(document: dict[str, Any], styled: bool) -> list[str]:
+    """One row per candidate: its mean, its score on each example, its length
+    and the examples it is best on. Then the examples, numbered.
+
+    A candidate GEPA did not score on an example shows `-` there, and the
+    file holds null.
+    """
+    rows = document["candidates"]
+    working = document.get("working")
+    examples = document["examples"]
+    columns = [f"E{n}" for n in range(1, len(examples) + 1)]
+    width = max([4] + [len(c) for c in columns])
+    name_width = max(
+        [4] + [len(_who(row)) for row in rows] + ([len("working")] if working else [])
+    )
 
     lines = _heading("SCORES", styled)
-    header = "  ".join(f"{o:>{width[o]}}" for o in objectives)
+    header = "  ".join(f"{c:>{width}}" for c in columns)
     lines.extend(_header(
         f"{'cand':<{name_width}}  {'val':<5}  {header}  {'chars':>6}  best on", styled
     ))
 
-    # The best on each term across the front, so the cell that earns a
-    # candidate its place can be seen without reading the last column.
-    best_on = {o: max((e["scores"][o] for e in front), default=None) for o in objectives}
-    for entry in front:
+    # The top score in each example's column, so the cell that makes a
+    # candidate eligible can be seen without reading the last column.
+    top = [
+        max((r["scores"][n] for r in rows if r["scores"][n] is not None), default=None)
+        for n in range(len(examples))
+    ]
+    for row in rows:
         cells = []
-        for o in objectives:
-            cell = f"{entry['scores'][o]:>{width[o]}.2f}"
-            top = best_on[o] is not None and entry["scores"][o] >= best_on[o]
-            cells.append(_style(cell, styled and top, fg="green", bold=True))
-        who = _style(f"{_who(entry):<{name_width}}", styled and bool(entry.get("seed")), fg="yellow", bold=True)
-        val = f"{entry['val']:.3f}" if entry.get("val") is not None else "-"
-        chars = f"{entry['chars']:,}" if entry.get("chars") is not None else "-"
-        best = ", ".join(entry.get("tops") or [])
+        for n, value in enumerate(row["scores"]):
+            if value is None:
+                cells.append(f"{'-':>{width}}")
+                continue
+            cell = f"{value:>{width}.2f}"
+            cells.append(_style(cell, styled and value >= top[n], fg="green", bold=True))
+        who = _style(
+            f"{_who(row):<{name_width}}", styled and bool(row.get("seed")),
+            fg="yellow", bold=True,
+        )
+        val = f"{row['val']:.3f}" if row.get("val") is not None else "-"
+        chars = f"{row['chars']:,}" if row.get("chars") is not None else "-"
+        best = _ranges(row.get("best_on") or [])
         lines.append(f"{who}  {val:<5}  {'  '.join(cells)}  {chars:>6}  {best}".rstrip())
-    # No `best` row: the file keeps `best_per_objective`, and the highlighted
-    # cells already say which candidate wins each column.
+
+    if working:
+        lines.extend(_working_row(working, len(examples), width, name_width))
+
+    lines.append("")
+    label_width = max([len(c) for c in columns] or [0])
+    for column, label in zip(columns, examples):
+        lines.append(f"{column:<{label_width}}  {label}")
     return lines
 
 
-def _who(entry: dict[str, Any]) -> str:
-    return "seed" if entry.get("seed") else str(entry["index"])
+def _working_row(
+    working: dict[str, Any], count: int, width: int, name_width: int
+) -> list[str]:
+    """The text the agent runs, as the last row: never highlighted, best on
+    nothing, because it was not in the pool. Then one sentence saying so."""
+    scores = list(working.get("scores") or [])
+    scores += [None] * (count - len(scores))
+    cells = [
+        f"{'-':>{width}}" if value is None else f"{value:>{width}.2f}"
+        for value in scores[:count]
+    ]
+    val = f"{working['val']:.3f}" if working.get("val") is not None else "-"
+    chars = f"{working['chars']:,}" if working.get("chars") is not None else "-"
+    row = f"{'working':<{name_width}}  {val:<5}  {'  '.join(cells)}  {chars:>6}".rstrip()
+    sentence = (
+        f"`working` is the text the agent runs, {working.get('label')}, scored "
+        f"on the same examples for comparison and not part of the search."
+    )
+    return [row, ""] + textwrap.wrap(sentence, width=78)
+
+
+def _ranges(numbers: list[int]) -> str:
+    """Example numbers as ranges: [1, 2, 3, 5] is `E1-E3, E5`."""
+    parts: list[str] = []
+    ordered = sorted(numbers)
+    start = previous = None
+    for n in ordered + [None]:
+        if start is not None and n == previous + 1:
+            previous = n
+            continue
+        if start is not None:
+            parts.append(f"E{start}" if start == previous else f"E{start}-E{previous}")
+        start = previous = n
+    return ", ".join(parts)
+
+
+def _who(row: dict[str, Any]) -> str:
+    return "seed" if row.get("seed") else str(row["index"])
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _holdout(document: dict[str, Any], styled: bool) -> list[str]:
@@ -152,7 +212,8 @@ def _holdout(document: dict[str, Any], styled: bool) -> list[str]:
 def finalists(
     document: dict[str, Any], *, whole: bool = False, styled: bool = False
 ) -> list[str]:
-    """Each candidate on the front, seed first: its text whole, or how it opens.
+    """Each candidate that is best on at least one example, seed first: its
+    text whole, or how it opens.
 
     Whole is for a target whose text is short enough to read on the screen —
     four tool descriptions, a six-line config block — with line breaks kept,
@@ -163,16 +224,17 @@ def finalists(
     file, and the diff is in the run's transcript. A candidate with several
     components is labelled per component either way.
     """
-    entries = sorted(document["front"], key=lambda e: (not e.get("seed"), e["index"]))
+    eligible = [row for row in document["candidates"] if row.get("best_on")]
+    rows = sorted(eligible, key=lambda r: (not r.get("seed"), r["index"]))
     lines = _heading("FINALISTS", styled)
-    for n, entry in enumerate(entries):
+    for n, row in enumerate(rows):
         if n:
             lines.append("")
-        who = "seed" if entry.get("seed") else f"candidate {entry['index']}"
-        val = f"{entry['val']:.3f}" if entry.get("val") is not None else "-"
+        who = "seed" if row.get("seed") else f"candidate {row['index']}"
+        val = f"{row['val']:.3f}" if row.get("val") is not None else "-"
         lines.append(_style(f"{who} ({val})", styled, bold=True,
-                            fg="yellow" if entry.get("seed") else "cyan"))
-        components = entry.get("components") or {}
+                            fg="yellow" if row.get("seed") else "cyan"))
+        components = row.get("components") or {}
         for name, text in components.items():
             label = f"[{name}]" if len(components) > 1 else ""
             if whole:
@@ -216,15 +278,6 @@ def _about_for(target: str | None) -> str:
     return chosen.about if chosen else ""
 
 
-def _words_for(target: str | None) -> dict[str, str]:
-    """The metric's legend for a file's target, through the registry, so a
-    committed file from any target gets its words. Unknown target: none."""
-    from tools.gepa import targets
-
-    chosen = targets.TARGETS.get(target or "")
-    return chosen.legend() if chosen else {}
-
-
 def _whole_for(target: str | None) -> bool:
     """Whether this target's finalists are printed whole. Unknown target:
     previewed, which is the safe size."""
@@ -240,10 +293,10 @@ def _style(text: str, on: bool, **kwargs: Any) -> str:
 
 def main(paths: list[str]) -> int:
     """Each file: where it is and when it was written, the summary, then the
-    sections. A file that is missing or is not a front gets one line, and
+    sections. A file that is missing or is not a report gets one line, and
     the exit status says so at the end, after the rest have printed."""
     if not paths:
-        click.echo("no front to show: no run of that target has left one in "
+        click.echo("no report to show: no run of that target has left one in "
                    "tools/gepa/out/ — run the search, or check the target name")
         return 1
 
@@ -261,8 +314,21 @@ def main(paths: list[str]) -> int:
             click.echo(f"{raw}: not JSON ({e.msg})")
             failed += 1
             continue
-        if not isinstance(document, dict) or "front" not in document:
-            click.echo(f"{raw}: not a front")
+        if isinstance(document, dict) and "candidates" not in document and (
+            "front" in document or "objectives" in document
+        ):
+            # The format before the report listed candidates against
+            # validation examples. Its numbers are per term, and there is no
+            # way to turn them into the table this prints.
+            click.echo(
+                f"{raw}: written before the report changed to candidates "
+                f"against validation examples — `make gepa-"
+                f"{document.get('target') or '<target>'}` writes a new one"
+            )
+            failed += 1
+            continue
+        if not isinstance(document, dict) or "candidates" not in document:
+            click.echo(f"{raw}: not a report")
             failed += 1
             continue
 
@@ -272,7 +338,7 @@ def main(paths: list[str]) -> int:
         click.echo(summary(document))
         for line in about(_about_for(document.get("target")), styled=styled):
             click.echo(line)
-        for line in render(document, legend=_words_for(document.get("target")), styled=styled):
+        for line in render(document, styled=styled):
             click.echo(line)
         for line in finalists(
             document, whole=_whole_for(document.get("target")), styled=styled

@@ -160,7 +160,10 @@ def test_a_leftover_run_dir_is_wiped_rather_than_refused(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(gepa.cli, ["extract"])
 
-    assert not stale.exists(), "the previous run's state must not survive"
+    # The directory is made again at once, holding only the record of the
+    # text this run starts from. The previous run's state is gone.
+    assert not (stale / "state.bin").exists(), "the previous run's state must not survive"
+    assert [p.name for p in stale.iterdir()] == ["seed.json"]
     # Then straight on to the corpus, which is the next thing it does itself.
     assert "nothing to harvest" in result.output
 
@@ -337,7 +340,7 @@ def test_the_seed_is_never_offered_as_its_own_improvement():
     assert survivors == []
 
 
-def test_survivors_come_back_best_first():
+def test_the_turn_gate_returns_survivors_best_first():
     third = {"list_tables": "a third description"}
     survivors = turn_gate(
         None,
@@ -366,24 +369,59 @@ def test_a_seed_that_never_reached_the_valset_says_so(capsys):
     assert "the gate is not checking" in capsys.readouterr().err
 
 
-def test_a_much_longer_candidate_is_flagged_too(loop, scripted, capsys):
-    """The direction the metric under-weights.
-
-    `metric_extract._length` charges growth, so this is no longer invisible —
-    but it carries 0.10 of the score, and a candidate that takes a heavier term
-    outright can still buy that win with size. The 2026-09-22 run did exactly
-    that: grounding 0.909 -> 1.000, length 1.000 -> 0.711, a net 0.0004 on a
-    prompt 64% larger.
-
-    Not rejection — a longer prompt can be right. But it has to be seen.
-    """
-    verbose = SEED + " " * (len(SEED) * 2)
+def test_a_longer_candidate_is_not_warned_about_by_the_gate(loop, scripted, capsys):
+    """A candidate over `targets.MAX_GROWTH` times the seed never reaches the
+    gate with a real score, because `ExtractAdapter` scores it 0 without
+    running it. One the gate does see is within the limit, so the gate has
+    nothing to add about its length."""
+    longer = SEED + " " * (len(SEED) // 2)
 
     survivors = gate(
-        loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: verbose}], [0.5, 0.99]), SEED
+        loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: longer}], [0.5, 0.99]), SEED
     )
 
-    assert survivors, "length alone is not disqualifying in either direction"
+    assert survivors, "length alone is not disqualifying"
     err = capsys.readouterr().err
-    assert "+200%" in err
-    assert "length is only 0.10 of the score" in err
+    assert "read the diff closely" not in err
+    assert "candidate 1 (val 0.990) survives, passing 4/4 probes" in err
+
+
+def test_an_example_is_labelled_by_its_question_or_else_its_name():
+    """The report numbers its examples and labels each one. A turn case has a
+    question; an extract case has only the name the harvest gave it."""
+    from tools.gepa.cases import ExtractCase
+    from tools.gepa.gates import _asked
+
+    extract = [ExtractCase.authored(name="obs-1", question="q", sql="SELECT 1", findings="f")]
+
+    assert _asked(CASES, 1) == "how many customers are in the west region?"
+    assert _asked(extract, 0) == "obs-1"
+    assert _asked(extract, 5) == "5", "a key outside the valset is printed as itself"
+
+
+def test_a_survivor_line_states_how_many_probes_it_passes(loop, scripted, capsys):
+    """With `--from`, the seed can be a short prompt that fails probes of its
+    own, and a survivor only has to keep what the seed passed. The count
+    shows whether it passes the rest."""
+    candidate = SEED + " and one more sentence"
+
+    gate(loop, FakeResult([{COMPONENT: SEED}, {COMPONENT: candidate}], [0.5, 0.9]), SEED)
+
+    assert "candidate 1 (val 0.900) survives, passing 4/4 probes" in capsys.readouterr().err
+
+
+def test_a_survivor_can_pass_fewer_probes_than_there_are(loop, scripted, capsys):
+    """A seed that fails the census probe cannot hold a candidate to it, so a
+    candidate that fails it too survives. The line says 2/4, so the reader
+    sees that it still fails two."""
+    weaker = DEGENERATE + ", and keep each note short"
+
+    survivors = gate(
+        loop, FakeResult([{COMPONENT: DEGENERATE}, {COMPONENT: weaker}], [0.5, 0.9]),
+        DEGENERATE,
+    )
+
+    assert [s.candidate[COMPONENT] for s in survivors] == [weaker]
+    err = capsys.readouterr().err
+    assert "seed passes 2/4" in err
+    assert "candidate 1 (val 0.900) survives, passing 2/4 probes" in err

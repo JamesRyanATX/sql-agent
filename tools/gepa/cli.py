@@ -1,10 +1,10 @@
 """`python -m tools.gepa <target>` — GEPA over one searchable thing.
 
-One command, needing no other: it finds the corpus, searches, writes the front,
+One command, needing no other: it finds the corpus, searches, writes the report,
 gates the pool and prints the winner. Fresh corpus and fresh run dir every time,
 so a run is never partly made of the last one.
 
-stdout is the promoted text and nothing else. Progress, the front, the diff and
+stdout is the promoted text and nothing else. Progress, the report, the diff and
 the gate go to stderr, so `make gepa-extract > new.md` leaves prose with no
 commentary.
 
@@ -19,15 +19,17 @@ candidate in the pool scored on the cases the search never saw. It exists to
 be shown failing.
 
 Exit: 0 text is on stdout, 1 preflight, 2 the target has no metric, 3 nothing
-scored better than what is already there. Through `make` these all arrive as
+scored better than the text the search started from. Through `make` these all arrive as
 make's own 2 — an empty stdout is the portable signal.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import difflib
 import json
+import math
 import random
 import shutil
 import sys
@@ -36,7 +38,7 @@ from typing import Any
 
 import click
 
-from tools.gepa import targets
+from tools.gepa import gates, targets
 from tools.gepa.gates import Survivor, say
 from tools.gepa.targets import Target
 
@@ -71,9 +73,9 @@ def reflections(name: str) -> Path:
 def transcript(name: str) -> Path:
     """Everything the run said, as the terminal saw it minus the colour.
 
-    The front is written to a file; until this, the gate's verdicts and the
+    The report is written to a file; until this, the gate's verdicts and the
     diff lived only on the terminal, and "here is what last night's run
-    left" was the front and nothing else. Beside the front rather than in the
+    left" was the report and nothing else. Beside the report rather than in the
     run dir, so `--probe-only` and a resume cannot touch it.
     """
     return OUT / f"{name}.run.txt"
@@ -136,7 +138,7 @@ def _recording(name: str):
     "--pareto",
     "pareto_to",
     type=click.Path(dir_okay=False, path_type=Path),
-    help="also write the front here, somewhere tracked",
+    help="also write the report here, somewhere tracked",
 )
 @click.option(
     "--overfit",
@@ -153,6 +155,15 @@ def _recording(name: str):
     metavar="N",
     help="stop after N proposals; the budget still caps the calls",
 )
+@click.option(
+    "--from",
+    "seed_from",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    metavar="FILE",
+    help="start the search from the text in this file instead of the working "
+    "text; only for a target whose candidate has one component",
+)
 def cli(
     target: str,
     verbose: bool,
@@ -166,6 +177,7 @@ def cli(
     pareto_to: Path | None,
     overfit: int | None,
     iterations: int | None,
+    seed_from: Path | None,
 ) -> None:
     """GEPA over one searchable thing. The new text goes to stdout.
 
@@ -180,25 +192,81 @@ def cli(
     if iterations is not None and iterations < 1:
         raise click.UsageError("--iterations needs at least one")
 
+    # What the agent runs today. With `--from` the search starts elsewhere,
+    # and this is scored beside the result so the two can be compared.
+    working = seed_candidate
+    working_label = None
+    if seed_from is not None:
+        working_label = chosen.label(next(iter(working)))
+        chosen, seed_candidate = _seed_from_file(chosen, seed_candidate, seed_from)
+
     from tools.gepa.adapter import Loop, reflection_lm
 
     if probe_only:
         if chosen.check is None:
             raise click.ClickException(f"{chosen.name} has no cheap pre-check")
+        if seed_from is not None:
+            # The Makefile rule always passes --from, so this is a note and
+            # not an error.
+            say(
+                f"--probe-only checks the working text; the --from file "
+                f"{seed_from} is not used"
+            )
         with Loop() as loop:
             raise SystemExit(chosen.check(loop, yes, days=days, resume=resume))
 
-    # An overfit run keeps its own run dir, front and transcript, so the real
+    # An overfit run keeps its own run dir, report and transcript, so the real
     # run's are not wiped by the demonstration of what the real run refuses
     # to do. It is always fresh: `--resume` there means the last corpus and
     # no more, which is what it wants — the same cases the real run searched.
     run = f"{chosen.name}-overfit" if overfit is not None else chosen.name
+    # Before the transcript is opened, which empties it: a refused resume
+    # leaves the previous run's transcript as it was.
+    if resume and overfit is None:
+        _check_saved_seed(run, seed_candidate, target=chosen.name)
     with _recording(run):
+        if seed_from is not None:
+            # Inside the recording, so the transcript says which text the
+            # search started from.
+            text = next(iter(seed_candidate.values()))
+            say(
+                f"seed: {seed_from}, {len(text):,} chars, in place of the "
+                f"working text's {sum(len(t) for t in working.values()):,}"
+            )
         _run(
             chosen, seed_candidate, run=run, verbose=verbose, budget=budget,
             val_fraction=val_fraction, seed=seed, resume=resume, days=days,
             yes=yes, pareto_to=pareto_to, overfit=overfit, iterations=iterations,
+            working=(working, working_label) if seed_from is not None else None,
         )
+
+
+def _seed_from_file(
+    chosen: Target, working: dict[str, str], path: Path
+) -> tuple[Target, dict[str, str]]:
+    """The target and seed candidate for a search that starts from a file.
+
+    Only where the candidate has one component: a file holds one text, and
+    there is no way to say which of several components it replaces. The
+    target's `label` is replaced so the diff header names the file the
+    search started from rather than where the working text lives. Nothing
+    else on the target changes; in particular the extract adapter's size
+    limit is still computed from the working prompt.
+    """
+    if len(working) != 1:
+        raise click.UsageError(
+            f"--from needs a target whose candidate has one component, and "
+            f"{chosen.name} has {len(working)}"
+        )
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise click.UsageError(f"--from {path} is empty")
+    component = next(iter(working))
+    label = str(path)
+    return (
+        dataclasses.replace(chosen, label=lambda _component: label),
+        {component: text},
+    )
 
 
 def _run(
@@ -216,12 +284,19 @@ def _run(
     pareto_to: Path | None,
     overfit: int | None,
     iterations: int | None = None,
+    working: tuple[dict[str, str], str] | None = None,
 ) -> None:
     """The search, from corpus to stdout. Split from the command so the
-    transcript can be held open around every way out of it."""
+    transcript can be held open around every way out of it.
+
+    `working` is the text the agent runs and where it lives, given only when
+    the search started from a `--from` file instead.
+    """
     from tools.gepa.adapter import Loop, reflection_lm
 
-    _fresh_run_dir(run, resume and overfit is None)
+    resuming = resume and overfit is None
+    _fresh_run_dir(run, resuming)
+    check_after = _record_seed(run, seed_candidate, resuming=resuming)
     cases = chosen.corpus(days=days, resume=resume, verbose=verbose)
     budget = chosen.budget if budget is None else budget
     holdout: list[Any] = []
@@ -231,16 +306,16 @@ def _run(
     else:
         trainset, valset = _split(cases, val_fraction, seed)
         say(
-            f"split     {len(trainset)} train / {len(valset)} val, budget "
+            f"split: {len(trainset)} train / {len(valset)} val, budget "
             f"{budget} calls{_steps(iterations)}"
         )
         _not_too_thin(trainset)
         _budget_covers(budget, valset)
 
-    _confirm(
-        chosen, seed_candidate, cases, budget=budget, yes=yes,
-        holdout=len(cases) - overfit if overfit is not None else 0,
-    )
+    # Every search asks before it starts, cheap or not, so every target
+    # reads the same up to this point: the harvest, the split, the question.
+    say()
+    ask_before_spending(yes)
 
     import gepa
 
@@ -278,9 +353,16 @@ def _run(
         )
 
         say(
-            f"search    {result.total_metric_calls} metric calls, "
+            f"search: {result.total_metric_calls} metric calls, "
             f"{len(result.candidates)} candidates in the pool"
         )
+        if check_after:
+            # A saved search with no record of its seed. GEPA keeps the
+            # saved search's seed as candidate 0, so it can be checked now,
+            # before anything is written or printed.
+            if result.candidates[0] != seed_candidate:
+                raise _different_seed(run, chosen.name)
+            _write_seed(run, seed_candidate)
         seed_index = _seed_index(result, seed_candidate)
 
         # The cases the search never saw, scored for every candidate. On a
@@ -290,18 +372,29 @@ def _run(
         if holdout and len(result.candidates) > 1:
             unseen = _holdout(adapter, result, holdout, seed_index, seed_scores or [])
 
+        # With `--from`, the search compared candidates with the file it
+        # started from and never with the text the agent runs. Scored here on
+        # the same validation examples, so the report and the last lines of
+        # the run can say how the result compares with what it would replace.
+        # Before the empty-pool check, so a pool of one is compared too.
+        compared = None
+        if working is not None:
+            compared = _working(adapter, valset, *working)
+
         # Before the empty-pool check below, not after. A run that ends with
         # NO_IMPROVEMENT is the one whose evidence is most worth keeping, and
-        # on a pool of one the seed's own terms are what say whether the metric
-        # is saturated — which is exactly what that message asks you to go and
-        # find out.
+        # on a pool of one the seed's own score on each example is what says
+        # whether the metric is saturated — which is exactly what that
+        # message asks you to go and find out.
         _pareto(
             result,
             target=chosen,
+            valset=valset,
             seed_index=seed_index,
             path=pareto_to,
             name=run,
             holdout=unseen,
+            working=compared,
         )
 
         # `skip_perfect_score` means a seed at the top of the metric is never
@@ -334,7 +427,7 @@ def _run(
             # whatever scored best on the cases it trained on, which is the
             # demonstration: this is what a search does when nothing outside
             # the objective is allowed to say no.
-            say("\noverfit   the gate reported and decided nothing", fg="yellow")
+            say("\noverfit: the gate reported and decided nothing", fg="yellow")
             scores = result.val_aggregate_scores or []
             survivors = sorted(
                 (
@@ -361,12 +454,15 @@ def _run(
     # replace. Observed: a run scored the seed 0.959 and its best survivor 0.928.
     if seed_score is not None and best.score < seed_score:
         say(
-            f"\nThe seed scored {seed_score:.3f} and the best survivor "
-            f"{best.score:.3f} — nothing better than what is already there, so "
-            f"stdout is empty.",
+            f"\nThe text the search started from scored {seed_score:.3f} and "
+            f"the best survivor {best.score:.3f}, so nothing beat the starting "
+            f"text, and stdout is empty.",
             fg="yellow",
         )
         raise SystemExit(NO_IMPROVEMENT)
+
+    if compared is not None:
+        _compare_with_working(chosen, seed_candidate, seed_score, best.score, compared)
 
     _diff(seed_candidate, best.candidate, chosen, score=best.score, seed_score=seed_score)
 
@@ -404,49 +500,6 @@ def _resolve(name: str) -> Target:
     raise SystemExit(UNWIRED_NODE)
 
 
-def _confirm(
-    target: Target,
-    seed_candidate: dict[str, str],
-    cases: list[Any],
-    *,
-    budget: int,
-    yes: bool,
-    holdout: int = 0,
-) -> None:
-    """Say what the run is about to spend, and ask.
-
-    Only where a rollout is expensive. `extract` is one model call a rollout and
-    asking about it would train people to type `--yes`, which is how a
-    confirmation stops being read.
-
-    Everything here goes to stderr, the confirmation included: a prompt on
-    stdout would land in the middle of the artifact.
-    """
-    if not target.rollout_tokens:
-        return
-
-    components = len(seed_candidate)
-    tokens = budget * target.rollout_tokens
-    say(f"\n{target.name}    {target.blurb}")
-    say(f"  budget      {budget} rollouts at roughly "
-        f"{target.rollout_tokens:,} tokens each — about {tokens:,} tokens")
-    say(f"  components  {components}, mutated round-robin: about "
-        f"{budget // max(components, 1)} proposals each at this budget")
-    say(f"  corpus      {len(cases)} cases")
-    if holdout:
-        say(
-            f"  held out    {holdout} cases, scored for every candidate in the "
-            f"pool once the search ends — about {holdout} rollouts per candidate"
-        )
-    say(
-        "\nEvery turn runs with the memory off: it reads nothing the agent has "
-        "learned and saves nothing it learns. Nothing is written to app/ or "
-        "config/, and nothing is committed."
-    )
-
-    ask_before_spending(yes)
-
-
 def ask_before_spending(yes: bool = False) -> None:
     """The last chance not to spend the money.
 
@@ -473,6 +526,69 @@ def _fresh_run_dir(name: str, resume: bool) -> None:
     if resume or not directory.exists():
         return
     shutil.rmtree(directory)
+
+
+# GEPA resumes from `gepa_state.bin` whenever that file exists, and ignores the
+# seed it is handed when it does. So without a record of the seed, `--resume`
+# with a different starting text continues the old search and says nothing.
+# The record is `seed.json` beside GEPA's state. GEPA looks only for
+# `gepa_state.bin`, so a directory holding only `seed.json` still starts a
+# fresh search.
+
+
+def _seed_path(name: str) -> Path:
+    return run_dir(name) / "seed.json"
+
+
+def _different_seed(name: str, target: str) -> click.ClickException:
+    return click.ClickException(
+        f"the saved search in {run_dir(name)} started from different text "
+        f"than this run's seed. Run without --resume, or run "
+        f"`make gepa-{target}-reset`, to start a new search."
+    )
+
+
+def _check_saved_seed(name: str, seed_candidate: dict[str, str], *, target: str) -> None:
+    """On `--resume`, refuse when the recorded seed differs from this run's.
+    Nothing happens when there is no record; `_record_seed` deals with that."""
+    path = _seed_path(name)
+    if path.exists() and json.loads(path.read_text(encoding="utf-8")) != seed_candidate:
+        raise _different_seed(name, target)
+
+
+def _write_seed(name: str, seed_candidate: dict[str, str]) -> None:
+    path = _seed_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(seed_candidate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def _record_seed(name: str, seed_candidate: dict[str, str], *, resuming: bool) -> bool:
+    """Write the seed record where it can be written now. Returns True when
+    the seed can only be checked after the search, against GEPA's own copy.
+
+    A fresh run writes the record. A resume with a record has already been
+    checked by `_check_saved_seed`. A resume with no record and no saved state
+    is a fresh search in all but name, so it writes the record and says
+    nothing. A resume with no record and a saved state is a run directory
+    written before the record existed: it says the seed could not be checked
+    yet, and the caller checks it once GEPA has loaded the saved search.
+    """
+    if not resuming:
+        _write_seed(name, seed_candidate)
+        return False
+    if _seed_path(name).exists():
+        return False
+    if not (run_dir(name) / "gepa_state.bin").exists():
+        _write_seed(name, seed_candidate)
+        return False
+    say(
+        "resume: the saved search has no record of the text it started from, "
+        "so that could not be checked before loading it; it is checked against "
+        "the loaded search"
+    )
+    return True
 
 
 def _not_too_thin(trainset: list[Any]) -> list[Any]:
@@ -529,14 +645,14 @@ def _overfit_split(
     scores from this sweep are its held-out baseline: measured once, the same
     way every other candidate will be.
     """
-    say(f"\noverfit   the seed over all {len(cases)} cases, to find the {n} it does worst on")
+    say(f"\noverfit: the seed over all {len(cases)} cases, to find the {n} it does worst on")
     scores = adapter.evaluate(cases, seed_candidate).scores
     order = sorted(range(len(cases)), key=lambda i: scores[i])
     train = [cases[i] for i in order[:n]]
     rest = [cases[i] for i in order[n:]]
     worst = ", ".join(f"{scores[i]:.3f}" for i in order[:n])
     say(
-        f"split     {n} train (the seed's worst: {worst}), validated on the "
+        f"split: {n} train (the seed's worst: {worst}), validated on the "
         f"same {n}, {len(rest)} held out"
     )
     return train, rest, [scores[i] for i in order]
@@ -638,6 +754,56 @@ def _search(
         )
 
 
+def _working(adapter, valset: list[Any], candidate: dict[str, str], label: str) -> dict:
+    """The text the agent runs, scored on the validation examples by the same
+    adapter, as the `working` block of the report. `len(valset)` rollouts.
+
+    For a turn target, the working text is charged against the cost
+    baselines the search left behind: `TurnAdapter._remember` keeps the
+    first cost seen for each case. On a case that a candidate answered
+    before the seed did, the working text is charged against that
+    candidate's cost. The extract adapter keeps no baseline, so
+    `make gepa-extract` is not affected.
+    """
+    say(f"\nworking: scoring {label} on the {len(valset)} validation examples")
+    scores = adapter.evaluate(valset, candidate).scores
+    mean = sum(scores) / len(scores) if scores else None
+    if mean is not None:
+        say(f"          {label} scored {mean:.3f}")
+    return {
+        "label": label,
+        "val": round(mean, 4) if mean is not None else None,
+        "scores": [round(s, 4) for s in scores],
+        "chars": sum(len(text) for text in candidate.values()),
+    }
+
+
+def _compare_with_working(
+    chosen: Target,
+    seed_candidate: dict[str, str],
+    seed_score: float | None,
+    best_score: float,
+    working: dict,
+) -> None:
+    """One line with three averages, and a warning when the winner scored
+    below the text the agent runs. A warning and not a refusal: the search
+    did what it was asked, and the reader decides."""
+    started = chosen.label(next(iter(seed_candidate)))
+    start = f"{seed_score:.3f}" if seed_score is not None else "-"
+    held = f"{working['val']:.3f}" if working["val"] is not None else "-"
+    say(
+        f"\ncompare: started from {started} at {start}, the winner scored "
+        f"{best_score:.3f}, and the working text {working['label']} scored {held}"
+    )
+    if working["val"] is not None and best_score < working["val"]:
+        say(
+            f"The text on stdout scored {best_score:.3f}, lower than the "
+            f"{working['val']:.3f} of the text the agent runs, "
+            f"{working['label']}. It is not a replacement for it.",
+            fg="yellow",
+        )
+
+
 def _seed_index(result, seed_candidate: dict[str, str]) -> int | None:
     """Where the unmutated seed sits in the pool, if GEPA kept it.
 
@@ -658,51 +824,27 @@ def _seed_score(result, seed_candidate: dict[str, str]) -> float | None:
     return scores[i] if i is not None and i < len(scores) else None
 
 
-# ----------------------------------------------------------------- the front
+# ---------------------------------------------------------------- the report
 #
-# The metric is weighted terms collapsed into one number, and the collapse
-# settles a trade-off — grounding against cost — on the reader's behalf. GEPA
-# keeps the per-term scores; `gepa.optimize` never writes them anywhere. These
-# forty lines are the difference between "a Pareto front of prompts" as a
-# sentence and as a file somebody can read.
-
-
-def _front(subscores: list[dict[str, float]], objectives: tuple[str, ...]) -> list[int]:
-    """The candidates no other candidate beats on every term.
-
-    Not `result.per_objective_best_candidates`, which is the strictly smaller
-    set of candidates topping at least one term. The non-dominated set is what
-    "no other candidate is better on everything" means, and showing a file that
-    disagrees with the sentence said over it is the failure this exists to
-    prevent.
-
-    A candidate missing a term is ineligible rather than an error: a rollout
-    that errored on every validation case comes back with no terms at all.
-    """
-    scored = [i for i, s in enumerate(subscores) if all(o in s for o in objectives)]
-
-    def dominates(a: dict[str, float], b: dict[str, float]) -> bool:
-        return all(a[o] >= b[o] for o in objectives) and any(
-            a[o] > b[o] for o in objectives
-        )
-
-    return [
-        i
-        for i in scored
-        if not any(dominates(subscores[j], subscores[i]) for j in scored if j != i)
-    ]
+# GEPA chooses which candidate to mutate next from a table of every candidate
+# against every validation example: a candidate is eligible when it has the top
+# score on at least one example. `gepa.optimize` keeps that table on its result
+# and writes it nowhere a person would read it. This writes it to a file and
+# prints it, so the table a slide shows is the table the search selected from.
 
 
 def _pareto(
     result,
     *,
     target: Target,
+    valset: list[Any],
     seed_index: int | None,
     path: Path | None,
     name: str | None = None,
     holdout: dict | None = None,
+    working: dict | None = None,
 ) -> None:
-    """Write the front, and print it. Always to `out/`, and to `path` as well.
+    """Write the report, and print it. Always to `out/`, and to `path` as well.
 
     `out/` is gitignored because a harvested case holds a recorded prompt. The
     talk needs a file that survives a clone, so `--pareto` makes that write
@@ -710,59 +852,73 @@ def _pareto(
     directory. What lands there is candidate prose, which a reflection model
     wrote after reading harvested cases — the same exposure the promoted text
     already has, and handled the same way: read the diff.
-    """
-    weights = target.weights()
 
+    `valset` is what GEPA was given to validate on, in the order it was given.
+    GEPA keys its per-example scores by position in that list, so position is
+    how an example is numbered here: E1 is `valset[0]`.
+    """
     # Direct attribute access, not getattr: these are real fields on
     # `GEPAResult`, and a default here would mean the tests' fake could drift
     # away from the type without anything noticing.
-    subscores = result.val_aggregate_subscores
+    subscores = result.val_subscores
     if not subscores:
-        say("pareto    no per-objective scores on this result — nothing to write")
+        say("pareto: no per-example scores on this result — nothing to write")
         return
 
-    # Weight order, not alphabetical, and the same order in every row and every
-    # run: the file is committed and diffed.
-    objectives = tuple(weights)
+    keys = list(range(len(valset)))
     # Sorted, because these arrive as sets and an unsorted set would make the
     # file diff against itself on nothing.
-    tops = {
-        objective: sorted(indices)
-        for objective, indices in (result.per_objective_best_candidates or {}).items()
+    best = {
+        key: sorted(indices)
+        for key, indices in (result.per_val_instance_best_candidates or {}).items()
     }
-    front = _front(subscores, objectives)
     scores = result.val_aggregate_scores or []
 
-    document = {
-        "target": target.name,
-        "objectives": list(objectives),
-        "weights": dict(weights),
-        "pool": {
-            "candidates": len(result.candidates),
-            "on_front": len(front),
-            "metric_calls": result.total_metric_calls,
-            "seed_index": seed_index,
-        },
-        # The best reached on each term anywhere in the pool. One line of code,
-        # and it is the row that proves no single candidate has all of it.
-        "best_per_objective": {
-            o: round(v, 4) for o, v in (result.objective_pareto_front or {}).items()
-        },
-        "front": [
+    rows = []
+    for i, candidate in enumerate(result.candidates):
+        # GEPA can hold a candidate it scored on only some of the examples, so
+        # a missing score is None rather than a KeyError.
+        theirs = subscores[i] if i < len(subscores) else {}
+        rows.append(
             {
                 "index": i,
                 "seed": i == seed_index,
-                "val": round(scores[i], 4) if i < len(scores) else None,
-                "scores": {o: round(subscores[i][o], 4) for o in objectives},
-                "tops": [o for o in objectives if i in tops.get(o, ())],
-                "chars": sum(len(text) for text in result.candidates[i].values()),
-                "components": dict(result.candidates[i]),
+                # GEPA averages a candidate with no validation scores to -inf,
+                # which `json.dumps` would write as `-Infinity`, and that is
+                # not JSON. A mean that is not a number is written as null.
+                "val": (
+                    round(scores[i], 4)
+                    if i < len(scores) and math.isfinite(scores[i])
+                    else None
+                ),
+                "scores": [
+                    round(theirs[key], 4) if key in theirs else None for key in keys
+                ],
+                "best_on": [n for n, key in enumerate(keys, 1) if i in best.get(key, ())],
+                "chars": sum(len(text) for text in candidate.values()),
+                "components": dict(candidate),
             }
-            # Discovery order, so the file diffs positionally between runs.
-            for i in front
-        ],
+        )
+
+    document = {
+        "target": target.name,
+        "score": target.score(),
+        "examples": [gates._asked(valset, key) for key in keys],
+        "pool": {
+            "candidates": len(result.candidates),
+            "eligible": sum(1 for row in rows if row["best_on"]),
+            "metric_calls": result.total_metric_calls,
+            "seed_index": seed_index,
+        },
+        # Every candidate in the pool, in the order GEPA found them, so the
+        # file diffs positionally between runs.
+        "candidates": rows,
     }
 
+    # After the pool and before the held-out block, so the key order is the
+    # same in every file that has it.
+    if working:
+        document["working"] = working
     if holdout:
         document["holdout"] = holdout
 
@@ -774,7 +930,7 @@ def _pareto(
             encoding="utf-8",
         )
 
-    _front_table(document, objectives, target.legend())
+    _report_table(document)
     for destination in written:
         say(f"          written {destination}")
 
@@ -800,7 +956,7 @@ def _holdout(
     candidate's is.
     """
     say(
-        f"\nholdout   {len(cases)} cases the search never saw, scoring "
+        f"\nholdout: {len(cases)} cases the search never saw, scoring "
         f"{len(result.candidates)} candidates on them"
     )
     seed_scores = seed_all[len(seed_all) - len(cases):] if seed_all else []
@@ -837,19 +993,17 @@ def _holdout(
     return {"cases": len(cases), "candidates": rows}
 
 
-def _front_table(
-    document: dict, objectives: tuple[str, ...], legend: dict[str, str] | None = None
-) -> None:
-    """The front on stderr, so it is read without opening anything.
+def _report_table(document: dict) -> None:
+    """The report on stderr, so it is read without opening anything.
 
     The rendering lives in `front.py`, which is also what reads a committed
-    front back off disk: one table, whether it is printed at the end of a run
+    report back off disk: one table, whether it is printed at the end of a run
     or a month later from the file.
     """
     from tools.gepa import front
 
-    say(f"\npareto    {front.summary(document)}")
-    for line in front.render(document, legend=legend):
+    say(f"\npareto: {front.summary(document)}")
+    for line in front.render(document):
         # Under the run's labelled lines, so it sits in their gutter.
         say(f"          {line}" if line else line)
 

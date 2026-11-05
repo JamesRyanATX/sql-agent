@@ -248,8 +248,9 @@ prompt, the four tool descriptions, and the per-node effort block. Each is
 manual, and a human commits the result.
 
 ```bash
-make gepa-extract              # read the new prompt
+make gepa-extract              # read the new prompt, searched for from a one-sentence start
 make gepa-extract > new.md     # keep it
+make gepa-extract GEPA_EXTRACT_FROM=   # search from the prompt the agent runs
 make gepa-tools                # the four tool descriptions
 make gepa-config               # the per-node effort block
 ```
@@ -261,6 +262,40 @@ that the query they ran was right. `make corpus` primes that by asking the
 nineteen questions in `demo/golden/` cold and filing each one's reference and,
 where the answer is fixed, a verdict; after that the corpus grows from use, and
 a verdict or a corrected query filed in the Langfuse UI is in the next harvest.
+
+**One number per example.** GEPA asks a metric for one score per example and
+some text saying what went wrong, and that is all this gives it. For `extract`
+a case scores 0 when the call failed, nothing was recorded, no recipe was
+recorded, a note records a count, or a note overwrites or duplicates a filed
+name; otherwise it is the fraction of recipes whose SQL fragment is copied from
+the query that ran and carries more than a bare table or function name. A
+candidate prompt more than 1.5 times the length of the prompt the agent runs
+scores 0 without being run. For `tools` and `config` a turn scores 0 when it failed,
+wrote no SQL, its SQL never ran, or it returned no rows where the known answer
+has some; otherwise a wrong answer earns partial credit for how closely its
+rows match the known answer, and a right answer earns more for costing no more
+than the current text did.
+
+```bash
+make gepa-extract-pareto       # every candidate's score on every validation example
+```
+
+That table is what GEPA selects from: a candidate is eligible to be mutated
+next when it has the top score on at least one validation example. When
+candidates tie for the top score on an example they share it, and GEPA then
+drops a candidate if every example it leads is also led by another. The
+candidate printed at the end is the one with the highest average among those
+the gate did not discard, and only when that average is at least the starting
+text's.
+
+**The extract search starts from one sentence.** `config/prompts/extract.md`
+already scores 1.0 on almost every case, and GEPA learns only from cases the
+starting text gets wrong, so a search that starts there proposes almost
+nothing. `make gepa-extract` therefore starts from
+`demo/gepa/extract.short.md`, which the agent never reads, and the result can
+be compared with the prompt a person wrote. `GEPA_EXTRACT_FROM=` starts from
+the agent's own prompt instead, which is the search to run after the agent's
+prompt has started failing cases.
 
 **One command, needing no other.** It harvests the telemetry, searches, gates
 the pool on the probes and prints the winner — fresh corpus and fresh run dir

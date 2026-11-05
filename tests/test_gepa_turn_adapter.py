@@ -65,14 +65,15 @@ def cold(sql: str = SQL, answer: str = "1,840 customers.") -> ScriptedModel:
 
 
 def test_a_right_answer_scores_and_carries_every_term(adapter, monkeypatch, pool):
-    """The happy path, and the invariant the Pareto front depends on: the term
-    keys are the same on every case, so an objective front has no holes."""
+    """The happy path. Only the one score per case reaches GEPA; the terms
+    stay on the trajectory, where the seed check reads `correct`."""
     monkeypatch.setattr(llm, "complete", cold())
 
-    batch = adapter.evaluate(CASES, targets.TOOLS.seed())
+    batch = adapter.evaluate(CASES, targets.TOOLS.seed(), capture_traces=True)
 
     assert batch.scores == [1.0]
-    assert batch.objective_scores[0].keys() == {"correct", "cost", "tool_calls"}
+    assert batch.objective_scores is None
+    assert batch.trajectories[0].score.terms.keys() == {"correct", "cost", "tool_calls"}
     assert batch.outputs[0]["sql"] == SQL
     assert batch.outputs[0]["tools"] == ["list_tables"]
 
@@ -84,10 +85,10 @@ def test_a_wrong_answer_scores_zero_without_ending_the_batch(
     broken run, and the term keys are still all present."""
     monkeypatch.setattr(llm, "complete", cold(sql=WRONG, answer="2,000 customers."))
 
-    batch = adapter.evaluate(CASES, targets.TOOLS.seed())
+    batch = adapter.evaluate(CASES, targets.TOOLS.seed(), capture_traces=True)
 
     assert batch.scores == [0.0]
-    assert batch.objective_scores[0] == {"correct": 0.0, "cost": 0.0, "tool_calls": 0.0}
+    assert batch.trajectories[0].score.terms == {"correct": 0.0, "cost": 0.0, "tool_calls": 0.0}
 
 
 def test_a_rollout_that_raises_scores_zero_rather_than_ending_the_run(
@@ -101,10 +102,10 @@ def test_a_rollout_that_raises_scores_zero_rather_than_ending_the_run(
 
     monkeypatch.setattr(llm, "complete", explode)
 
-    batch = adapter.evaluate(CASES, targets.TOOLS.seed())
+    batch = adapter.evaluate(CASES, targets.TOOLS.seed(), capture_traces=True)
 
     assert batch.scores == [0.0]
-    assert set(batch.objective_scores[0]) == {"correct", "cost", "tool_calls"}
+    assert set(batch.trajectories[0].score.terms) == {"correct", "cost", "tool_calls"}
 
 
 def test_the_candidates_descriptions_are_what_the_model_was_sent(
@@ -164,10 +165,10 @@ def test_the_first_turn_to_answer_a_case_sets_its_baseline(
             text_result("1,840 customers."),
         ),
     )
-    batch = adapter.evaluate(CASES, targets.TOOLS.seed())
+    batch = adapter.evaluate(CASES, targets.TOOLS.seed(), capture_traces=True)
 
     assert adapter._baseline["customers_active"] == baseline
-    assert batch.objective_scores[0]["tool_calls"] < 1.0
+    assert batch.trajectories[0].score.terms["tool_calls"] < 1.0
 
 
 # ------------------------------------------------------ the reflective dataset
@@ -327,7 +328,7 @@ def test_a_rejected_candidate_scores_zero_everywhere_and_spends_nothing(
     )
 
     assert batch.scores == [0.0]
-    assert batch.objective_scores == [{"correct": 0.0, "cost": 0.0, "tool_calls": 0.0}]
+    assert batch.trajectories[0].score.terms == {"correct": 0.0, "cost": 0.0, "tool_calls": 0.0}
     assert adapter.calls == 0
     record = adapter.make_reflective_dataset(
         {"efforts": "nope:\n  effort: low\n"}, batch, ["efforts"]

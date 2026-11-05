@@ -96,6 +96,7 @@ class ExtractAdapter(GEPAAdapter):
         effort: str | None = None,
         concurrency: int = 4,
         reflections: Path | None = None,
+        max_chars: int | None = None,
     ) -> None:
         self._loop = loop
         self._effort = effort
@@ -103,6 +104,9 @@ class ExtractAdapter(GEPAAdapter):
         self.calls = 0
         # Where to keep what the reflection model was handed. See `keep`.
         self.reflections = reflections
+        # The longest prompt this adapter will run, in characters. None means
+        # no limit. `targets._extract_adapter` sets it from the seed's length.
+        self.max_chars = max_chars
 
     def evaluate(
         self,
@@ -111,10 +115,45 @@ class ExtractAdapter(GEPAAdapter):
         capture_traces: bool = False,
     ) -> EvaluationBatch[Trajectory, dict[str, Any]]:
         prompt = candidate[COMPONENT]
+        if self.max_chars is not None and len(prompt) > self.max_chars:
+            return self._too_long(batch, prompt, capture_traces)
+
         replays: list[Replayed] = self._loop.run(self._batch(prompt, batch))
         self.calls += len(replays)
         scores = [metric.score(r) for r in replays]
+        return self._result(replays, scores, capture_traces)
 
+    def _too_long(
+        self, batch: list[ExtractCase], prompt: str, capture_traces: bool
+    ) -> EvaluationBatch[Trajectory, dict[str, Any]]:
+        """Every case zero, no model call made, the reason on every record.
+
+        The same shape as `TurnAdapter._rejected`. The prompt is sent on every
+        turn the agent will ever run, so its size is a cost, and the score has
+        no term for it. This limit is what stops a candidate from growing
+        without bound. `calls` is not advanced because nothing was called.
+        """
+        reason = (
+            f"The prompt is {len(prompt):,} characters and the limit is "
+            f"{self.max_chars:,}, so it was not run and every case scores 0. "
+            f"The prompt is sent on every turn the agent runs, which is why "
+            f"its length is limited. A shorter prompt that keeps every rule "
+            f"is the way past this."
+        )
+        replays = [Replayed(case=case, error=reason) for case in batch]
+        scores = [metric.Score(0.0, feedback=[reason]) for _ in batch]
+        result = self._result(replays, scores, capture_traces)
+        # GEPA counts a batch as `len(batch)` metric calls unless the batch
+        # says otherwise, and no model was called here, so this one says 0.
+        # Without it a run of rejected candidates would use up the budget
+        # without spending anything.
+        result.num_metric_calls = 0
+        return result
+
+    @staticmethod
+    def _result(
+        replays: list[Replayed], scores: list[Score], capture_traces: bool
+    ) -> EvaluationBatch[Trajectory, dict[str, Any]]:
         return EvaluationBatch(
             outputs=[
                 {
@@ -134,11 +173,6 @@ class ExtractAdapter(GEPAAdapter):
                 if capture_traces
                 else None
             ),
-            # Grounding and cost genuinely trade off, so the per-term breakdown
-            # is worth carrying: it makes `frontier_type="objective"` available,
-            # and a Pareto front is more honest than one scalar pretending the
-            # trade-off was already settled.
-            objective_scores=[s.terms for s in scores],
         )
 
     async def _batch(self, prompt: str, batch: list[ExtractCase]) -> list[Replayed]:
@@ -164,6 +198,17 @@ class ExtractAdapter(GEPAAdapter):
         if COMPONENT not in components_to_update:
             return {}
 
+        # GEPA reflects on the parent's batch, never on a rejected child's, so
+        # the size limit has to be stated here, before the next prompt is
+        # written, or the reflection model never reads it.
+        limit = ""
+        if self.max_chars is not None:
+            limit = (
+                f"The prompt is {len(candidate[COMPONENT]):,} characters. A "
+                f"prompt longer than {self.max_chars:,} characters is not run "
+                f"and scores 0 on every case."
+            )
+
         records = []
         for t in sorted(eval_batch.trajectories or [], key=lambda t: t.score.value):
             r = t.replayed
@@ -181,9 +226,8 @@ class ExtractAdapter(GEPAAdapter):
                         )
                         or "(nothing was recorded)"
                     ),
-                    "Feedback": t.score.text(),
+                    "Feedback": t.score.text() + (f"\n\n{limit}" if limit else ""),
                     "score": round(t.score.value, 3),
-                    "score_breakdown": {k: round(v, 3) for k, v in t.score.terms.items()},
                 }
             )
         keep(self.reflections, candidate, {COMPONENT: records})
@@ -308,7 +352,6 @@ class TurnAdapter(GEPAAdapter):
                 if capture_traces
                 else None
             ),
-            objective_scores=[s.terms for s in scores],
         )
 
     def _remember(self, batch: list[Any], rolled: list[TurnReplayed]) -> None:

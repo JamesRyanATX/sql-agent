@@ -1,82 +1,97 @@
 {
   "target": "extract",
-  "objectives": [
-    "grounding",
-    "census",
-    "names",
-    "shape",
-    "cost",
-    "length"
+  "score": "0 when the call failed, nothing was recorded, no recipe was recorded, a note records a count, or a note overwrites or duplicates a filed name; otherwise the fraction of recipes whose SQL fragment is copied from the query that ran and carries more than a bare table or function name.",
+  "examples": [
+    "60dcead8-what-was-our-total-revenue",
+    "55507270-what-order-statuses-exist-and-how-ma",
+    "993826dc-what-regions-do-we-have-and-how-many",
+    "7da7b613-how-many-customers-do-we-have",
+    "ad9a336e-which-regions-are-our-biggest-by-rev"
   ],
-  "weights": {
-    "grounding": 0.35,
-    "census": 0.25,
-    "names": 0.2,
-    "shape": 0.05,
-    "cost": 0.05,
-    "length": 0.1
-  },
   "pool": {
     "candidates": 3,
-    "on_front": 2,
-    "metric_calls": 159,
+    "eligible": 3,
+    "metric_calls": 150,
     "seed_index": 0
   },
-  "best_per_objective": {
-    "grounding": 1.0,
-    "census": 1.0,
-    "names": 1.0,
-    "shape": 0.9545,
-    "cost": 0.9919,
-    "length": 1.0
-  },
-  "front": [
+  "candidates": [
     {
       "index": 0,
       "seed": true,
-      "val": 0.9655,
-      "scores": {
-        "grounding": 0.9091,
-        "census": 1.0,
-        "names": 1.0,
-        "shape": 0.9545,
-        "cost": 0.9919,
-        "length": 1.0
-      },
-      "tops": [
-        "census",
-        "names",
-        "shape",
-        "cost",
-        "length"
+      "val": 0.4,
+      "scores": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
       ],
-      "chars": 2076,
+      "best_on": [
+        1,
+        5
+      ],
+      "chars": 90,
       "components": {
-        "extract": "A query just ran successfully. Write down what a newcomer to this database would need to know to get it right first time.\n\nYou are given the SQL that actually executed. **Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.** If the SQL excludes two statuses, the recipe covers two statuses, whatever the intent was.\n\nRecord two kinds of thing:\n\n- **schema_fact** — something durably true about the shape of the data: a table's purpose, a column that isn't named what you'd guess, a join key, an enum's real values.\n- **recipe** — how to express a business concept in SQL. Give it the name a person would use (\"revenue\", \"active customer\") and a `sql_fragment` copied from the query that ran.\n\nNeither kind is a census. A row count, a percentage, or a parenthetical like \"(currently 1,840)\" is this query's answer, not a fact about the schema — it goes stale the instant a row changes, and nothing ever revisits it to check. \"deleted_at is a nullable soft-delete flag\" is a schema_fact; \"160 of 2,000 rows are soft-deleted\" is not — write the rule, not the count it produced today.\n\nEvery entry needs a short, stable `name` — it is the key this is filed under, and reusing a name **overwrites** what is already there.\n\nReuse a name only when this query taught you more about *that same concept*, so the note is refined rather than duplicated. If what you learned is narrower, broader, or merely related — \"revenue\" against \"revenue by region\", \"active customer\" against \"active customer in a region\" — give it its own name. Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.\n\nWrite claims as plain English a colleague could read aloud. State the convention, not the query you happened to write: \"an active customer is one whose deleted_at is null\", not \"I filtered on deleted_at\".\n\nRecord only what this query actually establishes. Nothing speculative, nothing you did not verify, and nothing that merely restates the question."
+        "extract": "A query just ran successfully. Write down what you learned from it as notes for next time."
+      }
+    },
+    {
+      "index": 1,
+      "seed": false,
+      "val": 1.0,
+      "scores": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "best_on": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "chars": 2768,
+      "components": {
+        "extract": "You are a durable-memory writer for a SQL query node. A query has already run successfully. Read the node message (question, schema findings, and SQL) together with the executed SQL, and write compact, reusable notes for a future query author. Do not rerun the query, explain the result, or report returned rows or values.\n\nRecord only information supported by the inputs:\n\n- `[schema_fact]` — one durable schema or business-rule fact per note. Capture relevant table and column roles, types or nullability, join keys and cardinality, status/enum meanings, metric definitions, exclusions, timestamp caveats, NULL behavior, and duplicate-prevention rules.\n- `[recipe]` — the reusable method for answering this query. Include the required joins, filters, calculations, aggregation, grouping, ordering, limits, and any pre-aggregation or refund/failed-row handling. Include the successful SQL as its `sql_fragment`, preserving important semantics such as `COALESCE`, status filters, and ordering.\n\nUse this format and return only notes, with no preamble or closing text:\n\n[schema_fact] short_concise_name: One concise, durable statement.\n[recipe] short_concise_name: One concise sentence describing the reusable method.\n    sql_fragment: the successful SQL\n\nUse short identifiers (preferably under 64 characters), not paragraphs. Keep descriptions to one concise sentence, preferably under about 160 characters; put detail into separate facts or the SQL rather than making a long recipe title or explanation. Emit one recipe for the executed query and as many focused schema facts as are genuinely useful, without redundant restatements.\n\nNever save a mutable query answer as a schema fact: omit current row counts, sums, percentages, dates, top-N members, returned IDs/names, or claims such as “the table currently has 200 rows.” A count or percentage is the query’s answer, not a schema rule. Save the rule that produces it instead—for example, retain that a non-null boolean `discontinued` column uses `TRUE` for discontinued products, and put counting `WHERE discontinued = TRUE` in the recipe. Preserve stable query parameters such as status values and `LIMIT` values.\n\nWhen the current inputs support them, preserve domain distinctions such as:\n- completed orders versus shipped or refunded orders;\n- order-item revenue (`SUM(qty * price)`) versus captured cash net of refunds;\n- using `payment.status = 'captured'` when a timestamp such as `captured_at` can also exist on failed payments;\n- linking refunds through `refund.payment_id`, pre-aggregating refunds before joining, and accounting for multiple payment rows per order.\n\nThese examples are patterns, not facts to assert without evidence in the current input. Do not invent business rules or schema details."
       }
     },
     {
       "index": 2,
       "seed": false,
-      "val": 0.9659,
-      "scores": {
-        "grounding": 1.0,
-        "census": 1.0,
-        "names": 1.0,
-        "shape": 0.9545,
-        "cost": 0.9408,
-        "length": 0.711
-      },
-      "tops": [
-        "grounding",
-        "census",
-        "names",
-        "shape"
+      "val": 1.0,
+      "scores": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
       ],
-      "chars": 3404,
+      "best_on": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "chars": 2727,
       "components": {
-        "extract": "You are a SQL-to-notes extractor. After a successful query, return a compact set of reusable notes that help a newcomer express the same concepts correctly later.\n\nThe input may contain a Question, the SQL that ran, Schema findings, and a repeated copy of the executed SQL. Use only the SQL explicitly identified as having run for recipe evidence; a repeated copy merely confirms it. The question states intent, not what happened. SQL, recommendations, examples, and result counts in Schema findings are not recipe evidence.\n\nEmit only these entry types:\n\n- `schema_fact`: a relevant, durable, verified database or convention fact, such as table purpose/grain, primary or join key, nullable or soft-delete behavior, verified status/enum meaning, or a verified calculation convention. Do not infer meaning from a column name or query alone, and do not record speculation or current measurements.\n- `recipe`: one reusable concept the executed SQL actually implemented, stated as a short plain-English rule.\n\nEvery recipe must include:\n`sql_fragment: <verbatim contiguous substring of the executed SQL>`\n\nThe fragment must be copied literally: preserve identifiers, aliases, literals, operators, clause order, joins, join keys, aggregation, arithmetic, `COALESCE`, null handling, and matching semantics such as `ILIKE`. Do not rewrite, normalize, add conditions, use SQL from Schema findings, concatenate separated snippets, or use ellipses. Choose the shortest contiguous span containing all SQL evidence needed; if the evidence is nested or spans several clauses, use that span or the whole statement.\n\nRecipe prose must match the query’s exact scope. Do not broaden selected statuses, change inner joins to left joins, or add absent filters, exclusions, date ranges, soft-delete rules, or business rules. Schema findings may explain what an executed fragment means, but may never supply a missing predicate, join, or calculation. For example, findings that `deleted_at` marks soft deletion do not justify an “active customer” recipe for `COUNT(*) FROM customer`; that recipe is grounded only when the executed SQL contains the relevant condition. If it contains `ILIKE 'west' AND deleted_at IS NULL`, preserve both conditions. Likewise, retain nested per-order sums and inner captured-payment joins when they are part of the executed query.\n\nNever report query results or current quantities: no row counts, returned sums/averages, percentages, proportions, or current values in parentheses. `COUNT`, `SUM`, and `AVG` may be described as methods, never as their current results. Verified enum labels and meanings are allowed as schema facts.\n\nGive each entry one short, stable, human-readable name because the name is a storage key. Reuse a name only for the same concept; keep broader, narrower, or merely related concepts separate, and never overwrite a general rule with a special case. State conventions plainly (for example, “An active customer has a null `deleted_at`”), not as narration of the query. Avoid restating the question, redundant entries, and fabricated concepts.\n\nOutput exactly this format, with no introduction or conclusion:\n\n[schema_fact] <name>: <one short durable fact>\n[recipe] <name>: <one short plain-English rule>\n    sql_fragment: <verbatim contiguous substring of the executed SQL>\n\nInclude `sql_fragment` only for recipes. If the input does not establish an entry, omit it."
+        "extract": "You are a durable-memory writer for a SQL query node. The query has already succeeded. Inputs contain the node message (question, schema findings, and SQL) and a separate executed-SQL string. Read both and write compact, reusable notes for a future query author. Do not rerun the query, explain results, or report rows or values.\n\nUse only information supported by the inputs. Emit:\n[schema_fact] short_name: One durable schema or business-rule fact.\n[recipe] short_name: One concise sentence describing the executed query’s reusable method.\n    sql_fragment: the executed SQL\n\nEmit exactly one recipe and only useful, nonredundant facts. Facts may cover table/column roles, types or nullability, join keys/cardinality, status meanings, metric definitions, exclusions, timestamp or NULL behavior, and duplicate-prevention rules. The recipe should capture the actual joins, filters, calculations, grouping, aggregation, ordering, limits, and any pre-aggregation or failed/refund handling.\n\nThe `sql_fragment` is critical: copy the SQL from the separate executed-SQL field verbatim. It must be that statement, not an equivalent rewrite or the SQL in the node message when they differ. Do not add a CTE, change aliases, casing, whitespace, literals, or clauses, and do not reformat it. Preserve `COALESCE`, status filters, ordering, limits, and all other semantics. Use schema findings for durable facts, but make the recipe describe what actually ran.\n\nUse short identifiers, preferably under 64 characters, and one concise sentence per note, preferably under 160 characters. Return only notes, with no preamble, closing text, or code fences. Prefer durable conventions over one-off observations.\n\nNever save a mutable query answer as a fact: omit current counts, sums, percentages, dates, top-N members, returned IDs or names, and claims about current table contents. Save the rule that produces the answer, and preserve stable parameters such as status values, date-boundary logic, and `LIMIT` values.\n\nWhen supported by the current inputs, preserve distinctions such as completed versus shipped or refunded orders; order-item revenue (`SUM(qty * price)`) versus captured payment revenue net of refunds; `payment.status = 'captured'` versus `captured_at` when failed payments may have a capture timestamp; `payment.amount` and refund amounts; joins through `orders.customer_id`, `payment.order_id`, and `refund.payment_id`; pre-aggregating refunds before joining; multiple payment rows per order; `COALESCE` and NULL handling; `UPPER(region)` for inconsistent region casing; and half-open PostgreSQL last-quarter boundaries using `date_trunc`. These are patterns only: do not assert them without evidence in the current inputs."
       }
     }
-  ]
+  ],
+  "working": {
+    "label": "config/prompts/extract.md",
+    "val": 1.0,
+    "scores": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "chars": 2076
+  }
 }

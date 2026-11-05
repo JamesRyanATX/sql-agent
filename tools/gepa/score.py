@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 class Score:
     """A scalar for the optimiser and prose for the reflection step.
 
-    `terms` is also what reaches `EvaluationBatch.objective_scores`, which is
-    what the Pareto front is drawn from. Every score from one metric must carry
-    the same keys, or the front has holes in it that nothing reports.
+    Only `value` reaches GEPA. `terms` holds the parts a metric built `value`
+    from, for code in this directory that reads them: the turn metric keeps
+    `correct` there, and the seed check in `targets.py` reads it to say which
+    cases the current text answers. The extract metric has no parts, so its
+    `terms` is empty.
     """
 
     value: float
