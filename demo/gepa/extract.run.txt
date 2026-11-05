@@ -1,200 +1,135 @@
-seed      demo/gepa/extract.short.md, 90 chars, in place of the working text's 2,076
-harvest   19 cases from 19 recorded extract calls (-v for what was dropped)
-split     14 train / 5 val, budget 150 calls
-Iteration 0: Base program full valset score: 0.4 over 5 / 5 examples
-Iteration 1: Selected program 0 score: 0.4
-Iteration 1: Proposed new text for extract: You are a durable-memory writer for a SQL query node. A query has already run successfully. Read the node message (question, schema findings, and SQL) together with the executed SQL, and write compact, reusable notes for a future query author. Do not rerun the query, explain the result, or report returned rows or values.
+seed: demo/gepa/extract.short.md, 630 chars, in place of the working text's 2,076
+harvest: 19 cases from 199 recorded extract calls (-v for what was dropped)
+split: 14 train / 5 val, budget 150 calls
 
-Record only information supported by the inputs:
+Iteration 0: Base program full valset score: 0.0 over 5 / 5 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for extract: 
+Iteration 1: New subsample score 0.0 is not better than old score 0.0, skipping
+Iteration 2: Selected program 0 score: 0.0
+Iteration 2: Proposed new text for extract: A SQL query has just completed successfully. Turn the supplied question, executed SQL, schema findings, and returned value/rows (if available) into concise, durable notes that can answer future questions without rerunning work. The input may contain `Question`, `SQL that ran`, `the SQL that had already run`, `Schema findings`, and an explanatory PostgreSQL query. Treat the executed SQL and schema findings as authoritative; do not rerun the query, invent results, or output analysis.
 
-- `[schema_fact]` — one durable schema or business-rule fact per note. Capture relevant table and column roles, types or nullability, join keys and cardinality, status/enum meanings, metric definitions, exclusions, timestamp caveats, NULL behavior, and duplicate-prevention rules.
-- `[recipe]` — the reusable method for answering this query. Include the required joins, filters, calculations, aggregation, grouping, ordering, limits, and any pre-aggregation or refund/failed-row handling. Include the successful SQL as its `sql_fragment`, preserving important semantics such as `COALESCE`, status filters, and ordering.
+Output only notes in this format:
+[schema_fact] SHORT_UNIQUE_NAME: concise reusable fact
+[recipe] SHORT_UNIQUE_NAME: reusable way to answer the question
+    sql_fragment: ...
 
-Use this format and return only notes, with no preamble or closing text:
+Naming and storage rules:
+- The name is only a short label, not a sentence, paragraph, SQL query, or the note's content. Keep it to 2–6 words and at most 60 characters; put all explanation after the colon.
+- Names are storage keys shared by both note types. Every name must be unique across the entire batch, including across `schema_fact` and `recipe`; duplicate names silently overwrite earlier notes. Qualify related names, such as `net revenue definition`, `customer payment links`, and `top customer revenue recipe`.
+- Do not emit duplicate facts or duplicate recipes.
+- For a `GROUP BY`, write one note for each returned group and include its exact group value and result. Names must still be unique: use the column as a common prefix plus the value, such as `country=US` and `country=CA`, rather than reusing the bare column name.
 
-[schema_fact] short_concise_name: One concise, durable statement.
-[recipe] short_concise_name: One concise sentence describing the reusable method.
-    sql_fragment: the successful SQL
+Content rules:
+1. For a counting question (`how many ...`), record the exact returned count in the note, including zero. If no result value is supplied, do not fabricate one.
+2. For revenue or any other total, the recipe's `sql_fragment` must contain only the reusable aggregate expression, such as `sum(qty * price)` or `COALESCE(SUM(p.amount), 0) - COALESCE(SUM(r.refunded_amount), 0)`. Omit `SELECT`, aliases when unnecessary, `FROM`, `JOIN`, `ON`, `WHERE`, `GROUP BY`, `ORDER BY`, and `LIMIT`.
+3. Never paste join SQL. For a non-aggregate joined recipe, describe in plain English in `sql_fragment` which tables are linked and by which keys. If the recipe is an aggregate, the aggregate-only rule takes precedence; put the relationship explanation in a separate `schema_fact` and keep `sql_fragment` expression-only.
+4. Preserve important filters, definitions, ranking direction, limits, and caveats in the fact or recipe text, not by pasting the full query. Keep each note concise.
 
-Use short identifiers (preferably under 64 characters), not paragraphs. Keep descriptions to one concise sentence, preferably under about 160 characters; put detail into separate facts or the SQL rather than making a long recipe title or explanation. Emit one recipe for the executed query and as many focused schema facts as are genuinely useful, without redundant restatements.
+When the customer/orders/payment/refund schema applies, preserve these facts: net customer revenue is captured `payment.amount` minus associated refunds; filter with `payment.status = 'captured'` because `captured_at` is populated even for failed payments; do not calculate revenue from order-item prices; and do not count orders directly because an order can have multiple payment rows. Customers link to orders through `orders.customer_id`, orders to payments through `payment.order_id`, and refunds to payments through `refund.payment_id`; refund amounts should be aggregated per payment and missing refunds treated as zero. A “top 10 customers by revenue” recipe ranks this net revenue descending and returns 10 customers.
+Iteration 2: New subsample score 0.0 is not better than old score 0.0, skipping
+Iteration 3: Selected program 0 score: 0.0
+Iteration 3: Proposed new text for extract: A SQL query has just run successfully. Using the Question, the actual SQL that ran, its returned results, and the Schema findings, write compact reusable notes that prevent unnecessary work on later questions. Use the explicitly executed SQL as the authority; do not copy from a merely suggested query if it differs.
 
-Never save a mutable query answer as a schema fact: omit current row counts, sums, percentages, dates, top-N members, returned IDs/names, or claims such as “the table currently has 200 rows.” A count or percentage is the query’s answer, not a schema rule. Save the rule that produces it instead—for example, retain that a non-null boolean `discontinued` column uses `TRUE` for discontinued products, and put counting `WHERE discontinued = TRUE` in the recipe. Preserve stable query parameters such as status values and `LIMIT` values.
+Grounding is mandatory:
+- Every `sql_fragment` must be a verbatim, case-sensitive, contiguous substring of the SQL that ran. Preserve capitalization, spacing, identifiers, and punctuation. Do not lowercase `SUM`, add a semicolon, add aliases, or put Markdown quotes/backticks around the fragment.
+- `sql_fragment` must contain SQL only. Never append explanations, table names, or prose to it.
+- For revenue and other totals, put only the exact aggregate expression in `sql_fragment` (for example, copy `SUM(oi.qty * oi.price)` from the query). Omit `FROM`, `JOIN`, `ON`, and `WHERE`.
+- Never paste a join clause. Record the relationship in the recipe description or a `schema_fact` in words instead. For example: “order_item is linked to orders by order_item.order_id = orders.id.” This prose must still be supported by the SQL or schema findings.
+- Never claim a filter, join, calculation, or table that the executed query did not use.
 
-When the current inputs support them, preserve domain distinctions such as:
-- completed orders versus shipped or refunded orders;
-- order-item revenue (`SUM(qty * price)`) versus captured cash net of refunds;
-- using `payment.status = 'captured'` when a timestamp such as `captured_at` can also exist on failed payments;
-- linking refunds through `refund.payment_id`, pre-aggregating refunds before joining, and accounting for multiple payment rows per order.
+Counting questions:
+- For “how many,” row-count, or other counting questions, include the exact number returned by the query in the note so it need not be run again. Do not invent or recompute the number. For grouped counts, record each group’s returned number.
 
-These examples are patterns, not facts to assert without evidence in the current input. Do not invent business rules or schema details.
-Iteration 1: Accepted candidate (subsample score 2.0 -> 3.0); running full eval.
-Iteration 1: Found a better program on the valset with score 1.0.
-Iteration 1: Valset score for new program: 1.0 (coverage 5 / 5)
-Iteration 1: Val aggregate for new program: 1.0
-Iteration 1: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-Iteration 1: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-Iteration 1: Valset pareto front aggregate score: 1.0
-Iteration 1: Updated valset pareto front programs: {0: {0, 1}, 1: {1}, 2: {1}, 3: {1}, 4: {0, 1}}
-Iteration 1: Best valset aggregate score so far: 1.0
-Iteration 1: Best program as per aggregate score on valset: 1
-Iteration 1: Best score on valset: 1.0
-Iteration 1: Linear pareto front program index: 1
-Iteration 1: New program candidate index: 1
-Iteration 2: Selected program 1 score: 1.0
-Iteration 2: All subsample scores perfect for parent 1. Skipping.
-Iteration 2: Reflective mutation did not propose a new candidate
-Iteration 3: Selected program 1 score: 1.0
-Iteration 3: All subsample scores perfect for parent 1. Skipping.
-Iteration 3: Reflective mutation did not propose a new candidate
-Iteration 4: Selected program 1 score: 1.0
-Iteration 4: All subsample scores perfect for parent 1. Skipping.
-Iteration 4: Reflective mutation did not propose a new candidate
-Iteration 5: Selected program 1 score: 1.0
+Breakdowns:
+- If the query has a `GROUP BY`, create one note for each returned group.
+- Give every such note exactly the same `name`: the grouped column’s name, not the group value. Put the group value and its result in the description.
+
+Use this output shape and emit notes only:
+[recipe] <name>: <reusable meaning, result when applicable, and any join/filter explanation in prose>
+    sql_fragment: <exact SQL substring>
+[schema_fact] <name>: <reusable schema or business fact>
+
+When relevant to this schema, preserve these conventions: completed orders are identified by `orders.status = 'completed'`; `shipped` and `refunded` are separate statuses; order-item revenue is `qty * price` from `order_item`, linked to `orders` through `order_item.order_id = orders.id`; `payment` and `refund` are not needed for order-item revenue unless the question specifically means captured cash net of refunds.
+Iteration 3: Accepted candidate (subsample score 0.0 -> 1.0); running full eval.
+Iteration 3: Found a better program on the valset with score 0.4.
+Iteration 3: Valset score for new program: 0.4 (coverage 5 / 5)
+Iteration 3: Val aggregate for new program: 0.4
+Iteration 3: Individual valset scores for new program: {0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 1.0}
+Iteration 3: New valset pareto front scores: {0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 1.0}
+Iteration 3: Valset pareto front aggregate score: 0.4
+Iteration 3: Updated valset pareto front programs: {0: {1}, 1: {0, 1}, 2: {0, 1}, 3: {0, 1}, 4: {1}}
+Iteration 3: Best valset aggregate score so far: 0.4
+Iteration 3: Best program as per aggregate score on valset: 1
+Iteration 3: Best score on valset: 0.4
+Iteration 3: Linear pareto front program index: 1
+Iteration 3: New program candidate index: 1
+Iteration 4: Selected program 1 score: 0.4
+Iteration 4: Proposed new text for extract: After a successful SQL execution, write compact reusable notes from the Question, the exact SQL that ran, its returned results, and the Schema findings. The explicitly executed SQL is authoritative; ignore any suggested SQL that differs.
+
+Emit notes only, using:
+[recipe] <name>: <reusable rule/meaning, run-qualified result when relevant, and filter/relationship prose>
+    sql_fragment: <exact SQL substring>
+[schema_fact] <name>: <stable schema or business fact>
+
+Grounding:
+- Every `sql_fragment` must be a verbatim, case-sensitive, contiguous substring of the executed SQL. Preserve its capitalization, spacing, identifiers, and punctuation exactly. Do not add aliases, semicolons, Markdown quotes/backticks, or any prose.
+- Make each fragment semantically sufficient. Do not use only a bare `COUNT(*)`, column, or function when a predicate or grouping gives the concept its meaning. For a filtered count, include the exact count expression and the relevant `FROM`/`WHERE` text when contiguous; for example, `COUNT(*) AS deleted_customer_count` followed by the executed `FROM customer` and `WHERE deleted_at IS NOT NULL`, rather than only `COUNT(*)`.
+- For revenue and other value totals, use only the exact aggregate expression, such as `SUM(oi.qty * oi.price)`. Omit `FROM`, `JOIN`, `ON`, and `WHERE` from that fragment; describe filters in prose.
+- Never put a `JOIN` or `ON` clause in a fragment. State the relationship in the recipe description or a schema fact, in words, and only when supported by the SQL or findings.
+- Never claim a table, filter, join, calculation, status, or relationship that the executed SQL or findings do not support.
+
+Results and facts:
+- For “how many,” row-count, or other counting questions, include the exact returned number in the recipe, but qualify it as this execution’s result (for example, “This execution returned 160…”), not as a timeless census. Do not invent or recompute it, and never put a current count, percentage, or total in a `schema_fact`; state the rule that produces it.
+- If the SQL has `GROUP BY`, create one recipe per returned group. Every such recipe must have exactly the grouped column’s name as its `name`, never the group value. Put the group value and its returned result in the description.
+- Use `schema_fact` only for stable schema or business rules, not query outputs.
+
+When relevant and supported, preserve these conventions: `customer.deleted_at` is nullable; non-null means the customer is deleted and null means active. Completed orders use `orders.status = 'completed'`; `shipped` and `refunded` are separate statuses. Order-item revenue is `qty * price` from `order_item`, linked to `orders` by `order_item.order_id = orders.id`. `payment` and `refund` are unnecessary for order-item revenue unless the question specifically asks for captured cash net of refunds.
+Iteration 4: New subsample score 0.0 is not better than old score 0.0, skipping
+Iteration 5: Selected program 1 score: 0.4
 Iteration 5: All subsample scores perfect for parent 1. Skipping.
 Iteration 5: Reflective mutation did not propose a new candidate
-Iteration 6: Selected program 1 score: 1.0
+Iteration 6: Selected program 1 score: 0.4
 Iteration 6: All subsample scores perfect for parent 1. Skipping.
 Iteration 6: Reflective mutation did not propose a new candidate
-Iteration 7: Selected program 1 score: 1.0
-Iteration 7: All subsample scores perfect for parent 1. Skipping.
-Iteration 7: Reflective mutation did not propose a new candidate
-Iteration 8: Selected program 1 score: 1.0
-Iteration 8: All subsample scores perfect for parent 1. Skipping.
-Iteration 8: Reflective mutation did not propose a new candidate
-Iteration 9: Selected program 1 score: 1.0
-Iteration 9: All subsample scores perfect for parent 1. Skipping.
-Iteration 9: Reflective mutation did not propose a new candidate
-Iteration 10: Selected program 1 score: 1.0
-Iteration 10: All subsample scores perfect for parent 1. Skipping.
-Iteration 10: Reflective mutation did not propose a new candidate
-Iteration 11: Selected program 1 score: 1.0
-Iteration 11: All subsample scores perfect for parent 1. Skipping.
-Iteration 11: Reflective mutation did not propose a new candidate
-Iteration 12: Selected program 1 score: 1.0
-Iteration 12: All subsample scores perfect for parent 1. Skipping.
-Iteration 12: Reflective mutation did not propose a new candidate
-Iteration 13: Selected program 1 score: 1.0
-Iteration 13: All subsample scores perfect for parent 1. Skipping.
-Iteration 13: Reflective mutation did not propose a new candidate
-Iteration 14: Selected program 1 score: 1.0
-Iteration 14: All subsample scores perfect for parent 1. Skipping.
-Iteration 14: Reflective mutation did not propose a new candidate
-Iteration 15: Selected program 1 score: 1.0
-Iteration 15: All subsample scores perfect for parent 1. Skipping.
-Iteration 15: Reflective mutation did not propose a new candidate
-Iteration 16: Selected program 1 score: 1.0
-Iteration 16: All subsample scores perfect for parent 1. Skipping.
-Iteration 16: Reflective mutation did not propose a new candidate
-Iteration 17: Selected program 1 score: 1.0
-Iteration 17: All subsample scores perfect for parent 1. Skipping.
-Iteration 17: Reflective mutation did not propose a new candidate
-Iteration 18: Selected program 1 score: 1.0
-Iteration 18: All subsample scores perfect for parent 1. Skipping.
-Iteration 18: Reflective mutation did not propose a new candidate
-Iteration 19: Selected program 1 score: 1.0
-Iteration 19: All subsample scores perfect for parent 1. Skipping.
-Iteration 19: Reflective mutation did not propose a new candidate
-Iteration 20: Selected program 1 score: 1.0
-Iteration 20: All subsample scores perfect for parent 1. Skipping.
-Iteration 20: Reflective mutation did not propose a new candidate
-Iteration 21: Selected program 1 score: 1.0
-Iteration 21: All subsample scores perfect for parent 1. Skipping.
-Iteration 21: Reflective mutation did not propose a new candidate
-Iteration 22: Selected program 1 score: 1.0
-Iteration 22: Proposed new text for extract: You are a durable-memory writer for a SQL query node. The query has already succeeded. Inputs contain the node message (question, schema findings, and SQL) and a separate executed-SQL string. Read both and write compact, reusable notes for a future query author. Do not rerun the query, explain results, or report rows or values.
+Iteration 7: Selected program 1 score: 0.4
+Iteration 7: Proposed new text for extract: 
+Iteration 7: New subsample score 0.0 is not better than old score 0.0, skipping
+Iteration 8: Selected program 1 score: 0.4
+Iteration 8: Proposed new text for extract: A SQL query has just succeeded. Given the Question, the SQL actually executed, its returned results, and the Schema findings, emit compact durable notes that capture reusable query rules and prevent repeated discovery. Treat the executed SQL as authoritative; ignore any suggested SQL that differs.
 
-Use only information supported by the inputs. Emit:
-[schema_fact] short_name: One durable schema or business-rule fact.
-[recipe] short_name: One concise sentence describing the executed query’s reusable method.
-    sql_fragment: the executed SQL
+Grounding:
+- Every sql_fragment must be a verbatim, case-sensitive, contiguous substring of the executed SQL. Preserve capitalization, whitespace, identifiers, and punctuation exactly. Do not add aliases, semicolons, or Markdown quotes/backticks.
+- A fragment must be semantically informative, not merely a bare COUNT(*), aggregate function, table, or column. For a count, include the exact count expression and the FROM/WHERE scope that defines it; include GROUP BY and necessary join context when present. Use the full executed statement when safest. A standalone JOIN or ON fragment is not useful; when a join gives the query meaning, copy it only as part of a larger exact SQL span and explain the relationship in prose.
+- The fragment must contain SQL only. Never append explanations, table names, or prose. Never claim a filter, join, calculation, or table that the executed SQL did not use.
+- For revenue and other totals, use only the exact aggregate expression in sql_fragment (for example, SUM(oi.qty * oi.price)); put filters, joins, and scope in prose instead.
 
-Emit exactly one recipe and only useful, nonredundant facts. Facts may cover table/column roles, types or nullability, join keys/cardinality, status meanings, metric definitions, exclusions, timestamp or NULL behavior, and duplicate-prevention rules. The recipe should capture the actual joins, filters, calculations, grouping, aggregation, ordering, limits, and any pre-aggregation or failed/refund handling.
+Treat returned values as a snapshot, not as durable facts. Do not state current counts, percentages, sums, totals, or row values as timeless claims, and never turn Schema findings such as “750 cancelled orders” into a schema_fact. State the rule, formula, filter, and scope that produced the result instead. Do not invent or recompute numbers.
 
-The `sql_fragment` is critical: copy the SQL from the separate executed-SQL field verbatim. It must be that statement, not an equivalent rewrite or the SQL in the node message when they differ. Do not add a CTE, change aliases, casing, whitespace, literals, or clauses, and do not reformat it. Preserve `COALESCE`, status filters, ordering, limits, and all other semantics. Use schema findings for durable facts, but make the recipe describe what actually ran.
+For a GROUP BY, emit one recipe per returned group. Every such recipe must have exactly the grouped column’s name as its name, never the group value. Put the returned group value and reusable rule in the description; do not store the group’s transient count.
 
-Use short identifiers, preferably under 64 characters, and one concise sentence per note, preferably under 160 characters. Return only notes, with no preamble, closing text, or code fences. Prefer durable conventions over one-off observations.
+When relevant and supported, preserve these conventions: completed orders use orders.status = 'completed'; shipped and refunded are distinct statuses; cancelled uses the exact executed status predicate; order-item revenue is qty * price from order_item, linked to orders by order_item.order_id = orders.id; payment and refund are unnecessary for order-item revenue unless the question specifically means captured cash net of refunds.
 
-Never save a mutable query answer as a fact: omit current counts, sums, percentages, dates, top-N members, returned IDs or names, and claims about current table contents. Save the rule that produces the answer, and preserve stable parameters such as status values, date-boundary logic, and `LIMIT` values.
+Emit notes only:
+[recipe] <name>: <reusable meaning, formula, filter, and relationship explanation in prose>
+    sql_fragment: <exact SQL substring>
+[schema_fact] <name>: <stable reusable schema or business fact>
+Iteration 8: Accepted candidate (subsample score 0.0 -> 1.0); running full eval.
+Iteration 8: Found a better program on the valset with score 1.0.
+Iteration 8: Valset score for new program: 1.0 (coverage 5 / 5)
+Iteration 8: Val aggregate for new program: 1.0
+Iteration 8: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+Iteration 8: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+Iteration 8: Valset pareto front aggregate score: 1.0
+Iteration 8: Updated valset pareto front programs: {0: {1, 2}, 1: {2}, 2: {2}, 3: {2}, 4: {1, 2}}
+Iteration 8: Best valset aggregate score so far: 1.0
+Iteration 8: Best program as per aggregate score on valset: 2
+Iteration 8: Best score on valset: 1.0
+Iteration 8: Linear pareto front program index: 2
+Iteration 8: New program candidate index: 2
+search: 26 metric calls, 3 candidates in the pool
 
-When supported by the current inputs, preserve distinctions such as completed versus shipped or refunded orders; order-item revenue (`SUM(qty * price)`) versus captured payment revenue net of refunds; `payment.status = 'captured'` versus `captured_at` when failed payments may have a capture timestamp; `payment.amount` and refund amounts; joins through `orders.customer_id`, `payment.order_id`, and `refund.payment_id`; pre-aggregating refunds before joining; multiple payment rows per order; `COALESCE` and NULL handling; `UPPER(region)` for inconsistent region casing; and half-open PostgreSQL last-quarter boundaries using `date_trunc`. These are patterns only: do not assert them without evidence in the current inputs.
-Iteration 22: Accepted candidate (subsample score 2.0 -> 3.0); running full eval.
-Iteration 22: Valset score for new program: 1.0 (coverage 5 / 5)
-Iteration 22: Val aggregate for new program: 1.0
-Iteration 22: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-Iteration 22: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-Iteration 22: Valset pareto front aggregate score: 1.0
-Iteration 22: Updated valset pareto front programs: {0: {0, 1, 2}, 1: {1, 2}, 2: {1, 2}, 3: {1, 2}, 4: {0, 1, 2}}
-Iteration 22: Best valset aggregate score so far: 1.0
-Iteration 22: Best program as per aggregate score on valset: 1
-Iteration 22: Best score on valset: 1.0
-Iteration 22: Linear pareto front program index: 1
-Iteration 22: New program candidate index: 2
-Iteration 23: Selected program 2 score: 1.0
-Iteration 23: All subsample scores perfect for parent 2. Skipping.
-Iteration 23: Reflective mutation did not propose a new candidate
-Iteration 24: Selected program 2 score: 1.0
-Iteration 24: All subsample scores perfect for parent 2. Skipping.
-Iteration 24: Reflective mutation did not propose a new candidate
-Iteration 25: Selected program 2 score: 1.0
-Iteration 25: All subsample scores perfect for parent 2. Skipping.
-Iteration 25: Reflective mutation did not propose a new candidate
-Iteration 26: Selected program 2 score: 1.0
-Iteration 26: All subsample scores perfect for parent 2. Skipping.
-Iteration 26: Reflective mutation did not propose a new candidate
-Iteration 27: Selected program 2 score: 1.0
-Iteration 27: All subsample scores perfect for parent 2. Skipping.
-Iteration 27: Reflective mutation did not propose a new candidate
-Iteration 28: Selected program 2 score: 1.0
-Iteration 28: All subsample scores perfect for parent 2. Skipping.
-Iteration 28: Reflective mutation did not propose a new candidate
-Iteration 29: Selected program 2 score: 1.0
-Iteration 29: All subsample scores perfect for parent 2. Skipping.
-Iteration 29: Reflective mutation did not propose a new candidate
-Iteration 30: Selected program 2 score: 1.0
-Iteration 30: All subsample scores perfect for parent 2. Skipping.
-Iteration 30: Reflective mutation did not propose a new candidate
-Iteration 31: Selected program 2 score: 1.0
-Iteration 31: All subsample scores perfect for parent 2. Skipping.
-Iteration 31: Reflective mutation did not propose a new candidate
-Iteration 32: Selected program 2 score: 1.0
-Iteration 32: All subsample scores perfect for parent 2. Skipping.
-Iteration 32: Reflective mutation did not propose a new candidate
-Iteration 33: Selected program 2 score: 1.0
-Iteration 33: All subsample scores perfect for parent 2. Skipping.
-Iteration 33: Reflective mutation did not propose a new candidate
-Iteration 34: Selected program 2 score: 1.0
-Iteration 34: All subsample scores perfect for parent 2. Skipping.
-Iteration 34: Reflective mutation did not propose a new candidate
-Iteration 35: Selected program 2 score: 1.0
-Iteration 35: All subsample scores perfect for parent 2. Skipping.
-Iteration 35: Reflective mutation did not propose a new candidate
-Iteration 36: Selected program 2 score: 1.0
-Iteration 36: All subsample scores perfect for parent 2. Skipping.
-Iteration 36: Reflective mutation did not propose a new candidate
-Iteration 37: Selected program 2 score: 1.0
-Iteration 37: All subsample scores perfect for parent 2. Skipping.
-Iteration 37: Reflective mutation did not propose a new candidate
-Iteration 38: Selected program 2 score: 1.0
-Iteration 38: All subsample scores perfect for parent 2. Skipping.
-Iteration 38: Reflective mutation did not propose a new candidate
-Iteration 39: Selected program 2 score: 1.0
-Iteration 39: All subsample scores perfect for parent 2. Skipping.
-Iteration 39: Reflective mutation did not propose a new candidate
-Iteration 40: Selected program 2 score: 1.0
-Iteration 40: All subsample scores perfect for parent 2. Skipping.
-Iteration 40: Reflective mutation did not propose a new candidate
-Iteration 41: Selected program 2 score: 1.0
-Iteration 41: All subsample scores perfect for parent 2. Skipping.
-Iteration 41: Reflective mutation did not propose a new candidate
-Iteration 42: Selected program 2 score: 1.0
-Iteration 42: All subsample scores perfect for parent 2. Skipping.
-Iteration 42: Reflective mutation did not propose a new candidate
-Iteration 43: Selected program 2 score: 1.0
-Iteration 43: All subsample scores perfect for parent 2. Skipping.
-Iteration 43: Reflective mutation did not propose a new candidate
-search    150 metric calls, 3 candidates in the pool
-
-pareto    3 candidates over 5 validation examples, 3 best on at least one
+pareto: 3 candidates over 5 validation examples, 2 best on at least one
 
           SCORE
 
@@ -207,9 +142,9 @@ pareto    3 candidates over 5 validation examples, 3 best on at least one
 
           cand  val      E1    E2    E3    E4    E5   chars  best on
           ----------------------------------------------------------
-          seed  0.400  1.00  0.00  0.00  0.00  1.00      90  E1, E5
-          1     1.000  1.00  1.00  1.00  1.00  1.00   2,768  E1-E5
-          2     1.000  1.00  1.00  1.00  1.00  1.00   2,727  E1-E5
+          seed  0.000  0.00  0.00  0.00  0.00  0.00     630
+          1     0.400  1.00  0.00  0.00  0.00  1.00   2,418  E1, E5
+          2     1.000  1.00  1.00  1.00  1.00  1.00   2,626  E1-E5
 
           E1  60dcead8-what-was-our-total-revenue
           E2  55507270-what-order-statuses-exist-and-how-ma
@@ -220,40 +155,41 @@ pareto    3 candidates over 5 validation examples, 3 best on at least one
           written demo/gepa/extract.pareto.json
 
 checking the pool against the invariant probes
-  seed passes 3/4: ['grounding', 'near_collision', 'scope_creep']
-  candidate 1 (val 1.000) survives, passing 4/4 probes
-  candidate 2 (val 1.000) survives, passing 4/4 probes
+  seed passes 1/4: ['near_collision']
+  candidate 1 (val 0.400) survives, passing 3/4 probes
+  candidate 2 (val 1.000) survives, passing 3/4 probes
+
+compare: started from demo/gepa/extract.short.md at 0.000, the winner scored 1.000, and the working text config/prompts/extract.md scored 1.000
 
 --- demo/gepa/extract.short.md
 +++ candidate (val 1.000)
-@@ -1 +1,24 @@
--A query just ran successfully. Write down what you learned from it as notes for next time.
-+You are a durable-memory writer for a SQL query node. A query has already run successfully. Read the node message (question, schema findings, and SQL) together with the executed SQL, and write compact, reusable notes for a future query author. Do not rerun the query, explain the result, or report returned rows or values.
+@@ -1,7 +1,18 @@
+-A query just ran successfully. Write notes that will save work on the next question.
++A SQL query has just succeeded. Given the Question, the SQL actually executed, its returned results, and the Schema findings, emit compact durable notes that capture reusable query rules and prevent repeated discovery. Treat the executed SQL as authoritative; ignore any suggested SQL that differs.
+ 
+-Follow these rules:
+-1. Counting questions ("how many ..."): save the number the query returned in the note, so the count never has to be run again.
+-2. Revenue and other totals: in the recipe's sql_fragment give only the aggregate expression, for example `sum(qty * price)`. Leave out FROM, JOIN and WHERE.
+-3. Queries that join tables: do not paste the join. Explain in words in the sql_fragment which tables are linked.
+-4. Breakdowns by a column (GROUP BY): file one note for each group, and give them all the same name, the name of the column.
++Grounding:
++- Every sql_fragment must be a verbatim, case-sensitive, contiguous substring of the executed SQL. Preserve capitalization, whitespace, identifiers, and punctuation exactly. Do not add aliases, semicolons, or Markdown quotes/backticks.
++- A fragment must be semantically informative, not merely a bare COUNT(*), aggregate function, table, or column. For a count, include the exact count expression and the FROM/WHERE scope that defines it; include GROUP BY and necessary join context when present. Use the full executed statement when safest. A standalone JOIN or ON fragment is not useful; when a join gives the query meaning, copy it only as part of a larger exact SQL span and explain the relationship in prose.
++- The fragment must contain SQL only. Never append explanations, table names, or prose. Never claim a filter, join, calculation, or table that the executed SQL did not use.
++- For revenue and other totals, use only the exact aggregate expression in sql_fragment (for example, SUM(oi.qty * oi.price)); put filters, joins, and scope in prose instead.
 +
-+Record only information supported by the inputs:
++Treat returned values as a snapshot, not as durable facts. Do not state current counts, percentages, sums, totals, or row values as timeless claims, and never turn Schema findings such as “750 cancelled orders” into a schema_fact. State the rule, formula, filter, and scope that produced the result instead. Do not invent or recompute numbers.
 +
-+- `[schema_fact]` — one durable schema or business-rule fact per note. Capture relevant table and column roles, types or nullability, join keys and cardinality, status/enum meanings, metric definitions, exclusions, timestamp caveats, NULL behavior, and duplicate-prevention rules.
-+- `[recipe]` — the reusable method for answering this query. Include the required joins, filters, calculations, aggregation, grouping, ordering, limits, and any pre-aggregation or refund/failed-row handling. Include the successful SQL as its `sql_fragment`, preserving important semantics such as `COALESCE`, status filters, and ordering.
++For a GROUP BY, emit one recipe per returned group. Every such recipe must have exactly the grouped column’s name as its name, never the group value. Put the returned group value and reusable rule in the description; do not store the group’s transient count.
 +
-+Use this format and return only notes, with no preamble or closing text:
++When relevant and supported, preserve these conventions: completed orders use orders.status = 'completed'; shipped and refunded are distinct statuses; cancelled uses the exact executed status predicate; order-item revenue is qty * price from order_item, linked to orders by order_item.order_id = orders.id; payment and refund are unnecessary for order-item revenue unless the question specifically means captured cash net of refunds.
 +
-+[schema_fact] short_concise_name: One concise, durable statement.
-+[recipe] short_concise_name: One concise sentence describing the reusable method.
-+    sql_fragment: the successful SQL
-+
-+Use short identifiers (preferably under 64 characters), not paragraphs. Keep descriptions to one concise sentence, preferably under about 160 characters; put detail into separate facts or the SQL rather than making a long recipe title or explanation. Emit one recipe for the executed query and as many focused schema facts as are genuinely useful, without redundant restatements.
-+
-+Never save a mutable query answer as a schema fact: omit current row counts, sums, percentages, dates, top-N members, returned IDs/names, or claims such as “the table currently has 200 rows.” A count or percentage is the query’s answer, not a schema rule. Save the rule that produces it instead—for example, retain that a non-null boolean `discontinued` column uses `TRUE` for discontinued products, and put counting `WHERE discontinued = TRUE` in the recipe. Preserve stable query parameters such as status values and `LIMIT` values.
-+
-+When the current inputs support them, preserve domain distinctions such as:
-+- completed orders versus shipped or refunded orders;
-+- order-item revenue (`SUM(qty * price)`) versus captured cash net of refunds;
-+- using `payment.status = 'captured'` when a timestamp such as `captured_at` can also exist on failed payments;
-+- linking refunds through `refund.payment_id`, pre-aggregating refunds before joining, and accounting for multiple payment rows per order.
-+
-+These examples are patterns, not facts to assert without evidence in the current input. Do not invent business rules or schema details.
++Emit notes only:
++[recipe] <name>: <reusable meaning, formula, filter, and relationship explanation in prose>
++    sql_fragment: <exact SQL substring>
++[schema_fact] <name>: <stable reusable schema or business fact>
 
-90 chars -> 2768 (+2976%), val 1.000 against the seed's 0.400
+630 chars -> 2626 (+317%), val 1.000 against the seed's 0.000
 
 the invariants this prompt is the only home for:
   - Neither kind is a census.

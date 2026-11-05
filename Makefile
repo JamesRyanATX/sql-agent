@@ -170,7 +170,8 @@ GEPA = uv run --group gepa python -m tools.gepa
 gepa-extract-overfit:  ## the extract search with the guards off: three cases, gate reporting only
 	@$(GEPA) extract --overfit 3 $(if $(GEPA_EXTRACT_FROM),--from $(GEPA_EXTRACT_FROM)) $(GEPA_ARGS)
 
-# The extract search starts from a one-sentence prompt, not from the prompt the
+# The extract search starts from a short prompt with four deliberate mistakes
+# in it (one for each kind of question), not from the prompt the
 # agent runs. config/prompts/extract.md already scores 1.0 on almost every
 # case, and GEPA learns only from cases the starting text gets wrong, so a
 # search that starts there has nothing to work on. The short prompt is in

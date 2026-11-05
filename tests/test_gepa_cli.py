@@ -457,6 +457,48 @@ def budget_of(monkeypatch, seed, argv: list[str]) -> int:
     return seen["budget"]
 
 
+def handed_to_search(monkeypatch, seed, argv: list[str]) -> dict:
+    """Every keyword the search was handed."""
+    seen: dict = {}
+
+    def record(gepa_module, **kwargs):
+        seen.update(kwargs)
+        return FakeResult([seed], [1.0])
+
+    monkeypatch.setattr(gepa, "_search", record)
+    CliRunner().invoke(gepa.cli, argv)
+    return seen
+
+
+def test_extract_proposes_from_one_case_and_the_turn_targets_from_gepas_three(
+    a_run, monkeypatch
+):
+    """Shown three failing cases, the reflection model rewrites the whole
+    prompt in one step. Shown one, it corrects one mistake at a time."""
+    assert handed_to_search(monkeypatch, {COMPONENT: a_run}, ["extract"])["minibatch"] == 1
+    assert targets.TOOLS.minibatch is None and targets.CONFIG.minibatch is None
+
+
+def test_the_batch_size_reaches_gepa_only_when_a_target_names_one(monkeypatch, tmp_path):
+    seen: list[dict] = []
+
+    class Gepa:
+        @staticmethod
+        def optimize(**kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(gepa, "OUT", tmp_path)
+    common = dict(
+        adapter=None, reflection=None, seed_candidate={}, trainset=[], valset=[],
+        node="extract", budget=1, seed=0, verbose=False,
+    )
+    gepa._search(Gepa, **common, minibatch=1)
+    gepa._search(Gepa, **common)
+
+    assert seen[0]["reflection_minibatch_size"] == 1
+    assert "reflection_minibatch_size" not in seen[1]
+
+
 def test_a_whole_turn_target_brings_its_own_budget(a_tools_run, monkeypatch):
     """A whole-turn rollout is about 11,500 tokens, so a whole-turn target
     names its own budget rather than taking the command's 150. It is 180,
@@ -862,16 +904,43 @@ def test_iterations_becomes_a_stopper_and_the_budget_counts_from_there_too(monke
         trainset=[], valset=[], node="extract", budget=17, seed=0, verbose=False,
     )
 
+    from gepa.utils.stop_condition import ScoreThresholdStopper
+
     gepa._search(FakeGepa, iterations=2, **common)
-    steps, calls = seen["stop_callbacks"]
+    perfect, steps, calls = seen["stop_callbacks"]
+    assert isinstance(perfect, ScoreThresholdStopper) and perfect.threshold == 1.0
     assert isinstance(steps, gepa._More) and steps.n == 2
     assert isinstance(calls, gepa._More) and calls.n == 17
     assert seen["max_metric_calls"] is None
 
     seen.clear()
     gepa._search(FakeGepa, **common)
-    assert "stop_callbacks" not in seen
+    (perfect,) = seen["stop_callbacks"]
+    assert isinstance(perfect, ScoreThresholdStopper) and perfect.threshold == 1.0
     assert seen["max_metric_calls"] == 17
+
+
+def test_the_search_stops_when_a_candidate_scores_one_on_every_example():
+    """GEPA's own stopper reads the best mean validation score in the state.
+    A mean of 1.0 means 1.0 on every example, since no score is above 1.0."""
+    from types import SimpleNamespace
+
+    seen = {}
+
+    class FakeGepa:
+        @staticmethod
+        def optimize(**kwargs):
+            seen.update(kwargs)
+            return FakeResult([{COMPONENT: "seed"}], [1.0])
+
+    gepa._search(
+        FakeGepa, adapter=None, reflection=None, seed_candidate={COMPONENT: "seed"},
+        trainset=[], valset=[], node="extract", budget=17, seed=0, verbose=False,
+    )
+    (perfect,) = seen["stop_callbacks"]
+
+    assert perfect(SimpleNamespace(program_full_scores_val_set=[0.4, 1.0])) is True
+    assert perfect(SimpleNamespace(program_full_scores_val_set=[0.4, 0.8])) is False
 
 
 def test_a_pool_of_one_after_the_asked_iterations_is_reported_as_that(a_run, monkeypatch):
@@ -1078,24 +1147,18 @@ def with_rows(monkeypatch, scores: list[float]) -> None:
     )
 
 
-def test_with_from_the_working_text_is_scored_and_written_to_the_report(
-    a_run, monkeypatch, short_file
-):
+def test_with_from_the_report_has_no_working_block(a_run, monkeypatch, short_file):
+    """The working text is scored for the `compare:` line and nothing else.
+    It is not in the report file or in the table the run prints."""
     with_rows(monkeypatch, [0.4, 1.0])
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
 
     assert result.exit_code == 0, result.stderr
     document = json.loads(gepa.pareto("extract").read_text())
-    assert list(document) == ["target", "score", "examples", "pool", "candidates", "working"]
-    assert document["working"] == {
-        "label": str(prompts.directory() / "extract.md"),
-        "val": 1.0,
-        "scores": [1.0, 1.0],
-        "chars": len(a_run),
-    }
-    assert "working  1.000  1.00  1.00" in result.stderr, "the row in the table"
-    assert "`working` is the text the agent runs" in result.stderr
+    assert list(document) == ["target", "score", "examples", "pool", "candidates"]
+    assert "working " not in result.stderr.replace("working text", "")
+    assert "compare: " in result.stderr
 
 
 def test_without_from_the_working_text_is_not_scored_again(a_run, monkeypatch):
@@ -1108,13 +1171,27 @@ def test_without_from_the_working_text_is_not_scored_again(a_run, monkeypatch):
     assert "compare: " not in result.stderr
 
 
-def test_with_from_a_pool_of_one_is_still_compared(a_run, monkeypatch, short_file):
+def test_with_from_a_pool_of_one_does_not_score_the_working_text(
+    a_run, monkeypatch, short_file
+):
+    """No winner is printed, so there is no `compare:` line, and scoring the
+    working text would be rollouts spent on nothing."""
     with_rows(monkeypatch, [0.4])
+    sent: list[str] = []
+
+    async def counting(**kwargs):
+        sent.append(kwargs["system"])
+        return llm.Result(
+            text=json.dumps(GOOD_OUTPUT), stop_reason="end_turn", tokens_in=400, tokens_out=120,
+        )
+
+    monkeypatch.setattr(llm, "complete", counting)
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
 
     assert result.exit_code == gepa.NO_IMPROVEMENT
-    assert json.loads(gepa.pareto("extract").read_text())["working"]["val"] == 1.0
+    assert a_run not in sent
+    assert "compare: " not in result.stderr
 
 
 def test_with_from_the_winner_is_compared_with_the_working_text(

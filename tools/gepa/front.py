@@ -93,13 +93,10 @@ def _table(document: dict[str, Any], styled: bool) -> list[str]:
     file holds null.
     """
     rows = document["candidates"]
-    working = document.get("working")
     examples = document["examples"]
     columns = [f"E{n}" for n in range(1, len(examples) + 1)]
     width = max([4] + [len(c) for c in columns])
-    name_width = max(
-        [4] + [len(_who(row)) for row in rows] + ([len("working")] if working else [])
-    )
+    name_width = max([4] + [len(_who(row)) for row in rows])
 
     lines = _heading("SCORES", styled)
     header = "  ".join(f"{c:>{width}}" for c in columns)
@@ -130,35 +127,11 @@ def _table(document: dict[str, Any], styled: bool) -> list[str]:
         best = _ranges(row.get("best_on") or [])
         lines.append(f"{who}  {val:<5}  {'  '.join(cells)}  {chars:>6}  {best}".rstrip())
 
-    if working:
-        lines.extend(_working_row(working, len(examples), width, name_width))
-
     lines.append("")
     label_width = max([len(c) for c in columns] or [0])
     for column, label in zip(columns, examples):
         lines.append(f"{column:<{label_width}}  {label}")
     return lines
-
-
-def _working_row(
-    working: dict[str, Any], count: int, width: int, name_width: int
-) -> list[str]:
-    """The text the agent runs, as the last row: never highlighted, best on
-    nothing, because it was not in the pool. Then one sentence saying so."""
-    scores = list(working.get("scores") or [])
-    scores += [None] * (count - len(scores))
-    cells = [
-        f"{'-':>{width}}" if value is None else f"{value:>{width}.2f}"
-        for value in scores[:count]
-    ]
-    val = f"{working['val']:.3f}" if working.get("val") is not None else "-"
-    chars = f"{working['chars']:,}" if working.get("chars") is not None else "-"
-    row = f"{'working':<{name_width}}  {val:<5}  {'  '.join(cells)}  {chars:>6}".rstrip()
-    sentence = (
-        f"`working` is the text the agent runs, {working.get('label')}, scored "
-        f"on the same examples for comparison and not part of the search."
-    )
-    return [row, ""] + textwrap.wrap(sentence, width=78)
 
 
 def _ranges(numbers: list[int]) -> str:

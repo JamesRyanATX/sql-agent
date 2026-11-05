@@ -112,6 +112,14 @@ class Target:
     # is one model call for one target and a whole turn for another.
     budget: int = 150
 
+    # How many training cases GEPA runs a parent on before it asks for a
+    # proposal, and then runs the proposal on to decide whether to keep it.
+    # None is GEPA's own default, three. `extract` uses one: shown three
+    # failing cases at once, the reflection model rewrites the whole prompt
+    # in one step, and shown one it corrects one mistake at a time, which is
+    # the search a person can follow.
+    minibatch: int | None = None
+
     # Roughly what one rollout costs, for the figures `--probe-only` prints
     # before it runs the seed over a whole corpus. Zero where a rollout is one
     # model call. Every search asks before it starts, whatever this is.
@@ -245,6 +253,7 @@ EXTRACT = Target(
     notes=_extract_notes,
     score=_extract_score,
     check=_extract_check,
+    minibatch=1,
     blurb="config/prompts/extract.md",
     about=(
         'The "extract" node is responsible for writing down what the agent '

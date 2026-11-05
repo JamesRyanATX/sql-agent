@@ -248,7 +248,7 @@ prompt, the four tool descriptions, and the per-node effort block. Each is
 manual, and a human commits the result.
 
 ```bash
-make gepa-extract              # read the new prompt, searched for from a one-sentence start
+make gepa-extract              # read the new prompt, searched for from a short, deliberately wrong start
 make gepa-extract > new.md     # keep it
 make gepa-extract GEPA_EXTRACT_FROM=   # search from the prompt the agent runs
 make gepa-tools                # the four tool descriptions
@@ -288,7 +288,7 @@ candidate printed at the end is the one with the highest average among those
 the gate did not discard, and only when that average is at least the starting
 text's.
 
-**The extract search starts from one sentence.** `config/prompts/extract.md`
+**The extract search starts from a prompt with four mistakes in it.** `config/prompts/extract.md`
 already scores 1.0 on almost every case, and GEPA learns only from cases the
 starting text gets wrong, so a search that starts there proposes almost
 nothing. `make gepa-extract` therefore starts from
@@ -296,6 +296,11 @@ nothing. `make gepa-extract` therefore starts from
 be compared with the prompt a person wrote. `GEPA_EXTRACT_FROM=` starts from
 the agent's own prompt instead, which is the search to run after the agent's
 prompt has started failing cases.
+
+The extract search shows the reflection model one failing case per proposal,
+not GEPA's usual three, so it corrects one mistake at a time and the score
+rises in steps. Every search stops when a candidate scores 1.0 on every
+validation example.
 
 **One command, needing no other.** It harvests the telemetry, searches, gates
 the pool on the probes and prints the winner — fresh corpus and fresh run dir

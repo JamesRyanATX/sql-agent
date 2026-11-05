@@ -86,6 +86,17 @@ class Trajectory:
     score: metric.Score
 
 
+# What a candidate with no text is told. The reflection model sometimes returns
+# nothing, and GEPA then proposes the empty string as a prompt. Observed: an
+# empty prompt scored 0.6 where a deliberately wrong one scored 0.0, so it was
+# accepted and became a parent. The agent refuses to load an empty prompt file
+# (`app/prompts.py`), so the search refuses one too.
+EMPTY = (
+    "The prompt is empty, so it was not run and every case scores 0. The agent "
+    "refuses to load an empty prompt."
+)
+
+
 class ExtractAdapter(GEPAAdapter):
     """Score a candidate `extract` prompt over a batch of recorded cases."""
 
@@ -115,6 +126,8 @@ class ExtractAdapter(GEPAAdapter):
         capture_traces: bool = False,
     ) -> EvaluationBatch[Trajectory, dict[str, Any]]:
         prompt = candidate[COMPONENT]
+        if not prompt.strip():
+            return self._refused(batch, EMPTY, capture_traces)
         if self.max_chars is not None and len(prompt) > self.max_chars:
             return self._too_long(batch, prompt, capture_traces)
 
@@ -140,6 +153,13 @@ class ExtractAdapter(GEPAAdapter):
             f"its length is limited. A shorter prompt that keeps every rule "
             f"is the way past this."
         )
+        return self._refused(batch, reason, capture_traces)
+
+    def _refused(
+        self, batch: list[ExtractCase], reason: str, capture_traces: bool
+    ) -> EvaluationBatch[Trajectory, dict[str, Any]]:
+        """A candidate that is not run: every case zero, the reason on every
+        record, no model call made."""
         replays = [Replayed(case=case, error=reason) for case in batch]
         scores = [metric.Score(0.0, feedback=[reason]) for _ in batch]
         result = self._result(replays, scores, capture_traces)

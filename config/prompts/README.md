@@ -42,8 +42,8 @@ failure the new wording addresses — because the file body cannot carry a comme
 
 `make gepa-extract GEPA_EXTRACT_FROM=` searches for better prose than the file
 here and prints the winner on stdout, with the diff and the invariant checklist
-on stderr. Without `GEPA_EXTRACT_FROM=` the search starts from the one-sentence
-prompt in `demo/gepa/extract.short.md`, not from `extract.md`. It writes nothing here:
+on stderr. Without `GEPA_EXTRACT_FROM=` the search starts from the short prompt
+with four deliberate mistakes in `demo/gepa/extract.short.md`, not from `extract.md`. It writes nothing here:
 what you paste in, you read first, and nothing promotes itself.
 
 ## Notes

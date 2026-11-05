@@ -350,6 +350,7 @@ def _run(
             verbose=verbose,
             templates=chosen.templates() if chosen.templates else None,
             iterations=iterations,
+            minibatch=chosen.minibatch,
         )
 
         say(
@@ -372,15 +373,6 @@ def _run(
         if holdout and len(result.candidates) > 1:
             unseen = _holdout(adapter, result, holdout, seed_index, seed_scores or [])
 
-        # With `--from`, the search compared candidates with the file it
-        # started from and never with the text the agent runs. Scored here on
-        # the same validation examples, so the report and the last lines of
-        # the run can say how the result compares with what it would replace.
-        # Before the empty-pool check, so a pool of one is compared too.
-        compared = None
-        if working is not None:
-            compared = _working(adapter, valset, *working)
-
         # Before the empty-pool check below, not after. A run that ends with
         # NO_IMPROVEMENT is the one whose evidence is most worth keeping, and
         # on a pool of one the seed's own score on each example is what says
@@ -394,7 +386,6 @@ def _run(
             path=pareto_to,
             name=run,
             holdout=unseen,
-            working=compared,
         )
 
         # `skip_perfect_score` means a seed at the top of the metric is never
@@ -437,6 +428,16 @@ def _run(
                 ),
                 key=lambda s: -s.score,
             )
+
+        # With `--from`, the search compared candidates with the file it
+        # started from and never with the text the agent runs. Scored here on
+        # the same validation examples, so the `compare:` line at the end of
+        # the run can say how the result compares with what it would replace.
+        # Only when there is a survivor, because the line is printed only
+        # when a winner is, and the scoring costs `len(valset)` rollouts.
+        compared = None
+        if working is not None and survivors:
+            compared = _working(adapter, valset, *working)
 
     if not survivors:
         say(
@@ -715,6 +716,7 @@ def _search(
     verbose: bool,
     templates: dict[str, str] | None = None,
     iterations: int | None = None,
+    minibatch: int | None = None,
 ):
     """`gepa.optimize`, with its own stdout pointed at stderr: its engine logs
     to stdout, and one line of that is one line in the middle of the prompt.
@@ -732,13 +734,29 @@ def _search(
     stop it just as surely. GEPA also installs a file stopper, `gepa.stop` in
     the run dir, which ends any run cleanly after the current iteration.
     """
+    # Imported here rather than at the top: `gepa` is an optional dependency
+    # group, and the rest of this module is imported without it.
+    from gepa.utils.stop_condition import ScoreThresholdStopper
+
     extra: dict[str, Any] = {"reflection_prompt_template": templates} if templates else {}
+    # Stop once a candidate scores 1.0 on every validation example: nothing
+    # can score higher, and a run was seen spending 110 more iterations on
+    # batches that already passed. What this gives up: a candidate at 1.0 on
+    # the validation examples can still fail training cases, and stopping
+    # here means the search no longer learns from those. GEPA combines these
+    # stoppers with `max_metric_calls` and its own file stopper, and stops
+    # when any one of them says to.
+    stoppers: list[Any] = [ScoreThresholdStopper(1.0)]
     if iterations is not None:
-        extra["stop_callbacks"] = [
+        stoppers += [
             _More(iterations, lambda state: state.i),
             _More(budget, lambda state: state.total_num_evals),
         ]
         budget = None
+    extra["stop_callbacks"] = stoppers
+    if minibatch is not None:
+        # The target's own batch size; without it GEPA uses three.
+        extra["reflection_minibatch_size"] = minibatch
     with contextlib.redirect_stdout(sys.stderr):
         return gepa.optimize(
             seed_candidate=seed_candidate,
@@ -756,7 +774,8 @@ def _search(
 
 def _working(adapter, valset: list[Any], candidate: dict[str, str], label: str) -> dict:
     """The text the agent runs, scored on the validation examples by the same
-    adapter, as the `working` block of the report. `len(valset)` rollouts.
+    adapter, for the `compare:` line. `len(valset)` rollouts. Prints nothing:
+    the `compare:` line is the only output of the comparison.
 
     For a turn target, the working text is charged against the cost
     baselines the search left behind: `TurnAdapter._remember` keeps the
@@ -765,17 +784,9 @@ def _working(adapter, valset: list[Any], candidate: dict[str, str], label: str) 
     candidate's cost. The extract adapter keeps no baseline, so
     `make gepa-extract` is not affected.
     """
-    say(f"\nworking: scoring {label} on the {len(valset)} validation examples")
     scores = adapter.evaluate(valset, candidate).scores
     mean = sum(scores) / len(scores) if scores else None
-    if mean is not None:
-        say(f"          {label} scored {mean:.3f}")
-    return {
-        "label": label,
-        "val": round(mean, 4) if mean is not None else None,
-        "scores": [round(s, 4) for s in scores],
-        "chars": sum(len(text) for text in candidate.values()),
-    }
+    return {"label": label, "val": mean}
 
 
 def _compare_with_working(
@@ -842,7 +853,6 @@ def _pareto(
     path: Path | None,
     name: str | None = None,
     holdout: dict | None = None,
-    working: dict | None = None,
 ) -> None:
     """Write the report, and print it. Always to `out/`, and to `path` as well.
 
@@ -915,10 +925,6 @@ def _pareto(
         "candidates": rows,
     }
 
-    # After the pool and before the held-out block, so the key order is the
-    # same in every file that has it.
-    if working:
-        document["working"] = working
     if holdout:
         document["holdout"] = holdout
 

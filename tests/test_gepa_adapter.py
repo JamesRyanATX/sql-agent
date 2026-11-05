@@ -194,6 +194,23 @@ def test_a_prompt_over_the_limit_reports_zero_metric_calls(loop, scripted):
     assert result.num_metric_calls == 0
 
 
+@pytest.mark.parametrize("nothing", ["", "  \n "])
+def test_an_empty_prompt_scores_zero_on_every_case_and_calls_nothing(
+    nothing, loop, scripted
+):
+    """The reflection model sometimes returns no text. Observed: the empty
+    prompt that resulted scored above a deliberately wrong seed and became a
+    parent. The agent refuses to load an empty prompt, so the search does."""
+    adapter = ExtractAdapter(loop)
+    result = adapter.evaluate(cases(3), {COMPONENT: nothing}, capture_traces=True)
+
+    assert result.scores == [0.0, 0.0, 0.0]
+    assert scripted["calls"] == [] and adapter.calls == 0
+    assert result.num_metric_calls == 0
+    for t in result.trajectories:
+        assert "The prompt is empty" in t.score.text()
+
+
 def test_a_run_batch_leaves_the_metric_call_count_to_gepa(loop, scripted):
     result = ExtractAdapter(loop, max_chars=1_000).evaluate(cases(2), {COMPONENT: "p"})
     assert result.num_metric_calls is None

@@ -10,14 +10,31 @@
   ],
   "pool": {
     "candidates": 3,
-    "eligible": 3,
-    "metric_calls": 150,
+    "eligible": 2,
+    "metric_calls": 26,
     "seed_index": 0
   },
   "candidates": [
     {
       "index": 0,
       "seed": true,
+      "val": 0.0,
+      "scores": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "best_on": [],
+      "chars": 630,
+      "components": {
+        "extract": "A query just ran successfully. Write notes that will save work on the next question.\n\nFollow these rules:\n1. Counting questions (\"how many ...\"): save the number the query returned in the note, so the count never has to be run again.\n2. Revenue and other totals: in the recipe's sql_fragment give only the aggregate expression, for example `sum(qty * price)`. Leave out FROM, JOIN and WHERE.\n3. Queries that join tables: do not paste the join. Explain in words in the sql_fragment which tables are linked.\n4. Breakdowns by a column (GROUP BY): file one note for each group, and give them all the same name, the name of the column."
+      }
+    },
+    {
+      "index": 1,
+      "seed": false,
       "val": 0.4,
       "scores": [
         1.0,
@@ -30,32 +47,9 @@
         1,
         5
       ],
-      "chars": 90,
+      "chars": 2418,
       "components": {
-        "extract": "A query just ran successfully. Write down what you learned from it as notes for next time."
-      }
-    },
-    {
-      "index": 1,
-      "seed": false,
-      "val": 1.0,
-      "scores": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ],
-      "best_on": [
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "chars": 2768,
-      "components": {
-        "extract": "You are a durable-memory writer for a SQL query node. A query has already run successfully. Read the node message (question, schema findings, and SQL) together with the executed SQL, and write compact, reusable notes for a future query author. Do not rerun the query, explain the result, or report returned rows or values.\n\nRecord only information supported by the inputs:\n\n- `[schema_fact]` — one durable schema or business-rule fact per note. Capture relevant table and column roles, types or nullability, join keys and cardinality, status/enum meanings, metric definitions, exclusions, timestamp caveats, NULL behavior, and duplicate-prevention rules.\n- `[recipe]` — the reusable method for answering this query. Include the required joins, filters, calculations, aggregation, grouping, ordering, limits, and any pre-aggregation or refund/failed-row handling. Include the successful SQL as its `sql_fragment`, preserving important semantics such as `COALESCE`, status filters, and ordering.\n\nUse this format and return only notes, with no preamble or closing text:\n\n[schema_fact] short_concise_name: One concise, durable statement.\n[recipe] short_concise_name: One concise sentence describing the reusable method.\n    sql_fragment: the successful SQL\n\nUse short identifiers (preferably under 64 characters), not paragraphs. Keep descriptions to one concise sentence, preferably under about 160 characters; put detail into separate facts or the SQL rather than making a long recipe title or explanation. Emit one recipe for the executed query and as many focused schema facts as are genuinely useful, without redundant restatements.\n\nNever save a mutable query answer as a schema fact: omit current row counts, sums, percentages, dates, top-N members, returned IDs/names, or claims such as “the table currently has 200 rows.” A count or percentage is the query’s answer, not a schema rule. Save the rule that produces it instead—for example, retain that a non-null boolean `discontinued` column uses `TRUE` for discontinued products, and put counting `WHERE discontinued = TRUE` in the recipe. Preserve stable query parameters such as status values and `LIMIT` values.\n\nWhen the current inputs support them, preserve domain distinctions such as:\n- completed orders versus shipped or refunded orders;\n- order-item revenue (`SUM(qty * price)`) versus captured cash net of refunds;\n- using `payment.status = 'captured'` when a timestamp such as `captured_at` can also exist on failed payments;\n- linking refunds through `refund.payment_id`, pre-aggregating refunds before joining, and accounting for multiple payment rows per order.\n\nThese examples are patterns, not facts to assert without evidence in the current input. Do not invent business rules or schema details."
+        "extract": "A SQL query has just run successfully. Using the Question, the actual SQL that ran, its returned results, and the Schema findings, write compact reusable notes that prevent unnecessary work on later questions. Use the explicitly executed SQL as the authority; do not copy from a merely suggested query if it differs.\n\nGrounding is mandatory:\n- Every `sql_fragment` must be a verbatim, case-sensitive, contiguous substring of the SQL that ran. Preserve capitalization, spacing, identifiers, and punctuation. Do not lowercase `SUM`, add a semicolon, add aliases, or put Markdown quotes/backticks around the fragment.\n- `sql_fragment` must contain SQL only. Never append explanations, table names, or prose to it.\n- For revenue and other totals, put only the exact aggregate expression in `sql_fragment` (for example, copy `SUM(oi.qty * oi.price)` from the query). Omit `FROM`, `JOIN`, `ON`, and `WHERE`.\n- Never paste a join clause. Record the relationship in the recipe description or a `schema_fact` in words instead. For example: “order_item is linked to orders by order_item.order_id = orders.id.” This prose must still be supported by the SQL or schema findings.\n- Never claim a filter, join, calculation, or table that the executed query did not use.\n\nCounting questions:\n- For “how many,” row-count, or other counting questions, include the exact number returned by the query in the note so it need not be run again. Do not invent or recompute the number. For grouped counts, record each group’s returned number.\n\nBreakdowns:\n- If the query has a `GROUP BY`, create one note for each returned group.\n- Give every such note exactly the same `name`: the grouped column’s name, not the group value. Put the group value and its result in the description.\n\nUse this output shape and emit notes only:\n[recipe] <name>: <reusable meaning, result when applicable, and any join/filter explanation in prose>\n    sql_fragment: <exact SQL substring>\n[schema_fact] <name>: <reusable schema or business fact>\n\nWhen relevant to this schema, preserve these conventions: completed orders are identified by `orders.status = 'completed'`; `shipped` and `refunded` are separate statuses; order-item revenue is `qty * price` from `order_item`, linked to `orders` through `order_item.order_id = orders.id`; `payment` and `refund` are not needed for order-item revenue unless the question specifically means captured cash net of refunds."
       }
     },
     {
@@ -76,22 +70,10 @@
         4,
         5
       ],
-      "chars": 2727,
+      "chars": 2626,
       "components": {
-        "extract": "You are a durable-memory writer for a SQL query node. The query has already succeeded. Inputs contain the node message (question, schema findings, and SQL) and a separate executed-SQL string. Read both and write compact, reusable notes for a future query author. Do not rerun the query, explain results, or report rows or values.\n\nUse only information supported by the inputs. Emit:\n[schema_fact] short_name: One durable schema or business-rule fact.\n[recipe] short_name: One concise sentence describing the executed query’s reusable method.\n    sql_fragment: the executed SQL\n\nEmit exactly one recipe and only useful, nonredundant facts. Facts may cover table/column roles, types or nullability, join keys/cardinality, status meanings, metric definitions, exclusions, timestamp or NULL behavior, and duplicate-prevention rules. The recipe should capture the actual joins, filters, calculations, grouping, aggregation, ordering, limits, and any pre-aggregation or failed/refund handling.\n\nThe `sql_fragment` is critical: copy the SQL from the separate executed-SQL field verbatim. It must be that statement, not an equivalent rewrite or the SQL in the node message when they differ. Do not add a CTE, change aliases, casing, whitespace, literals, or clauses, and do not reformat it. Preserve `COALESCE`, status filters, ordering, limits, and all other semantics. Use schema findings for durable facts, but make the recipe describe what actually ran.\n\nUse short identifiers, preferably under 64 characters, and one concise sentence per note, preferably under 160 characters. Return only notes, with no preamble, closing text, or code fences. Prefer durable conventions over one-off observations.\n\nNever save a mutable query answer as a fact: omit current counts, sums, percentages, dates, top-N members, returned IDs or names, and claims about current table contents. Save the rule that produces the answer, and preserve stable parameters such as status values, date-boundary logic, and `LIMIT` values.\n\nWhen supported by the current inputs, preserve distinctions such as completed versus shipped or refunded orders; order-item revenue (`SUM(qty * price)`) versus captured payment revenue net of refunds; `payment.status = 'captured'` versus `captured_at` when failed payments may have a capture timestamp; `payment.amount` and refund amounts; joins through `orders.customer_id`, `payment.order_id`, and `refund.payment_id`; pre-aggregating refunds before joining; multiple payment rows per order; `COALESCE` and NULL handling; `UPPER(region)` for inconsistent region casing; and half-open PostgreSQL last-quarter boundaries using `date_trunc`. These are patterns only: do not assert them without evidence in the current inputs."
+        "extract": "A SQL query has just succeeded. Given the Question, the SQL actually executed, its returned results, and the Schema findings, emit compact durable notes that capture reusable query rules and prevent repeated discovery. Treat the executed SQL as authoritative; ignore any suggested SQL that differs.\n\nGrounding:\n- Every sql_fragment must be a verbatim, case-sensitive, contiguous substring of the executed SQL. Preserve capitalization, whitespace, identifiers, and punctuation exactly. Do not add aliases, semicolons, or Markdown quotes/backticks.\n- A fragment must be semantically informative, not merely a bare COUNT(*), aggregate function, table, or column. For a count, include the exact count expression and the FROM/WHERE scope that defines it; include GROUP BY and necessary join context when present. Use the full executed statement when safest. A standalone JOIN or ON fragment is not useful; when a join gives the query meaning, copy it only as part of a larger exact SQL span and explain the relationship in prose.\n- The fragment must contain SQL only. Never append explanations, table names, or prose. Never claim a filter, join, calculation, or table that the executed SQL did not use.\n- For revenue and other totals, use only the exact aggregate expression in sql_fragment (for example, SUM(oi.qty * oi.price)); put filters, joins, and scope in prose instead.\n\nTreat returned values as a snapshot, not as durable facts. Do not state current counts, percentages, sums, totals, or row values as timeless claims, and never turn Schema findings such as “750 cancelled orders” into a schema_fact. State the rule, formula, filter, and scope that produced the result instead. Do not invent or recompute numbers.\n\nFor a GROUP BY, emit one recipe per returned group. Every such recipe must have exactly the grouped column’s name as its name, never the group value. Put the returned group value and reusable rule in the description; do not store the group’s transient count.\n\nWhen relevant and supported, preserve these conventions: completed orders use orders.status = 'completed'; shipped and refunded are distinct statuses; cancelled uses the exact executed status predicate; order-item revenue is qty * price from order_item, linked to orders by order_item.order_id = orders.id; payment and refund are unnecessary for order-item revenue unless the question specifically means captured cash net of refunds.\n\nEmit notes only:\n[recipe] <name>: <reusable meaning, formula, filter, and relationship explanation in prose>\n    sql_fragment: <exact SQL substring>\n[schema_fact] <name>: <stable reusable schema or business fact>"
       }
     }
-  ],
-  "working": {
-    "label": "config/prompts/extract.md",
-    "val": 1.0,
-    "scores": [
-      1.0,
-      1.0,
-      1.0,
-      1.0,
-      1.0
-    ],
-    "chars": 2076
-  }
+  ]
 }
