@@ -105,7 +105,9 @@ def a_run(monkeypatch, tmp_path, well_behaved):
 def _case(i: int) -> ExtractCase:
     return ExtractCase.authored(
         name=f"case-{i}",
-        question="what was revenue last quarter?",
+        # Numbered, so each case has its own question and a report that lists
+        # the questions can be checked for order.
+        question=f"what was revenue in quarter {i}?",
         sql=SQL,
         findings="[(1234.50,)]",
     )
@@ -281,12 +283,16 @@ def test_the_report_is_written_without_touching_stdout(a_pool, tmp_path):
 
 def test_the_examples_are_the_valset_in_the_order_gepa_was_given_it(a_pool, tmp_path):
     """GEPA keys its scores by position, so E1 has to be `valset[0]`. An
-    extract case has no question, so its name is its label."""
+    extract case is labelled by the question its message opens with."""
     path = tmp_path / "report.json"
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
 
-    names = [case.name for case in a_pool["valset"]]
+    names = [
+        case.user_message.split("\n", 1)[0].removeprefix("Question:").strip()
+        for case in a_pool["valset"]
+    ]
+    assert len(set(names)) == len(names) and all("quarter" in n for n in names)
     assert json.loads(path.read_text())["examples"] == names
     assert f"E1  {names[0]}" in result.stderr
     assert f"E2  {names[1]}" in result.stderr
@@ -310,6 +316,31 @@ def test_every_candidate_is_listed_with_the_examples_it_is_best_on(a_pool, tmp_p
     assert list(rows[0]) == [
         "index", "seed", "val", "scores", "best_on", "chars", "components",
     ]
+
+
+def test_an_example_every_candidate_failed_has_no_best_candidate(
+    a_run, monkeypatch, tmp_path
+):
+    """GEPA lists every candidate as best on an example they all scored 0 on,
+    because they tie. Observed in a tools run: nine candidates, all 0.00 on
+    one example, all reported as best on it."""
+    monkeypatch.setattr(
+        gepa,
+        "_search",
+        lambda *a, **k: FakeResult(
+            [{COMPONENT: a_run}, {COMPONENT: BETTER}],
+            [0.5, 0.45],
+            val_subscores=[{0: 0.0, 1: 1.0}, {0: 0.0, 1: 0.9}],
+            per_val_instance_best_candidates={0: {0, 1}, 1: {0}},
+        ),
+    )
+    path = tmp_path / "report.json"
+
+    CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
+
+    document = json.loads(path.read_text())
+    assert [r["best_on"] for r in document["candidates"]] == [[2], []]
+    assert document["pool"]["eligible"] == 1
 
 
 def test_the_report_is_byte_stable_across_runs(a_pool, tmp_path):

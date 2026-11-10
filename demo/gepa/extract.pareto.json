@@ -2,11 +2,11 @@
   "target": "extract",
   "score": "0 when the call failed, nothing was recorded, no recipe was recorded, a note records a count, or a note overwrites or duplicates a filed name; otherwise the fraction of recipes whose SQL fragment is copied from the query that ran and carries more than a bare table or function name.",
   "examples": [
-    "60dcead8-what-was-our-total-revenue",
-    "55507270-what-order-statuses-exist-and-how-ma",
-    "993826dc-what-regions-do-we-have-and-how-many",
-    "7da7b613-how-many-customers-do-we-have",
-    "ad9a336e-which-regions-are-our-biggest-by-rev"
+    "what was our total revenue?",
+    "what order statuses exist, and how many orders have each?",
+    "what regions do we have, and how many customers in each?",
+    "how many customers do we have?",
+    "which regions are our biggest by revenue?"
   ],
   "pool": {
     "candidates": 3,

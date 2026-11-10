@@ -387,16 +387,25 @@ def test_a_longer_candidate_is_not_warned_about_by_the_gate(loop, scripted, caps
 
 
 def test_an_example_is_labelled_by_its_question_or_else_its_name():
-    """The report numbers its examples and labels each one. A turn case has a
-    question; an extract case has only the name the harvest gave it."""
+    """The report numbers its examples and labels each one with its question,
+    so the extract report and the tools report list their examples the same
+    way. A turn case has a question. An extract case has it as the first line
+    of the message its node was sent, and falls back to the name the harvest
+    gave it when the message does not open with one."""
     from tools.gepa.cases import ExtractCase
     from tools.gepa.gates import _asked
 
-    extract = [ExtractCase.authored(name="obs-1", question="q", sql="SELECT 1", findings="f")]
+    asked = ExtractCase(
+        name="60dcead8-what-was-our-total-revenue",
+        user_message="Question: what was our total revenue?\n\nSQL that ran:\nSELECT 1",
+        sql="SELECT 1",
+    )
+    unlabelled = ExtractCase(name="obs-1", user_message="SQL that ran:\nSELECT 1", sql="SELECT 1")
 
     assert _asked(CASES, 1) == "how many customers are in the west region?"
-    assert _asked(extract, 0) == "obs-1"
-    assert _asked(extract, 5) == "5", "a key outside the valset is printed as itself"
+    assert _asked([asked], 0) == "what was our total revenue?"
+    assert _asked([unlabelled], 0) == "obs-1"
+    assert _asked([asked], 5) == "5", "a key outside the valset is printed as itself"
 
 
 def test_a_survivor_line_states_how_many_probes_it_passes(loop, scripted, capsys):

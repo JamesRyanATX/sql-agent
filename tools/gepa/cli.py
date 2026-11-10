@@ -882,6 +882,16 @@ def _pareto(
         key: sorted(indices)
         for key, indices in (result.per_val_instance_best_candidates or {}).items()
     }
+    # An example nobody scored above 0 on has no best candidate to name. GEPA
+    # lists every candidate there, because they tie at 0, and a report that
+    # repeats that marks an example every candidate failed as one every
+    # candidate is best on.
+    failed_by_all = {
+        key
+        for key in keys
+        if not any(row.get(key, 0.0) > 0 for row in subscores)
+    }
+    best = {key: indices for key, indices in best.items() if key not in failed_by_all}
     scores = result.val_aggregate_scores or []
 
     rows = []

@@ -31,7 +31,7 @@ DOCUMENT = {
         },
         {
             "index": 1, "seed": False, "val": 0.333,
-            "scores": [0.0, 1.0, None],
+            "scores": [0.0, 0.9, None],
             "best_on": [], "chars": 1900,
             "components": {"extract": "a prompt nobody kept"},
         },
@@ -102,7 +102,7 @@ def test_the_summary_counts_candidates_examples_and_the_eligible():
 def test_the_summary_says_one_rather_than_ones():
     document = {**DOCUMENT, "examples": ["only"], "pool": {**DOCUMENT["pool"], "candidates": 1}}
     assert front.summary(document) == (
-        "1 candidate over 1 validation example, 2 best on at least one"
+        "1 candidate over 1 validation example, 1 best on at least one"
     )
 
 
@@ -130,7 +130,7 @@ def test_the_table_is_candidates_against_examples_with_best_on_last():
 
     assert body[0].split() == ["cand", "val", "E1", "E2", "E3", "chars", "best", "on"]
     assert body[2].split() == ["seed", "0.667", "1.00", "1.00", "0.00", "2,076", "E1-E2"]
-    assert body[3].split() == ["1", "0.333", "0.00", "1.00", "-", "1,900"]
+    assert body[3].split() == ["1", "0.333", "0.00", "0.90", "-", "1,900"]
     assert body[4].split() == ["2", "0.833", "0.50", "1.00", "1.00", "3,404", "E2-E3"]
     assert len(body) == 5, "one row per candidate in the pool, eligible or not"
 
@@ -184,8 +184,8 @@ def test_best_on_is_written_as_ranges():
 
 
 def test_styled_highlights_the_top_cell_in_each_example_column():
-    """Ties are all highlighted: on E2 every candidate scored 1.00, and each
-    of them is eligible to be picked on that example."""
+    """Ties are all highlighted: on E2 the seed and the longer prompt both
+    scored 1.00, and each of them is eligible to be picked on that example."""
     import click
 
     styled = front.render(DOCUMENT, styled=True)
@@ -194,7 +194,7 @@ def test_styled_highlights_the_top_cell_in_each_example_column():
     top = click.style("1.00", fg="green", bold=True)
 
     assert seed.count(top) == 2, "E1 and E2"
-    assert nobody.count(top) == 1, "E2 only; 0.00 on E1 is not the top"
+    assert "\x1b[" not in nobody, "0.90 on E2 is below the top, so nothing is styled"
     assert longer.count(top) == 2, "E2 and E3"
     assert click.style("0.50", fg="green", bold=True) not in longer
 
@@ -391,3 +391,23 @@ def test_no_files_says_so_rather_than_printing_nothing(capsys):
     report with nothing in it."""
     assert front.main([]) == 1
     assert "no run of that target has left one" in capsys.readouterr().out
+
+
+def test_an_example_every_candidate_failed_is_not_highlighted():
+    """Observed: every candidate scored 0.00 on one example, they tied for the
+    top score, and the report coloured all of those cells green."""
+    import re
+
+    document = {
+        **DOCUMENT,
+        "candidates": [
+            {**row, "scores": [0.0] + list(row["scores"][1:])}
+            for row in DOCUMENT["candidates"]
+        ],
+    }
+    styled = "\n".join(front.render(document, styled=True))
+
+    # A style code directly in front of a 0.00 cell would be that cell coloured.
+    assert not re.search(r"\x1b\[(?!0m)[0-9;]*m\s*0\.00", styled)
+    # The other columns are still highlighted, so the check above is not empty.
+    assert re.search(r"\x1b\[(?!0m)[0-9;]*m\s*1\.00", styled)

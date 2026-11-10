@@ -173,10 +173,22 @@ def _asked(valset, key) -> str:
     """
     if isinstance(key, int) and 0 <= key < len(valset):
         case = valset[key]
-        # A turn case has a question. An extract case has none, and its name
-        # is what the harvest gave it, which is the only label it has.
-        return getattr(case, "question", None) or getattr(case, "name", str(key))
+        # A turn case has a question. An extract case has none of its own, but
+        # the message its node was sent opens with "Question: ...", so that
+        # line is the question, and both reports list their examples the same
+        # way. The name the harvest gave the case is what is left when the
+        # message does not open that way.
+        question = getattr(case, "question", None)
+        if not question:
+            first = str(getattr(case, "user_message", "")).split("\n", 1)[0]
+            if first.startswith(QUESTION):
+                question = first[len(QUESTION):].strip()
+        return question or getattr(case, "name", str(key))
     return str(key)
+
+
+# How the message an `extract` call is sent begins; see `_asked`.
+QUESTION = "Question:"
 
 
 def turn_gate(loop, result, seed: dict[str, str], *, cases) -> list[Survivor]:

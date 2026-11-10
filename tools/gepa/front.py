@@ -40,8 +40,34 @@ import click
 PREVIEW = 120
 
 
+def best_on(document: dict[str, Any]) -> dict[int, list[int]]:
+    """Candidate index -> the examples it has the top score on, numbered from 1.
+
+    Worked out from the scores in the document, not read from its `best_on`
+    lists, so a file written before a rule here changed is shown by the rule
+    as it is now. An example whose top score is 0 is nobody's: every candidate
+    failed it, and they tie only because 0 equals 0.
+    """
+    rows = document["candidates"]
+    found: dict[int, list[int]] = {row["index"]: [] for row in rows}
+    for n in range(len(document["examples"])):
+        scored = [
+            (row["index"], row["scores"][n])
+            for row in rows
+            if n < len(row["scores"]) and row["scores"][n] is not None
+        ]
+        top = max((value for _, value in scored), default=0.0)
+        if top <= 0:
+            continue
+        for index, value in scored:
+            if value >= top:
+                found[index].append(n + 1)
+    return found
+
+
 def summary(document: dict[str, Any]) -> str:
     pool = document["pool"]
+    pool = {**pool, "eligible": sum(1 for examples in best_on(document).values() if examples)}
     return (
         f"{_plural(pool['candidates'], 'candidate')} over "
         f"{_plural(len(document['examples']), 'validation example')}, "
@@ -110,6 +136,7 @@ def _table(document: dict[str, Any], styled: bool) -> list[str]:
         max((r["scores"][n] for r in rows if r["scores"][n] is not None), default=None)
         for n in range(len(examples))
     ]
+    leads = best_on(document)
     for row in rows:
         cells = []
         for n, value in enumerate(row["scores"]):
@@ -117,14 +144,17 @@ def _table(document: dict[str, Any], styled: bool) -> list[str]:
                 cells.append(f"{'-':>{width}}")
                 continue
             cell = f"{value:>{width}.2f}"
-            cells.append(_style(cell, styled and value >= top[n], fg="green", bold=True))
+            # A top score of 0 is not highlighted: every candidate failed that
+            # example, and green would say one of them had passed it.
+            is_top = top[n] is not None and top[n] > 0 and value >= top[n]
+            cells.append(_style(cell, styled and is_top, fg="green", bold=True))
         who = _style(
             f"{_who(row):<{name_width}}", styled and bool(row.get("seed")),
             fg="yellow", bold=True,
         )
         val = f"{row['val']:.3f}" if row.get("val") is not None else "-"
         chars = f"{row['chars']:,}" if row.get("chars") is not None else "-"
-        best = _ranges(row.get("best_on") or [])
+        best = _ranges(leads[row["index"]])
         lines.append(f"{who}  {val:<5}  {'  '.join(cells)}  {chars:>6}  {best}".rstrip())
 
     lines.append("")
@@ -197,7 +227,8 @@ def finalists(
     file, and the diff is in the run's transcript. A candidate with several
     components is labelled per component either way.
     """
-    eligible = [row for row in document["candidates"] if row.get("best_on")]
+    leads = best_on(document)
+    eligible = [row for row in document["candidates"] if leads[row["index"]]]
     rows = sorted(eligible, key=lambda r: (not r.get("seed"), r["index"]))
     lines = _heading("FINALISTS", styled)
     for n, row in enumerate(rows):
