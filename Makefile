@@ -157,9 +157,9 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
 
-# All three above `gepa-%`, and they have to be: this make (3.81) takes the
-# first pattern rule that matches, and `gepa-%` matches `gepa-extract-pareto`
-# too.
+# Every explicit gepa-* rule sits above `gepa-%`, and has to: this make (3.81)
+# takes the first pattern rule that matches, and `gepa-%` matches
+# `gepa-extract-pareto` too.
 #
 # `--overfit` is a flag on the extract search, not a target the CLI knows, so
 # this is the one name here that `gepa-%` cannot pass through. It exists so
@@ -188,6 +188,21 @@ gepa-extract-overfit:  ## the extract search with the guards off: three cases, g
 GEPA_EXTRACT_FROM ?= demo/gepa/extract.short.md
 gepa-extract:  ## GEPA over the extract prompt, starting from the short prompt in demo/gepa/
 	@$(GEPA) extract $(if $(GEPA_EXTRACT_FROM),--from $(GEPA_EXTRACT_FROM)) $(GEPA_ARGS)
+
+# The config search starts from every node at `max` (demo/gepa/config.start.yaml),
+# not from the efforts in config/config.yaml, for the same reason: the search
+# is for spending fewer tokens on the same answers, and the efforts the agent
+# runs leave it little to lower. The score pays a right answer more the less
+# it spends against the starting efforts' own turn, up to half of it, so each
+# effort brought down without losing an answer is a candidate GEPA accepts.
+#
+#   make gepa-config                           start from every node at max
+#   make gepa-config GEPA_CONFIG_FROM=         start from the efforts the agent runs
+#
+# `--probe-only` scores the efforts the agent runs in either case.
+GEPA_CONFIG_FROM ?= demo/gepa/config.start.yaml
+gepa-config:  ## GEPA over the per-node efforts, starting from every node at max
+	@$(GEPA) config $(if $(GEPA_CONFIG_FROM),--from $(GEPA_CONFIG_FROM)) $(GEPA_ARGS)
 
 # The last run's scores, from tools/gepa/out/ — every search writes one there
 # whether or not --pareto asked for a tracked copy. One row per candidate, one

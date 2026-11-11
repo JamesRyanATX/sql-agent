@@ -1,0 +1,12 @@
+plan:
+  effort: max
+explore:
+  effort: max
+generate_sql:
+  effort: max
+fix:
+  effort: max
+extract:
+  effort: max
+answer:
+  effort: max

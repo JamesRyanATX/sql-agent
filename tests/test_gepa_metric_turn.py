@@ -81,18 +81,52 @@ def test_a_right_answer_with_nothing_to_compare_against_scores_one():
     assert result.feedback == []
 
 
-def test_a_cheaper_turn_than_the_seed_earns_full_marks_and_no_more():
-    """One-sided, deliberately. An unbounded reward for cheapness buys a
-    candidate that skips the explore loop, and the explore loop is what finds
-    the soft-delete column in the first place."""
+def test_the_seed_scores_half_the_cost_terms_against_itself():
+    """The seed is measured against its own turn. It gets half of each cost
+    term, so a cheaper right answer has room above it: GEPA accepts only a
+    candidate that scores strictly more than its parent, and an effort search
+    is for spending less for the same answers."""
     result = score(
-        turn(tokens_in=1000, tokens_out=100),
+        turn(tokens_in=9000, tokens_out=500, tools=tools(("list_tables", {}, False)) * 4),
         case(),
         reference((1840,)),
         baseline=Baseline(tokens=9500, tool_calls=4),
     )
 
-    assert result.terms["cost"] == 1.0
+    assert result.terms["cost"] == 0.5
+    assert result.terms["tool_calls"] == 0.5
+    assert result.value == pytest.approx(0.60 + 0.125 + 0.075)
+
+
+def test_a_cheaper_turn_than_the_seed_scores_more_up_to_half_the_spend():
+    """Full marks at half the seed's tokens, and no more below that: an
+    unbounded reward for cheapness buys a candidate that skips the explore
+    loop, and the explore loop is what finds the soft-delete column in the
+    first place. The correctness gate refuses that candidate anyway; the cap
+    means the gate is not the only thing holding it."""
+    cheaper = score(
+        turn(tokens_in=6000, tokens_out=333),
+        case(),
+        reference((1840,)),
+        baseline=Baseline(tokens=9500, tool_calls=4),
+    )
+    half = score(
+        turn(tokens_in=4500, tokens_out=250),
+        case(),
+        reference((1840,)),
+        baseline=Baseline(tokens=9500, tool_calls=4),
+    )
+    tenth = score(
+        turn(tokens_in=900, tokens_out=50),
+        case(),
+        reference((1840,)),
+        baseline=Baseline(tokens=9500, tool_calls=4),
+    )
+
+    assert cheaper.terms["cost"] == pytest.approx(0.75, abs=1e-3)
+    assert "33% less" in cheaper.text()
+    assert half.terms["cost"] == 1.0
+    assert tenth.terms["cost"] == 1.0, "capped"
 
 
 def test_a_dearer_turn_is_told_what_it_spent_it_on():
@@ -112,7 +146,7 @@ def test_a_dearer_turn_is_told_what_it_spent_it_on():
         baseline=Baseline(tokens=9500, tool_calls=4),
     )
 
-    assert result.terms["cost"] == pytest.approx(0.0)
+    assert result.terms["cost"] == pytest.approx(0.25), "a quarter at twice the seed's spend"
     assert "against the seed's 9500" in result.text()
     assert "describe_table(table='customer')" in result.text()
 

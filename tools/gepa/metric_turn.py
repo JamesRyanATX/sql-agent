@@ -273,19 +273,37 @@ def _headline(m: Match) -> str:
     return f"{_plural(m.counts[0], 'row')} came back, and some of them are wrong."
 
 
-def _cost(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
-    """One-sided. At or under the seed's tokens for this question earns 1.0.
+def _against(seed: int, spent: int) -> float:
+    """A spend against the seed's on the same question, as a term in [0, 1].
 
-    An unbounded reward for cheapness would pay most for the cheapest turn,
-    and the cheapest turn is the one that never explores. The correctness
-    gate above already refuses that, and keeping this one-sided means the
-    gate is not the only thing holding it.
+    0.5 at the seed's own spend, 1.0 at half of it or less, and falling as
+    the spend grows: a quarter at twice the seed's. The slope below the seed
+    is what lets a cheaper right answer score more than the seed, and that is
+    the whole room an effort search has. It is capped because an unbounded
+    reward for cheapness pays most for the turn that never explores; the
+    correctness gate above refuses that turn whatever this term says.
     """
+    if spent <= 0:
+        return 1.0
+    return min(2.0, seed / spent) / 2
+
+
+def _cost(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
+    """Tokens against the seed's on this question, through `_against`. A
+    cheaper turn is told by how much, so a reflection can read what the
+    saving was; a dearer one is told where the tokens went."""
     if baseline is None or not baseline.tokens:
         return 1.0, ""
+    term = _against(baseline.tokens, r.tokens)
     over = (r.tokens - baseline.tokens) / baseline.tokens
     if over <= 0:
-        return 1.0, ""
+        note = (
+            f"{r.tokens} tokens against the seed's {baseline.tokens} on this "
+            f"question — {-over:.0%} less."
+            if over < 0
+            else ""
+        )
+        return term, note
     note = (
         f"{r.tokens} tokens ({r.tokens_in} in, {r.tokens_out} out) against the "
         f"seed's {baseline.tokens} on this question — {over:.0%} more for the "
@@ -294,23 +312,29 @@ def _cost(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
     )
     if r.per_node:
         note += f"\n\nWhere they went:\n{by_node(r)}"
-    return max(0.0, 1 - over), note
+    return term, note
 
 
 def _tool_calls(r: TurnReplayed, baseline: Baseline | None) -> tuple[float, str]:
-    """Fewer calls, one-sided, plus the two shapes worth naming whatever the
-    count did. A repeat and an error are facts about a description, and they are
-    worth reading even on a turn that came in under the seed."""
+    """Calls against the seed's, through `_against`, plus the two shapes worth
+    naming whatever the count did. A repeat and an error are facts about a
+    description, and they are worth reading even on a turn that came in under
+    the seed."""
     notes = []
     term = 1.0
 
     if baseline is not None and baseline.tool_calls:
+        term = _against(baseline.tool_calls, len(r.tools))
         over = (len(r.tools) - baseline.tool_calls) / baseline.tool_calls
         if over > 0:
-            term = max(0.0, 1 - over)
             notes.append(
                 f"{len(r.tools)} tool calls against the seed's "
                 f"{baseline.tool_calls} — {over:.0%} more:\n\n{_sequence(r)}"
+            )
+        elif over < 0:
+            notes.append(
+                f"{len(r.tools)} tool calls against the seed's "
+                f"{baseline.tool_calls} — {-over:.0%} fewer."
             )
 
     repeats = _repeats(r.tools)

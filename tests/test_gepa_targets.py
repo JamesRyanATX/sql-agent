@@ -179,13 +179,16 @@ def test_every_target_says_what_it_is_for_a_newcomer():
     assert targets.EXTRACT.rollout_tokens == 0, "one model call — do not ask"
 
 
-def test_each_target_says_in_one_sentence_what_its_score_means():
-    """The SCORE section of the report prints this. One sentence, so it ends
-    in one full stop and has no line break in it."""
+def test_each_target_says_what_its_score_means():
+    """The SCORE section of the report prints this. It ends in a full stop,
+    and every line of it is a statement of its own, not a sentence broken
+    across lines."""
     for target in targets.TARGETS.values():
-        sentence = target.score()
-        assert sentence.endswith("."), target.name
-        assert sentence.count(". ") == 0 and "\n" not in sentence, target.name
+        text = target.score()
+        assert text.endswith("."), target.name
+        for line in text.splitlines():
+            assert line.strip(), target.name
+            assert line.count(". ") == 0, (target.name, line)
 
 
 def test_the_extract_sentence_states_the_rule():
@@ -207,16 +210,18 @@ def test_the_turn_sentence_is_built_from_the_turn_metric_weights(monkeypatch):
 
     assert targets.TOOLS.score() == targets.CONFIG.score()
     assert targets.TOOLS.score() == (
-        "0 when the turn failed, wrote no SQL, its SQL never ran, or it "
-        "returned no rows where the known answer has some; otherwise a "
-        "wrong answer scores 0.60 times how closely its rows match the known "
-        "answer; a right answer scores 0.60, plus up to 0.25 for using no more "
-        "tokens than the current text's turn on the same question, plus up to "
-        "0.15 for making no more tool calls than it did."
+        "A right answer scores 0.60.\n"
+        "  + tokens, against the seed's turn on the same question: 0.125 at "
+        "the same spend, 0.25 at half or less, less the more it spends\n"
+        "  + tool calls, on the same scale: 0.075 at the same count, 0.15 at "
+        "half or fewer\n"
+        "A wrong answer scores 0.60 times how closely its rows match the known "
+        "answer.\n"
+        "0 if the turn failed, wrote no SQL, or returned no rows."
     )
 
-    monkeypatch.setitem(metric_turn.WEIGHTS, "cost", 0.35)
-    assert "plus up to 0.35 for using no more tokens" in targets.TOOLS.score()
+    monkeypatch.setitem(metric_turn.WEIGHTS, "cost", 0.30)
+    assert "0.150 at the same spend, 0.30 at half or less" in targets.TOOLS.score()
 
 
 def test_the_extract_adapter_refuses_a_prompt_past_the_growth_limit():

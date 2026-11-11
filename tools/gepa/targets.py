@@ -212,11 +212,7 @@ def _extract_notes() -> str:
     for p in probes.load(EXTRACT_COMPONENT):
         lines.append(f"  - {p.invariant}")
         lines.append(f"    {p.cites}")
-    lines.append(
-        "\nA dropped sentence passing the probes does not mean the sentence was "
-        "doing nothing: cache rot surfaces turns later, outside anything "
-        "measured here.\n"
-    )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -497,15 +493,17 @@ def _turn_score() -> str:
     from tools.gepa.metric_turn import WEIGHTS
 
     correct, cost, calls = WEIGHTS["correct"], WEIGHTS["cost"], WEIGHTS["tool_calls"]
-    return (
-        f"0 when the turn failed, wrote no SQL, its SQL never ran, or it "
-        f"returned no rows where the known answer has some; otherwise a "
-        f"wrong answer scores {correct:.2f} times how closely its rows match "
-        f"the known answer; a right answer scores {correct:.2f}, plus up to "
-        f"{cost:.2f} for using no more tokens than the current text's turn "
-        f"on the same question, plus up to {calls:.2f} for making no more "
-        f"tool calls than it did."
-    )
+    return "\n".join([
+        f"A right answer scores {correct:.2f}.",
+        f"  + tokens, against the seed's turn on the same question: "
+        f"{cost / 2:.3f} at the same spend, {cost:.2f} at half or less, "
+        f"less the more it spends",
+        f"  + tool calls, on the same scale: {calls / 2:.3f} at the same count, "
+        f"{calls:.2f} at half or fewer",
+        f"A wrong answer scores {correct:.2f} times how closely its rows match "
+        f"the known answer.",
+        "0 if the turn failed, wrote no SQL, or returned no rows.",
+    ])
 
 
 def _tools_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:

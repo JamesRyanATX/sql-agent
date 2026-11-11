@@ -252,8 +252,16 @@ make gepa-extract              # read the new prompt, searched for from a short,
 make gepa-extract > new.md     # keep it
 make gepa-extract GEPA_EXTRACT_FROM=   # search from the prompt the agent runs
 make gepa-tools                # the four tool descriptions
-make gepa-config               # the per-node effort block
+make gepa-config               # the per-node effort block, searched for from every node at max
+make gepa-config GEPA_CONFIG_FROM=     # search from the efforts the agent runs
 ```
+
+`tools` and `config` score a turn against the starting text's own turn on the
+same question: a right answer earns 0.60, and more the fewer tokens and tool
+calls it spent than that turn, up to half as many. A right answer at the same
+spend scores 0.80; one at half the spend scores 1.0. That slope is what lets
+an effort brought down without losing an answer beat the efforts it started
+from.
 
 Every one of them reads its corpus from Langfuse. `extract` reads its own
 recorded calls. `tools` and `config` read whole turns whose trace carries a
