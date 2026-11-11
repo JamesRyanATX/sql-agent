@@ -161,6 +161,16 @@ checking the pool against the invariant probes
 
 compare: started from demo/gepa/extract.short.md at 0.000, the winner scored 1.000, and the working text config/prompts/extract.md scored 1.000
 
+the invariants this prompt is the only home for:
+  - Neither kind is a census.
+    config/prompts/extract.md; CLAUDE.md, the five traps
+  - Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.
+    config/prompts/extract.md; app/graph.py grounded_in()
+  - Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.
+    config/prompts/extract.md; migrations/002_connections.sql, the (connection_id, name) unique index
+  - Every entry needs a short, stable `name` — it is the key this is filed under, and reusing a name overwrites what is already there.
+    config/prompts/extract.md; app/graph.py extract(), the 'Already filed' block
+
 --- demo/gepa/extract.short.md
 +++ candidate (val 1.000)
 @@ -1,7 +1,18 @@
@@ -190,16 +200,3 @@ compare: started from demo/gepa/extract.short.md at 0.000, the winner scored 1.0
 +[schema_fact] <name>: <stable reusable schema or business fact>
 
 630 chars -> 2626 (+317%), val 1.000 against the seed's 0.000
-
-the invariants this prompt is the only home for:
-  - Neither kind is a census.
-    config/prompts/extract.md; CLAUDE.md, the five traps
-  - Everything you record must be supported by that SQL or by the schema findings — not by what you meant to do.
-    config/prompts/extract.md; app/graph.py grounded_in()
-  - Overwriting a general rule with a special case destroys the general rule, and every later question that relied on it inherits the narrower one.
-    config/prompts/extract.md; migrations/002_connections.sql, the (connection_id, name) unique index
-  - Every entry needs a short, stable `name` — it is the key this is filed under, and reusing a name overwrites what is already there.
-    config/prompts/extract.md; app/graph.py extract(), the 'Already filed' block
-
-A dropped sentence passing the probes does not mean the sentence was doing nothing: cache rot surfaces turns later, outside anything measured here.
-

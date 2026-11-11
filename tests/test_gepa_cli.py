@@ -120,7 +120,11 @@ def test_stdout_is_the_prompt_and_stderr_is_everything_else(a_run):
     assert result.stdout == BETTER + "\n", "stdout must be prose and nothing else"
     # Not lost — a redirect leaves it on the terminal.
     assert "candidate 1" in result.stderr
-    assert "the invariants this prompt is the only home for" in result.stderr
+    heading = "the invariants this prompt is the only home for"
+    assert heading in result.stderr
+    assert result.stderr.index(heading) < result.stderr.index("\n--- "), (
+        "what the prompt has to keep is read before the diff of what changed"
+    )
 
 
 def test_a_node_with_no_metric_exits_two_and_says_what_is_missing(monkeypatch):

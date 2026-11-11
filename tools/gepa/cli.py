@@ -1042,6 +1042,10 @@ def _diff(
     and printing all four buries the edit.
     """
     say()
+    # What the text has to keep, read before what changed.
+    notes = target.notes()
+    if notes:
+        say(notes)
     for component, before in seed.items():
         after = proposed[component]
         if before == after:
@@ -1066,10 +1070,6 @@ def _diff(
         f"({(after_chars - before_chars) / before_chars:+.0%}), "
         f"val {score:.3f}{against}\n"
     )
-
-    notes = target.notes()
-    if notes:
-        say(notes)
 
 
 if __name__ == "__main__":
