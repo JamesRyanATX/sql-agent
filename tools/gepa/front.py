@@ -103,12 +103,20 @@ def _header(text: str, styled: bool) -> list[str]:
 
 
 def _score(document: dict[str, Any], styled: bool) -> list[str]:
-    """The one sentence saying what the number means, wrapped. Nothing when
-    the file has no sentence."""
-    sentence = document.get("score") or ""
-    if not sentence:
+    """What the number means, each of its lines wrapped on its own so a line
+    break in the text stays a line break here. A line starting with `+` is a
+    term added to the one above it, and its continuation sits under its text.
+    Nothing when the file has no text."""
+    text = document.get("score") or ""
+    if not text:
         return []
-    return _heading("SCORE", styled) + textwrap.wrap(sentence, width=78)
+    lines = []
+    for line in text.splitlines():
+        indent = line[: len(line) - len(line.lstrip())]
+        if line.lstrip().startswith("+"):
+            indent += "  "
+        lines += textwrap.wrap(line, width=78, subsequent_indent=indent) or [""]
+    return _heading("SCORE", styled) + lines
 
 
 def _table(document: dict[str, Any], styled: bool) -> list[str]:

@@ -118,6 +118,23 @@ def test_the_score_section_is_the_one_sentence_wrapped():
     assert len(body) > 1 and all(len(line) <= 78 for line in body), "wrapped"
 
 
+def test_a_line_break_in_the_score_text_stays_one_and_a_term_wraps_under_its_text():
+    text = (
+        "A right answer scores 0.60.\n"
+        "  + 0.25 if " + "the turn used no more tokens " * 4 + "\n"
+        "0 if the turn failed."
+    )
+    body = section(front.render({**DOCUMENT, "score": text}), "SCORE")
+
+    assert body[0] == "A right answer scores 0.60."
+    assert body[1].startswith("  + 0.25 if ")
+    assert body[2].startswith("    ") and not body[2].startswith("     "), (
+        "the continuation sits under the term's text"
+    )
+    assert body[-1] == "0 if the turn failed."
+    assert len(body) == 4 and all(len(line) <= 78 for line in body)
+
+
 def test_a_file_with_no_sentence_has_no_score_section():
     assert "SCORE" not in front.render({**DOCUMENT, "score": ""})
 
