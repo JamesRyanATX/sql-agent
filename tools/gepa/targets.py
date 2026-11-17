@@ -3,7 +3,7 @@
 `cli.py` used to assume a candidate was one text component and that the
 component was `config/prompts/<node>.md`. That assumption sat in eleven places:
 how the seed was built, how the corpus was found, how the pool was gated, how
-the winner reached stdout, how a diff was labelled. Every one of them has to
+the winner was shown, how a diff was labelled. Every one of them has to
 change the moment a candidate has four keys, which is what searching the tool
 descriptions means.
 
@@ -79,9 +79,6 @@ class Target:
     # objective; see `gates.py` for why. Takes the cases whether or not it uses
     # them, so the command can call either gate the same way.
     gate: Callable[..., list[Survivor]]
-
-    # The winner as the document stdout gets. Ends in exactly one newline.
-    render: Callable[[dict[str, str]], str]
 
     # component -> where a person would go to change it. Diff headers.
     label: Callable[[str], str]
@@ -199,10 +196,6 @@ def _extract_adapter(loop) -> Any:
     return ExtractAdapter(loop, max_chars=int(MAX_GROWTH * len(seed)))
 
 
-def _extract_render(candidate: dict[str, str]) -> str:
-    return candidate[EXTRACT_COMPONENT].strip() + "\n"
-
-
 def _extract_label(component: str) -> str:
     return str(prompts.directory() / f"{component}.md")
 
@@ -217,13 +210,15 @@ def _extract_notes() -> str:
 
 
 def _extract_score() -> str:
-    return (
-        "0 when the call failed, nothing was recorded, no recipe was recorded, "
-        "a note records a count, or a note overwrites or duplicates a filed "
-        "name; otherwise the fraction of recipes whose SQL fragment is copied "
-        "from the query that ran and carries more than a bare table or "
-        "function name."
-    )
+    """The rule in `metric_extract.score`, one statement per line."""
+    return "\n".join([
+        "The share of recipes whose SQL fragment is copied from the query that ran.",
+        "A fragment that is only a table or function name does not count as copied.",
+        "0 when the call failed or nothing was recorded.",
+        "0 when no recipe was recorded.",
+        "0 when a note records a count or a percentage.",
+        "0 when a note takes a name already filed, or two notes share a name.",
+    ])
 
 
 def _extract_check(loop, yes: bool = False, *, days: int = 30, resume: bool = False) -> int:
@@ -244,7 +239,6 @@ EXTRACT = Target(
     gate=lambda loop, result, seed, cases: gates.probe_gate(
         loop, result, seed, node=EXTRACT_COMPONENT
     ),
-    render=_extract_render,
     label=_extract_label,
     notes=_extract_notes,
     score=_extract_score,
@@ -375,29 +369,6 @@ def _tools_adapter(loop) -> Any:
     from tools.gepa.adapter import TurnAdapter
 
     return TurnAdapter(loop, to_overrides=_tools_overrides, focus=_tools_focus)
-
-
-def _tools_render(candidate: dict[str, str]) -> str:
-    """One Markdown document, a section per tool, every tool present.
-
-    All four, including the ones GEPA never mutated: the document is the
-    complete set, and a promotion that updates three and leaves one stale is
-    exactly the failure a per-component format would invite.
-
-    A description beginning with `#` would forge a section boundary, so leading
-    hashes are stripped.
-    """
-    seed = _tools_seed()
-    sections = []
-    for name in seed:
-        text = candidate.get(name, seed[name]).strip()
-        cleaned = "\n".join(line.lstrip("#").lstrip() if line.lstrip().startswith("#")
-                            else line for line in text.splitlines())
-        if cleaned != text:
-            say(f"          stripped a leading # from {name}'s description",
-                fg="yellow")
-        sections.append(f"## {name}\n\n{cleaned}")
-    return "\n\n".join(sections) + "\n"
 
 
 def _tools_label(component: str) -> str:
@@ -631,7 +602,6 @@ TOOLS = Target(
     gate=lambda loop, result, seed, cases: gates.turn_gate(
         loop, result, seed, cases=cases
     ),
-    render=_tools_render,
     label=_tools_label,
     notes=_tools_notes,
     score=_turn_score,
@@ -793,12 +763,6 @@ def _config_adapter(loop) -> Any:
     return TurnAdapter(loop, to_overrides=_config_overrides, focus=_config_focus)
 
 
-def _config_render(candidate: dict[str, str]) -> str:
-    """The block, normalised through the parser, so stdout pastes into
-    `config/config.yaml` whatever whitespace the reflection model used."""
-    return _yaml(_config_parse(candidate[CONFIG_COMPONENT]))
-
-
 def _config_label(component: str) -> str:
     return "config/config.yaml, the per-node effort blocks"
 
@@ -905,7 +869,6 @@ CONFIG = Target(
     gate=lambda loop, result, seed, cases: gates.turn_gate(
         loop, result, seed, cases=cases
     ),
-    render=_config_render,
     label=_config_label,
     notes=_config_notes,
     score=_turn_score,

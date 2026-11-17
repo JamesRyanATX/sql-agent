@@ -4,9 +4,9 @@ One command, needing no other: it finds the corpus, searches, writes the report,
 gates the pool and prints the winner. Fresh corpus and fresh run dir every time,
 so a run is never partly made of the last one.
 
-stdout is the promoted text and nothing else. Progress, the report, the diff and
-the gate go to stderr, so `make gepa-extract > new.md` leaves prose with no
-commentary.
+Nothing is written to stdout. Progress, the report, the diff and the gate go
+to stderr, and the whole of it is kept in tools/gepa/out/<target>.run.txt. The
+diff is the record of what the search found.
 
 What a target *is* — its seed, its corpus, its gate, how its winner is rendered
 — lives in `targets.py`. Everything here is the same whichever one is running.
@@ -18,9 +18,9 @@ validation, the gate reporting and deciding nothing, and afterwards every
 candidate in the pool scored on the cases the search never saw. It exists to
 be shown failing.
 
-Exit: 0 text is on stdout, 1 preflight, 2 the target has no metric, 3 nothing
-scored better than the text the search started from. Through `make` these all arrive as
-make's own 2 — an empty stdout is the portable signal.
+Exit: 0 the search found a better text, 1 preflight, 2 the target has no
+metric, 3 nothing scored better than the text the search started from. Through
+`make` these all arrive as make's own 2.
 """
 
 from __future__ import annotations
@@ -179,7 +179,8 @@ def cli(
     iterations: int | None,
     seed_from: Path | None,
 ) -> None:
-    """GEPA over one searchable thing. The new text goes to stdout.
+    """GEPA over one searchable thing. The winner is shown as a diff against
+    the text the search started from.
 
     \b
       make gepa-extract              read it
@@ -283,7 +284,7 @@ def _run(
     iterations: int | None = None,
     working: tuple[dict[str, str], str] | None = None,
 ) -> None:
-    """The search, from corpus to stdout. Split from the command so the
+    """The search, from corpus to the diff. Split from the command so the
     transcript can be held open around every way out of it.
 
     `working` is the text the agent runs and where it lives, given only when
@@ -454,7 +455,7 @@ def _run(
         say(
             f"\nThe text the search started from scored {seed_score:.3f} and "
             f"the best survivor {best.score:.3f}, so nothing beat the starting "
-            f"text, and stdout is empty.",
+            f"text.",
             fg="yellow",
         )
         raise SystemExit(NO_IMPROVEMENT)
@@ -463,9 +464,6 @@ def _run(
         _compare_with_working(chosen, seed_candidate, seed_score, best.score, compared)
 
     _diff(seed_candidate, best.candidate, chosen, score=best.score, seed_score=seed_score)
-
-    # The one write to stdout.
-    sys.stdout.write(chosen.render(best.candidate))
 
 
 # -------------------------------------------------------------------- preflight
@@ -501,9 +499,8 @@ def _resolve(name: str) -> Target:
 def ask_before_spending(yes: bool = False) -> None:
     """The last chance not to spend the money.
 
-    On stderr, confirmation included: a prompt on stdout would land in the
-    middle of the artifact. Refuses a pipe rather than spending into one, which
-    is `make gepa-tools > new.md` and every CI job.
+    On stderr, confirmation included, like everything else this prints.
+    Refuses a pipe rather than spending into one, which is every CI job.
     """
     if yes:
         return
@@ -805,7 +802,7 @@ def _compare_with_working(
     )
     if working["val"] is not None and best_score < working["val"]:
         say(
-            f"The text on stdout scored {best_score:.3f}, lower than the "
+            f"The winner scored {best_score:.3f}, lower than the "
             f"{working['val']:.3f} of the text the agent runs, "
             f"{working['label']}. It is not a replacement for it.",
             fg="yellow",

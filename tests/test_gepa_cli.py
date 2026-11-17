@@ -1,4 +1,4 @@
-"""The command's contract: stdout is the prompt, and nothing else ever is.
+"""The command's contract: nothing on stdout, and the winner is the diff on stderr.
 
 A stray `click.echo` without `err=True` or a GEPA log line both produce the same
 failure — a prompt file with commentary in it, which the next run reads back as
@@ -113,12 +113,12 @@ def _case(i: int) -> ExtractCase:
     )
 
 
-def test_stdout_is_the_prompt_and_stderr_is_everything_else(a_run):
+def test_nothing_is_on_stdout_and_the_winner_is_the_diff(a_run):
     result = CliRunner().invoke(gepa.cli, ["extract"])
 
     assert result.exit_code == 0
-    assert result.stdout == BETTER + "\n", "stdout must be prose and nothing else"
-    # Not lost — a redirect leaves it on the terminal.
+    assert result.stdout == ""
+    assert f"+{BETTER}" in result.stderr, "the diff shows the winner"
     assert "candidate 1" in result.stderr
     heading = "the invariants this prompt is the only home for"
     assert heading in result.stderr
@@ -265,13 +265,13 @@ def a_pool(a_run, monkeypatch):
 
 def test_the_report_is_written_without_touching_stdout(a_pool, tmp_path):
     """The whole command's contract, applied to a second artifact: a file is
-    written, a table is printed, and the prompt on stdout is untouched."""
+    written, a table is printed, and nothing reaches stdout."""
     path = tmp_path / "artifacts" / "extract.pareto.json"
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--pareto", str(path)])
 
     assert result.exit_code == 0, result.stderr
-    assert result.stdout == BETTER + "\n", "the report must not reach stdout"
+    assert result.stdout == ""
 
     document = json.loads(path.read_text())
     assert list(document) == ["target", "score", "examples", "pool", "candidates"]
@@ -381,7 +381,7 @@ def test_a_result_with_no_per_example_scores_says_so_rather_than_crashing(
     result = CliRunner().invoke(gepa.cli, ["extract"])
 
     assert result.exit_code == 0
-    assert result.stdout == BETTER + "\n"
+    assert f"+{BETTER}" in result.stderr
     assert "no per-example scores" in result.stderr
     assert not gepa.pareto("extract").exists()
 
@@ -590,15 +590,14 @@ def test_yes_starts_a_run_without_asking(a_run, the_real_question):
     assert "Start?" not in result.stderr
 
 
-def test_the_tools_winner_is_a_document_with_every_tool_in_it(a_tools_run):
-    """Four components cannot be one prompt file, so stdout becomes a section
-    per tool — all four, including the three nobody mutated."""
+def test_the_tools_winner_is_a_diff_of_the_one_tool_that_changed(a_tools_run):
+    """Four components, one of them edited: the diff shows the edited
+    description under the place in app/tools.py it belongs."""
     result = CliRunner().invoke(gepa.cli, ["tools", "--yes"])
 
     assert result.exit_code == 0
-    for name in a_tools_run[0]:
-        assert f"## {name}\n" in result.stdout
-    assert "Every table, with its column count." in result.stdout
+    assert result.stdout == ""
+    assert "+Every table, with its column count." in result.stderr
     # The diff names where a person would go to change it.
     assert "app/tools.py SCHEMAS[list_tables]" in result.stderr
 
@@ -645,17 +644,12 @@ def a_config_run(monkeypatch, tmp_path, well_behaved):
     return seed, better
 
 
-def test_the_config_winner_is_a_yaml_block_that_pastes_into_the_file(a_config_run):
-    """`make gepa-config > new.yaml`: six nodes, one key each, normalised —
-    the comment the fake winner carried is gone, because it went through the
-    same parser a candidate is scored through."""
+def test_the_config_winner_is_a_diff_of_the_effort_blocks(a_config_run):
     result = CliRunner().invoke(gepa.cli, ["config", "--yes"])
 
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.startswith("plan:\n  effort: ")
-    assert "explore:\n  effort: low\n" in result.stdout
-    assert "# was" not in result.stdout
-    assert result.stdout.count("effort:") == 6
+    assert result.stdout == ""
+    assert "+  effort: low  # was" in result.stderr
     # The diff names where a person would go.
     assert "config/config.yaml" in result.stderr
 
@@ -789,7 +783,7 @@ def test_the_held_out_cases_are_scored_for_every_candidate_and_written(
     assert not (tmp_path / "extract.pareto.json").exists()
 
 
-def test_a_candidate_the_gate_discards_still_reaches_stdout(a_run, monkeypatch):
+def test_a_candidate_the_gate_discards_is_still_the_winner(a_run, monkeypatch):
     """The gate says what it would have done, in red, and the run keeps the
     candidate anyway: that is the demonstration. The model here honours the
     invariants under the seed and records a census under the candidate, so
@@ -811,7 +805,7 @@ def test_a_candidate_the_gate_discards_still_reaches_stdout(a_run, monkeypatch):
     assert result.exit_code == 0, result.stderr
     assert "DISCARDED" in result.stderr, "the gate spoke"
     assert "decided nothing" in result.stderr, "and was ignored"
-    assert result.stdout == BETTER + "\n", "kept whatever it produced"
+    assert f"+{BETTER}" in result.stderr, "kept whatever it produced"
     assert "5 of 5" in result.stderr, "and the unseen cases say it is worse"
 
 
@@ -1040,7 +1034,7 @@ def test_from_makes_the_files_text_the_seed_the_search_receives(
 
     assert result.exit_code == 0, result.stderr
     assert seen["seed_candidate"] == {COMPONENT: SHORT}, "read and stripped"
-    assert result.stdout == BETTER + "\n"
+    assert f"+{BETTER}" in result.stderr
 
 
 def test_from_says_which_text_the_search_started_from(a_run, monkeypatch, short_file):
@@ -1239,7 +1233,7 @@ def test_with_from_the_winner_is_compared_with_the_working_text(
         f"and the working text {label} scored 1.000"
     ) in result.stderr
     assert "is not a replacement" not in result.stderr, "not below, so no warning"
-    assert result.stdout == BETTER + "\n"
+    assert f"+{BETTER}" in result.stderr
 
 
 def test_a_winner_below_the_working_text_is_printed_with_a_warning(
@@ -1253,10 +1247,10 @@ def test_a_winner_below_the_working_text_is_printed_with_a_warning(
 
     label = prompts.directory() / "extract.md"
     assert (
-        f"The text on stdout scored 0.800, lower than the 1.000 of the text the "
+        f"The winner scored 0.800, lower than the 1.000 of the text the "
         f"agent runs, {label}. It is not a replacement for it."
     ) in result.stderr
-    assert result.stdout == BETTER + "\n"
+    assert f"+{BETTER}" in result.stderr
 
 
 # --------------------------------------------------------------- --resume
@@ -1319,7 +1313,7 @@ def test_resume_with_a_saved_search_that_started_elsewhere_is_refused_after_load
     a_run, monkeypatch
 ):
     """Candidate 0 is the saved search's seed. It is not this run's, so the
-    run stops before the report, the gate or stdout."""
+    run stops before the report, the gate or the diff."""
     gepa.run_dir("extract").mkdir(parents=True)
     (gepa.run_dir("extract") / "gepa_state.bin").write_bytes(b"")
     monkeypatch.setattr(

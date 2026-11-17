@@ -318,12 +318,12 @@ only way to continue one, and keeps both.
 One target per node — `make gepa-answer`, `make gepa-plan` and the rest exist
 too, and exit saying what a search for that node would need first.
 
-**stdout is the new prompt and nothing else.** The harvest, the search, the probe
-gate and the diff all report on stderr, so the redirect stays readable while it
-runs and the file it leaves holds prose with no commentary. Nothing is written
-into `config/prompts/` and nothing is committed: you paste the winner in, and
-the commit message says which failure the new wording addresses — the one thing
-no run can produce.
+**The diff is the result.** The harvest, the search, the probe gate and the
+diff all print on stderr, and the whole of it is kept in
+`tools/gepa/out/<target>.run.txt`. Nothing is written into `config/prompts/` and
+nothing is committed: you paste the winner in from the diff, and the commit
+message says which failure the new wording addresses — the one thing no run can
+produce.
 
 It reads Langfuse for its corpus, so [Telemetry](#telemetry) has to be on and
 some turns have to have happened. It calls a model many times and costs real

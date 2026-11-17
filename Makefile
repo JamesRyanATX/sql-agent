@@ -119,7 +119,6 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # last harvest, for all three.
 #
 #   make gepa-tools                                    read it
-#   make gepa-tools > new.md                           keep it
 #   make gepa-config GEPA_ARGS=--probe-only            the seed over all 19,
 #                                                      and where its tokens went
 #   make gepa-extract GEPA_ARGS=--probe-only           check the invariants
@@ -152,7 +151,7 @@ test-live:  ## includes tests that call the Anthropic API and cost tokens
 # every reflection read is kept beside the run, in
 # tools/gepa/out/run/<target>/reflections.jsonl.
 #
-# `@` because make echoes recipes to stdout, and stdout is the artifact.
+# `@` because make echoes recipes to stdout, and the command prints nothing there.
 # Not `.PHONY`: make skips pattern rules for phony targets, and nothing named
 # `gepa-*` is ever a file.
 GEPA = uv run --group gepa python -m tools.gepa
@@ -233,7 +232,7 @@ gepa-%-reset:  ## delete what the last run of gepa-<target> left in tools/gepa/o
 # does not apply, and `reset-gepa` does not match `gepa-%`.
 reset-gepa: gepa-extract-reset gepa-extract-overfit-reset gepa-tools-reset gepa-config-reset  ## all four
 
-gepa-%:  ## GEPA over one searchable thing: new text on stdout, progress on stderr
+gepa-%:  ## GEPA over one searchable thing: the diff and the report, on stderr
 	@$(GEPA) $* $(GEPA_ARGS)
 
 # --- demo: presentation & recording -----------------------------------------

@@ -10,14 +10,18 @@ Two things this does not do. It does not measure correctness: a prompt can score
 not measure the flywheel, because whether the cache makes turn N+1 cheaper is a
 property of a sequence and one `extract` call is not one.
 
-The score is one number per case, and it can be said in one sentence: 0 when
-the call failed, nothing was recorded, no recipe was recorded, a note records
-a count, or a note overwrites or duplicates a filed name; otherwise the
-fraction of recipes whose SQL fragment is copied from the query that ran and
-carries more than a bare table or function name. It used to be six weighted terms. Two of them, `census`
-and `names`, were 1.00 for every candidate in every run, so in practice the
-search compared grounding against prompt length, and the committed winner led
-by 0.0004. A count in a note and an overwritten name are failures rather than
+The score is one number per case:
+
+  The share of recipes whose SQL fragment is copied from the query that ran.
+  A fragment that is only a table or function name does not count as copied.
+  0 when the call failed or nothing was recorded.
+  0 when no recipe was recorded.
+  0 when a note records a count or a percentage.
+  0 when a note takes a name already filed, or two notes share a name.
+
+It used to be six weighted terms. Two of them, `census` and `names`, were 1.00
+for every candidate in every run, so in practice the search compared grounding
+against prompt length, and the committed winner led by 0.0004. A count in a note and an overwritten name are failures rather than
 preferences, so they are gates here, and the invariant probes check them again
 on every candidate that survives.
 
@@ -47,12 +51,13 @@ CLAIM_LIMIT = 200
 def score(r: Replayed) -> Score:
     """One case, one candidate.
 
-    Five things score the case 0: the call failed, nothing was recorded, no
-    recipe was recorded, a note records a count, or a note overwrites or
-    duplicates a filed name. Otherwise the case scores the fraction of its
-    recipes whose SQL fragment is copied from the query that ran and carries
-    more than a bare table or function name. The no-recipe case is
-    `_grounding` returning 0, not a gate of its own.
+    The case scores the share of its recipes whose SQL fragment is copied
+    from the query that ran. A fragment that is only a table or function name
+    does not count as copied. The case scores 0 when the call failed, when
+    nothing was recorded, when no recipe was recorded, when a note records a
+    count or a percentage, or when a note takes a name already filed or two
+    notes share a name. The no-recipe case is `_grounding` returning 0, not a
+    gate of its own.
 
     The empty-extraction gate comes before the other two because census and
     names are both satisfied when nothing was recorded, so without it a prompt

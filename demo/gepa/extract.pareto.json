@@ -1,6 +1,6 @@
 {
   "target": "extract",
-  "score": "0 when the call failed, nothing was recorded, no recipe was recorded, a note records a count, or a note overwrites or duplicates a filed name; otherwise the fraction of recipes whose SQL fragment is copied from the query that ran and carries more than a bare table or function name.",
+  "score": "The share of recipes whose SQL fragment is copied from the query that ran.\nA fragment that is only a table or function name does not count as copied.\n0 when the call failed or nothing was recorded.\n0 when no recipe was recorded.\n0 when a note records a count or a percentage.\n0 when a note takes a name already filed, or two notes share a name.",
   "examples": [
     "what was our total revenue?",
     "what order statuses exist, and how many orders have each?",

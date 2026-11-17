@@ -21,9 +21,9 @@ means, SCORES is the table with the examples numbered under it, and FINALISTS
 is how each eligible candidate opens. An overfit run's file adds HELD OUT
 between the last two.
 
-stdout, deliberately: this is a display. The search's stdout is the promoted
-text, which is why its table went to stderr. Colour when stdout is a
-terminal, none when it is a pipe; click decides.
+stdout, deliberately: this is a display, and the search itself prints
+nothing there. Colour when stdout is a terminal, none when it is a pipe;
+click decides.
 """
 
 from __future__ import annotations

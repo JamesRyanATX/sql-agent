@@ -50,7 +50,7 @@ class Outcome:
 
 def say(message: str = "", **kwargs) -> None:
     """Narration. Every print in this package goes through one of these, so
-    stdout stays the artifact."""
+    all of it is on stderr, where the transcript reads it."""
     click.secho(message, err=True, **kwargs)
 
 

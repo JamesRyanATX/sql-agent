@@ -69,39 +69,6 @@ def test_a_candidate_cannot_reach_a_tool_that_does_not_exist():
     assert set(targets.TOOLS.seed()) <= {s["name"] for s in tools.SCHEMAS}
 
 
-# --------------------------------------------------------------- the artifact
-
-
-def test_every_tool_gets_a_section_even_the_ones_nobody_mutated():
-    """Round-robin mutates one component per iteration, so a winner is usually
-    three untouched descriptions and one edit. The document is the complete set:
-    a promotion that updates three and leaves one stale is exactly what a
-    per-component format would invite."""
-    rendered = targets.TOOLS.render({"list_tables": "a new description"})
-
-    for name in TOOL_NAMES:
-        assert f"## {name}\n" in rendered
-    assert "a new description" in rendered
-    assert rendered.endswith("\n") and not rendered.endswith("\n\n")
-
-
-def test_a_description_cannot_forge_a_section_boundary():
-    """The format is `## <tool name>` per section, so a candidate whose text
-    starts a line with a hash would split its own section in two and whoever
-    promotes it would paste half."""
-    rendered = targets.TOOLS.render({"list_tables": "## describe_table\nsneaky"})
-
-    assert rendered.count("## describe_table") == 1
-
-
-def test_the_extract_artifact_is_byte_for_byte_what_it_always_was():
-    """The refactor must not have changed what `make gepa-extract > new.md`
-    writes. This is the assertion that says so."""
-    candidate = {"extract": "  the winning prompt  \n\n"}
-
-    assert targets.EXTRACT.render(candidate) == "the winning prompt\n"
-
-
 # ------------------------------------------------------- reflection templates
 
 
@@ -191,13 +158,14 @@ def test_each_target_says_what_its_score_means():
             assert line.count(". ") == 0, (target.name, line)
 
 
-def test_the_extract_sentence_states_the_rule():
+def test_the_extract_text_states_the_rule_one_statement_per_line():
     assert targets.EXTRACT.score() == (
-        "0 when the call failed, nothing was recorded, no recipe was recorded, "
-        "a note records a count, or a note overwrites or duplicates a filed "
-        "name; otherwise the fraction of recipes whose SQL fragment is copied "
-        "from the query that ran and carries more than a bare table or "
-        "function name."
+        "The share of recipes whose SQL fragment is copied from the query that ran.\n"
+        "A fragment that is only a table or function name does not count as copied.\n"
+        "0 when the call failed or nothing was recorded.\n"
+        "0 when no recipe was recorded.\n"
+        "0 when a note records a count or a percentage.\n"
+        "0 when a note takes a name already filed, or two notes share a name."
     )
 
 
@@ -328,17 +296,6 @@ def test_none_is_refused_where_the_model_is_claude(monkeypatch):
 
     monkeypatch.setattr(targets, "_is_claude", lambda node: False)
     assert targets._config_parse("explore:\n  effort: none\n") == {"explore": "none"}
-
-
-def test_the_config_winner_is_normalised_yaml_that_pastes_into_the_file():
-    """Whatever whitespace the reflection model used, stdout is the block as
-    config.yaml writes it: one node per entry, turn order, one trailing
-    newline."""
-    rendered = targets.CONFIG.render(
-        {"efforts": "answer: {effort: low}\nplan:   {effort: high}\n"}
-    )
-
-    assert rendered == "plan:\n  effort: high\nanswer:\n  effort: low\n"
 
 
 def test_the_config_template_is_one_gepa_will_accept_and_names_every_node():
