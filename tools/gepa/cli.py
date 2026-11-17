@@ -303,10 +303,8 @@ def _run(
         _overfit_fits(cases, overfit)
     else:
         trainset, valset = _split(cases, val_fraction, seed)
-        say(
-            f"split: {len(trainset)} train / {len(valset)} val, budget "
-            f"{budget} calls{_steps(iterations)}"
-        )
+        say(f"examples: {len(valset)}")
+        say(f"budget: {budget} calls{_steps(iterations)}")
         _not_too_thin(trainset)
         _budget_covers(budget, valset)
 

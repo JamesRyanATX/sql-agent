@@ -559,7 +559,7 @@ def test_a_run_prints_the_harvest_and_the_split_and_nothing_else_before_it_asks(
     result = CliRunner().invoke(gepa.cli, ["tools", "--yes"])
 
     assert result.exit_code == 0
-    assert "split: " in result.stderr and "budget 180 calls" in result.stderr
+    assert "examples: " in result.stderr and "budget: 180 calls" in result.stderr
     for gone in ("rollouts at roughly", "components ", "proposals ", "memory off"):
         assert gone not in result.stderr, gone
 
@@ -854,7 +854,7 @@ def test_a_run_leaves_its_whole_stderr_beside_the_front(a_run, tmp_path):
 
     assert result.exit_code == 0, result.stderr
     kept = (tmp_path / "extract.run.txt").read_text()
-    assert "split: " in kept, "the run's own narration"
+    assert "examples: " in kept, "the run's own narration"
     assert "candidate 1" in kept, "the gate's verdict"
     assert "chars ->" in kept, "the diff's summary line"
     assert kept.strip() == result.stderr.strip(), "the terminal's text, nothing more"
@@ -891,7 +891,7 @@ def test_iterations_reaches_the_search(a_run, monkeypatch):
     seen, result = search_kwargs(monkeypatch, ["extract", "--iterations", "2"])
 
     assert seen["iterations"] == 2
-    assert "budget 150 calls, 2 iterations" in result.stderr
+    assert "budget: 150 calls, 2 iterations" in result.stderr
 
 
 def test_iterations_means_that_many_more_whatever_the_state_says():
