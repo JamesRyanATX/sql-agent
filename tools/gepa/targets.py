@@ -176,7 +176,7 @@ def _extract_corpus(*, days: int, resume: bool, verbose: bool) -> list[Any]:
     else:
         say(
             f"harvest: {len(harvested.cases)} cases from {harvested.seen} "
-            f"recorded extract calls (-v for what was dropped)"
+            f"recorded extract calls"
         )
     if not harvested.cases:
         raise click.ClickException(
@@ -313,7 +313,7 @@ def _turn_corpus(name: str, *, days: int, resume: bool, verbose: bool) -> list[A
     else:
         say(
             f"harvest: {len(harvested.cases)} cases from {harvested.seen} "
-            f"recorded turns (-v for what was dropped)"
+            f"recorded turns"
         )
     if not harvested.cases:
         raise click.ClickException(

@@ -1048,10 +1048,7 @@ def test_from_says_which_text_the_search_started_from(a_run, monkeypatch, short_
 
     result = CliRunner().invoke(gepa.cli, ["extract", "--from", str(short_file)])
 
-    assert (
-        f"seed: {short_file}, {len(SHORT):,} chars, in place of the working "
-        f"text's {len(a_run):,}"
-    ) in result.stderr
+    assert f"seed: {short_file}, {len(SHORT):,} chars" in result.stderr
     assert f"seed: {short_file}" in (gepa.OUT / "extract.run.txt").read_text()
 
 

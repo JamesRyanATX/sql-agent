@@ -229,10 +229,7 @@ def cli(
             # Inside the recording, so the transcript says which text the
             # search started from.
             text = next(iter(seed_candidate.values()))
-            say(
-                f"seed: {seed_from}, {len(text):,} chars, in place of the "
-                f"working text's {sum(len(t) for t in working.values()):,}"
-            )
+            say(f"seed: {seed_from}, {len(text):,} chars")
         _run(
             chosen, seed_candidate, run=run, verbose=verbose, budget=budget,
             val_fraction=val_fraction, seed=seed, resume=resume, days=days,
